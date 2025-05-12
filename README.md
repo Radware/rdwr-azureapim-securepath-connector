@@ -50,7 +50,7 @@ The primary goal of this APIM policy is to integrate Radware's Cloud WAAP capabi
 - A Radware SecurePath (Cloud WAAP) endpoint properly configured with desired security policies (WAF, API Security, Bot Management, etc.).
 - The necessary credentials and endpoint details from your Radware setup (endpoint address, port, App ID, API Key).
 - Backend API services deployed and ready to be fronted by APIM.
-- Appropriate CA certificates (Root and/or Intermediate) for your Radware SecurePath endpoint uploaded to the APIM instance's "CA certificates" store if Radware uses a private CA or a CA not in APIM's default trust store. This is critical for resolving SSL handshake errors if APIM does not inherently trust Radware's SSL certificate.
+- **You must upload the provided `root.cer` and `intermediate.cer` files (bundled in this repository) to the CA certificates store in your Azure APIM instance.** This is required if Radware uses a private CA or a CA not in APIM's default trust store. Uploading these certificates is critical for resolving SSL handshake errors and ensuring APIM can trust Radware's SSL certificate.
 
 ---
 
