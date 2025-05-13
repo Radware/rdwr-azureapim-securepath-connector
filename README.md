@@ -141,3 +141,12 @@ The following Named Values must be configured in your Azure API Management insta
 
 ---
 
+## Limitations
+
+- **SecurePath Bot Manager features are not implemented in this connector.**
+  - The connector will not act upon a Bot Manager redirect.
+  - It will not inject bot-related cookies to the user.
+  - It will not inject the Bot Manager JavaScript, even if Bot Manager is active in the Cloud WAAP portal.
+
+---
+
