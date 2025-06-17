@@ -155,6 +155,9 @@
                 <send-request mode="new" response-variable-name="radwareResponse" timeout="@((int)context.Variables["rdwrAppEpTimeout"])" ignore-error="false">
                     <set-url>@($"{((string)context.Variables["urlScheme"])}://{((string)context.Variables["urlHost"])}:{((int)context.Variables["urlPortValue"])}{((string)context.Variables["urlPathAndQueryToUse"])}")</set-url>
                     <set-method>@(context.Request.Method)</set-method>
+                    <set-header name="Host" exists-action="override">
+                        <value>@(context.Request.Url.Host)</value>
+                    </set-header>
                     <set-header name="X-Rdwr-App-Id" exists-action="override">
                         <value>@((string)context.Variables["rdwrAppId"])</value>
                     </set-header>
