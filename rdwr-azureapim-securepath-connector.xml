@@ -77,7 +77,6 @@
             <when condition="@( !((bool)context.Variables["shouldBypassRadware"]) )">
                 <set-variable name="radwareReqBody" value="" />
                 <set-variable name="radwareContentLength" value="0" />
-                <!-- This was '0' as string, should be long for consistency: @(0L) -->
                 <set-variable name="setPartialBodyHeader" value="@(false)" />
                 <set-variable name="origContentLengthStr" value="@(context.Request.Headers.GetValueOrDefault("Content-Length", default(string[]))?.FirstOrDefault())" />
                 <set-variable name="origTransferEncoding" value="@(context.Request.Headers.GetValueOrDefault("Transfer-Encoding", default(string[]))?.FirstOrDefault()?.ToLower() ?? "")" />
@@ -87,7 +86,6 @@
                     <when condition="@(!string.IsNullOrEmpty((string)context.Variables["origContentLengthStr"]))">
                         <set-variable name="origContentLength" value="@(long.Parse((string)context.Variables["origContentLengthStr"]))" />
                         <choose>
-                            <!-- FIX APPLIED IN THE CONDITION BELOW -->
                             <when condition="@(context.Variables.GetValueOrDefault("origContentLength", 0L) > 0 && context.Variables.GetValueOrDefault("origContentLength", 0L) <= context.Variables.GetValueOrDefault("rdwrBodyMaxSize", long.MaxValue))">
                                 <set-variable name="readBodyFlag" value="@(true)" />
                             </when>
@@ -116,12 +114,10 @@
                         <set-variable name="currentBody" value="@(context.Request.Body.As<string>(preserveContent: true) ?? "")" />
                         <set-variable name="currentBodyLength" value="@(((string)context.Variables["currentBody"]).Length)" />
                         <choose>
-                            <!-- FIX APPLIED IN THE CONDITION BELOW -->
                             <when condition="@(context.Variables.GetValueOrDefault("currentBodyLength", 0) > context.Variables.GetValueOrDefault("rdwrBodyMaxSize", long.MaxValue))">
                                 <set-variable name="radwareReqBody" value="" />
                                 <set-variable name="radwareContentLength" value="@(0L)" />
                             </when>
-                            <!-- FIX APPLIED IN THE CONDITION BELOW -->
                             <when condition="@(context.Variables.GetValueOrDefault("currentBodyLength", 0) > context.Variables.GetValueOrDefault("rdwrPartialBodySize", long.MaxValue))">
                                 <set-variable name="radwareReqBody" value="@(((string)context.Variables["currentBody"]).Substring(0, (int)context.Variables.GetValueOrDefault("rdwrPartialBodySize", 0L)))" />
                                 <set-variable name="radwareContentLength" value="@(context.Variables.GetValueOrDefault("rdwrPartialBodySize", 0L))" />
@@ -129,13 +125,11 @@
                             </when>
                             <otherwise>
                                 <set-variable name="radwareReqBody" value="@((string)context.Variables["currentBody"])" />
-                                <!-- FIX APPLIED IN THE ASSIGNMENT BELOW -->
                                 <set-variable name="radwareContentLength" value="@((long)context.Variables.GetValueOrDefault("currentBodyLength", 0))" />
                             </otherwise>
                         </choose>
                     </when>
                 </choose>
-                <!-- Determine Client IP to send to Radware -->
                 <set-variable name="clientIpToSend" value="@(context.Request.IpAddress)" />
                 <set-variable name="configuredHeaderNameForClientIp" value="@((string)context.Variables.GetValueOrDefault("rdwrTrueClientIpHeaderNameFromNV", "##DISABLED##"))" />
                 <choose>
@@ -152,9 +146,8 @@
                 <set-variable name="urlHost" value="@((string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", "localhost"))" />
                 <set-variable name="urlPortValue" value="@(context.Variables.GetValueOrDefault("rdwrAppEpPort", 443))" />
                 <set-variable name="urlPathAndQueryToUse" value="@(context.Request.OriginalUrl.Path + (string.IsNullOrEmpty(context.Request.OriginalUrl.QueryString) ? "" : context.Request.OriginalUrl.QueryString))" />
-                <send-request mode="new" response-variable-name="radwareResponse" timeout="@((int)context.Variables["rdwrAppEpTimeout"])" ignore-error="false">
+                <send-request mode="copy" response-variable-name="radwareResponse" timeout="@((int)context.Variables["rdwrAppEpTimeout"])" ignore-error="false">
                     <set-url>@($"{((string)context.Variables["urlScheme"])}://{((string)context.Variables["urlHost"])}:{((int)context.Variables["urlPortValue"])}{((string)context.Variables["urlPathAndQueryToUse"])}")</set-url>
-                    <set-method>@(context.Request.Method)</set-method>
                     <set-header name="Host" exists-action="override">
                         <value>@(context.Request.OriginalUrl.Host)</value>
                     </set-header>
