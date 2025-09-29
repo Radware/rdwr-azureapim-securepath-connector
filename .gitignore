@@ -1,0 +1,10 @@
+# Developer-only validation toolkit
+tests/
+
+# Local CA bundles
+ZscalerRootCA.pem
+zscaler-intermediate.pem
+zscaler-keychain.pem
+
+# Python cache
+__pycache__/
