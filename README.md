@@ -2,13 +2,39 @@
 
 This document describes an Azure API Management (APIM) policy designed to integrate with a Radware SecurePath (Cloud WAAP) endpoint. The policy acts as a connector, sending incoming API requests to the Radware endpoint for security inspection before allowing them to proceed to the backend service.
 
-**Current Version:** 1.0.0 
+**Current Version:** 1.1.0  
+
+---
+
+## Changelog (since 1.0.0)
+- 1.1.0: Added optional Inline Bypass Mode for hybrid architectures (inline WAAP + APIM sideband).
+- Added two optional Named Values:
+  - `rdwr-inline-trusted-sources` (comma IP / CIDR list)
+  - `rdwr-inline-headers-enabled` ("true"/"false")
+- Added reserved header enforcement skip when inline bypass active.
+- Added diagnostics variable `radwareDiag` documentation.
+- Documentation of partial body, static bypass precedence, and security hardening.
 
 ---
 
 ## Purpose
 
 The primary goal of this APIM policy is to integrate Radware's Cloud WAAP capabilities—including cutting-edge API security, discovery, and business logic attack protection, coupled with WAF protection and other advanced features—through Radware's SecurePath architecture. SecurePath allows for out-of-path integration, in this case, leveraging Azure API Management (APIM) as the enforcement point. This policy enables APIM to act as the connector, ensuring that API traffic is vetted by Radware before reaching backend services.
+
+---
+
+## Quick Start
+
+1. **Create the required Named Values** listed in the tables below (Radware endpoint, credentials, request-body thresholds, bypass controls). Secrets such as `rdwr-api-key` should be stored as secret Named Values.
+2. **Import the policy** from `rdwr-azureapim-securepath-connector.xml` into the *All operations* inbound pipeline of the APIM API that fronts your protected backend. The file is ready to paste into the policy editor.
+3. **Configure backend routing per operation** (e.g., `<set-backend-service>` and `<rewrite-uri>` at the operation level) so that APIM forwards allowed requests to the correct upstream service.
+4. **Verify connectivity** between APIM and the Radware SecurePath endpoint (outbound TCP 443/80 as appropriate) and confirm APIM trusts the Radware certificate chain.
+5. **Exercise the API** using your preferred client (curl/Postman/APIM test console) to ensure:
+   - Allowed requests reach the backend and return expected responses.
+   - Blocked scenarios return Radware’s action response (403/redirect/etc.).
+   - Optional bypass controls behave as intended (static assets, inline bypass).
+
+The remainder of this document provides the detailed configuration reference for these steps.
 
 ---
 
@@ -42,15 +68,83 @@ The primary goal of this APIM policy is to integrate Radware's Cloud WAAP capabi
 - **Configuration via Named Values:**  
   All key parameters (Radware endpoint details, API keys, thresholds, feature flags) are managed via APIM Named Values for easy configuration without modifying the policy XML directly.
 
+- **Reserved / Forbidden Header Enforcement (with Inline Bypass Awareness):**  
+  Blocks requests that contain any of these headers (case-insensitive) unless inline bypass criteria were met earlier:
+  `X-Rdwr-App-Id`, `X-Rdwr-Api-Key`, `X-Rdwr-Connector-Ip`, `X-Rdwr-Partial-Body`, `X-Rdwr-Cdn-Ip`, `X-Rdwr-Ip`.
+
+- **Inline Bypass Mode (NEW):**  
+  Allows traffic already inspected by an inline Radware WAAP (public edge) to safely bypass sideband inspection in APIM, avoiding double scanning while preserving protection for internal / direct traffic.
+
+- **Fail-Open Strategy (Clarified):**  
+  Only specific 200 responses with a non-`allowed` decision produce a 403. Almost all non-200 statuses from SecurePath (including 403, 5xx, 301/302) result in pass-through to the backend (availability bias).
+
 ---
 
-## Prerequisites
+## Radware Response Handling (Updated Logic Summary)
 
-- An Azure API Management instance (Developer tier or higher is recommended for full feature support including static IP if needed for whitelisting by Radware. The Consumption tier does not support uploading custom CA certificates for backend validation).
-- A Radware SecurePath (Cloud WAAP) endpoint properly configured with desired security policies (WAF, API Security, Bot Management, etc.).
-- The necessary credentials and endpoint details from your Radware setup (endpoint address, port, App ID, API Key).
-- Backend API services deployed and ready to be fronted by APIM.
-- **You must upload the provided `root.cer` and `intermediate.cer` files (bundled in this repository) to the CA certificates store in your Azure APIM instance.** This is required if Radware uses a private CA or a CA not in APIM's default trust store. Uploading these certificates is critical for resolving SSL handshake errors and ensuring APIM can trust Radware's SSL certificate.
+| SecurePath Response Pattern | Policy Action | Notes |
+|-----------------------------|---------------|-------|
+| 200 + `x-rdwr-oop-request-status: allowed` | Allow | Normal success |
+| 200 + NOT allowed + `uzmcr` header present | Allow (fail-open) | Explicit pass-through override |
+| 200 + NOT allowed + JSON body (`Content-Type: application/json...`) | 403 returned with that JSON body | Treated as explicit block |
+| 200 + NOT allowed + Non-JSON | 403 with static HTML block page | Fallback block |
+| 301 / 302 (any reason) | Allow (fail-open) | `radwareDiag=redirect_received_fallthrough` |
+| Any other status (403, 4xx, 5xx, etc.) | Allow (fail-open) | `radwareDiag=non200_status_fallthrough` |
+| Timeout / no response / network error | Allow (fail-open) | `radwareDiag=sideband_error_or_timeout` |
+
+This differs from 1.0.0 documentation which implied non-200 blocks—now explicitly fail-open unless a block is conveyed via the 200 decision path.
+
+---
+
+## Inline Bypass Mode (Hybrid Deployment)  (NEW)
+
+### When to Use
+You run both:
+1. Public ingress -> Inline Radware WAAP -> APIM -> Backend  
+2. Internal / partner / east-west -> APIM -> Backend  
+
+You want to avoid re-inspecting flow (1) while still inspecting flow (2).
+
+### How It Works
+The policy computes `isInlineBypass` before reserved header enforcement. If true, it sets `shouldBypassRadware=true`:
+- Skips reserved header 403 enforcement for Radware headers legitimately injected inline.
+- Skips the entire sideband (no body processing, no send-request call).
+- Static bypass logic runs later but is irrelevant once `shouldBypassRadware` is already true.
+
+### Decision Inputs
+1. Presence (existence only) of a 5-header signature (case-insensitive):
+   - `X-Rdwr-Ip`
+   - `X-Rdwr-Port`
+   - `X-Rdwr-Port-MM-Orig-FE-Port`
+   - `X-Rdwr-Port-MM`
+   - `X-Rdwr-App-Id`
+2. Client socket IP matches any entry in `rdwr-inline-trusted-sources` (single IP or CIDR v4/v6).
+
+### Configuration Matrix
+
+| Headers Enabled? (`rdwr-inline-headers-enabled`) | IP List Configured? (`rdwr-inline-trusted-sources`) | Bypass Requires |
+|--------------------------------------------------|-----------------------------------------------------|-----------------|
+| Yes                                              | Yes                                                 | BOTH signature + IP match |
+| Yes                                              | No (empty)                                          | Signature only |
+| No                                               | Yes                                                 | IP match only |
+| No                                               | No                                                  | Never bypass |
+
+### Steps to Enable
+1. Create NV: `rdwr-inline-trusted-sources` (e.g. `203.0.113.10, 198.51.100.0/24`).
+2. Create NV: `rdwr-inline-headers-enabled` = `true`.
+3. In policy: comment out the hardcoded:
+   - `<set-variable name="trustedInlineSourcesCfg" value="" />`
+   - `<set-variable name="inlineHeadersEnabledStr" value="false" />`
+4. Uncomment the NV-based lines immediately below them.
+5. Save & test:
+   - Inline path request (with headers + trusted IP) => `shouldBypassRadware=true`.
+   - Internal request (no headers or IP mismatch) => sideband executed.
+
+### Security Considerations
+- Header presence is not authenticated—never rely on headers alone if an attacker could inject them.
+- Always prefer combining headers + IP list.
+- Keep IP ranges minimal (only egress addresses of inline WAAP).
+- Monitor bypass ratio; spikes may indicate spoof attempts.
 
 ---
 
@@ -66,17 +160,33 @@ The following Named Values must be configured in your Azure API Management insta
 | `rdwr-app-ep-timeout-seconds`          | 10                                            | Timeout in seconds for requests to the Radware endpoint.                                                      | No     |
 | `rdwr-app-id`                          | your-radware-app-guid                         | Your Radware Application ID.                                                                                  | No     |
 | `rdwr-api-key`                         | your-radware-api-key                          | Your Radware API Key.                                                                                         | Yes    |
-| `rdwr-true-client-ip-header`           | X-Forwarded-For<br>OR<br>##DISABLED##         | Header name to find the true client IP. Set to the specific string `##DISABLED##` to default to `context.Request.IpAddress`. | No     |
-| `rdwr-body-max-size-bytes`             | 100000                                        | Maximum request body size (in bytes) to process and send to Radware.                                          | No     |
-| `rdwr-partial-body-size-bytes`         | 10240                                         | If body exceeds this (but not max size), send only this many bytes (partial body).                            | No     |
-| `static-extensions-enabled`             | true                                          | Enable or disable static content bypass (`true` or `false`).                                                  | No     |
-| `static-list-of-methods-not-to-inspect`| GET,HEAD                                      | Comma-separated list of HTTP methods to consider for static bypass.                                           | No     |
-| `static-list-of-bypassed-extensions`    | png,jpg,jpeg,gif,css,js,ico                   | Comma-separated list of file extensions to bypass if method matches.                                          | No     |
-| `static-inspect-if-query-string-exists` | true                                          | If true, static bypass is overridden if a query string exists on the request (`true` or `false`).             | No     |
-| `chunked-request-allowed-content-types` | application/json,application/x-www-form-urlencoded | Comma-separated list of Content-Types for which to read the body if the request is chunked.               | No     |
-| `plugin-info`                          | azure-apim-radware-v1.0.0                     | Informational string for the plugin version/type.                                                             | No     |
+| `rdwr-true-client-ip-header`           | X-Forwarded-For / ##DISABLED##                | Header for true client IP or literal `##DISABLED##`.                                                          | No     |
+| `rdwr-body-max-size-bytes`             | 100000                                        | Max body size to read.                                                                                        | No     |
+| `rdwr-partial-body-size-bytes`         | 10240                                         | Partial body threshold.                                                                                       | No     |
+| `static-extensions-enabled`            | true                                          | Enable static bypass tier.                                                                                    | No     |
+| `static-list-of-methods-not-to-inspect`| GET,HEAD                                      | Candidate methods for static bypass.                                                                          | No     |
+| `static-list-of-bypassed-extensions`   | png,jpg,css,js                                 | Candidate extensions (no dots).                                                                               | No     |
+| `static-inspect-if-query-string-exists`| true                                          | Force inspect despite static bypass when query present.                                                       | No     |
+| `chunked-request-allowed-content-types`| application/json,text/plain                   | Allowed content types (exact match) for reading chunked bodies.                                               | No     |
+| `plugin-version-info`                  | azure-apim-radware-v1.1.0                     | Free-form identifier included in the `X-Rdwr-Plugin-Info` header.                                             | No     |
+| `rdwr-inline-trusted-sources` (NEW)    | 203.0.113.10, 198.51.100.0/24                 | Inline WAAP egress IP/CIDR allow list. Empty = not configured.                                                | No     |
+| `rdwr-inline-headers-enabled` (NEW)    | true                                          | Enable evaluation of inline header signature.                                                                 | No     |
 
-> **Note:** For Named Values that are boolean flags (e.g., `rdwr-app-ep-ssl`, `static-extensions-enabled`), their values should be the strings `"true"` or `"false"` as they will be parsed by `bool.Parse()` in the policy.
+> IMPORTANT: If both new inline NVs are absent, policy behavior = legacy 1.0.0 (no inline bypass).
+
+---
+
+## Operational Diagnostics (NEW)
+
+Trace variables of interest:
+- `shouldBypassRadware` (final bypass flag)
+- `isInlineBypass` (raw inline evaluation result)
+- `radwareDiag` (empty on allow) values:
+  - `sideband_error_or_timeout`
+  - `redirect_received_fallthrough`
+  - `non200_status_fallthrough`
+- `setPartialBodyHeader` (true if partial truncation sent)
+- `currentBodyLength`, `radwareReqBody` (when body read)
 
 ---
 
@@ -122,6 +232,26 @@ The following Named Values must be configured in your Azure API Management insta
 - Check logs in your Radware SecurePath dashboard for corresponding entries.
 - Check logs in your backend application (e.g., Azure Function logs in Application Insights).
 
+### Additional Inline Bypass Tests
+1. Baseline (no NVs) -> Confirm sideband executes.
+2. Enable only `rdwr-inline-headers-enabled=true` (no IP list):
+   - Request with all 5 headers -> bypass.
+   - Missing one header -> no bypass.
+3. Enable only `rdwr-inline-trusted-sources`:
+   - Match IP -> bypass.
+   - Non-match -> inspect.
+4. Enable both:
+   - Headers + IP => bypass.
+   - Headers only => inspect.
+   - IP only => inspect.
+5. Reserved header enforcement:
+   - Inject `X-Rdwr-App-Id` from non-bypass source -> 403.
+   - Same from bypass source -> allowed.
+
+### Response Logic Verification
+- Force SecurePath to return explicit block JSON (expect 403 JSON).
+- Force non-200 (e.g., simulate 403) -> backend still reached (`radwareDiag=non200_status_fallthrough`).
+
 ---
 
 ## Troubleshooting
@@ -139,6 +269,14 @@ The following Named Values must be configured in your Azure API Management insta
 - **Incorrect Client IP Sent to Radware:**  
   Verify the `rdwr-true-client-ip-header` Named Value setting. If active, ensure the specified header is present in incoming requests. Check the `X-Rdwr-Connector-Ip` header in the request sent to Radware via APIM trace.
 
+### Inline Bypass Specific
+| Symptom | Cause | Action |
+|---------|-------|--------|
+| Expected bypass but inspected | Missing one header or IP not in list | Validate signature + IP list |
+| Unexpected bypass | Headers spoofed & no IP list | Add / tighten `rdwr-inline-trusted-sources` |
+| Reserved header 403 during inline test | Inline logic not triggered | Check `isInlineBypass` in trace |
+| Many `sideband_error_or_timeout` | Endpoint latency / timeout too low | Adjust `rdwr-app-ep-timeout-seconds` |
+
 ---
 
 ## Limitations
@@ -147,6 +285,23 @@ The following Named Values must be configured in your Azure API Management insta
   - The connector will not act upon a Bot Manager redirect.
   - It will not inject bot-related cookies to the user.
   - It will not inject the Bot Manager JavaScript, even if Bot Manager is active in the Cloud WAAP portal.
+- Double inspection avoidance relies on accurate network source IP classification.
 
 ---
 
+## Security Hardening (Supplemental)
+- Prefer dual condition (headers + IP list) in production.
+- Keep timeout low for resilience (availability bias).
+
+
+---
+
+## Upgrade (1.0.0 -> 1.1.0)
+1. Deploy updated policy XML (already contains inline scaffolding with safe defaults).
+2. Validate no behavior change (bypass variables still hardcoded empty/false).
+3. Introduce `rdwr-inline-trusted-sources`.
+4. Introduce `rdwr-inline-headers-enabled=true`.
+5. Switch from hardcoded lines to NV references (uncomment / comment as directed).
+6. Trace & confirm `shouldBypassRadware` only true for intended flows.
+
+---
