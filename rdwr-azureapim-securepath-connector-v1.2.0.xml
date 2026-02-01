@@ -1,0 +1,892 @@
+<policies>
+  <inbound>
+    <base />
+
+    <!-- ====== Configuration ====== -->
+    <set-variable name="rdwrAppEpAddr" value="{{rdwr-app-ep-addr}}" />
+    <set-variable name="rdwrAppEpPort" value="@(int.Parse("{{rdwr-app-ep-port}}"))" />
+    <set-variable name="rdwrAppEpSsl" value="@(bool.Parse("{{rdwr-app-ep-ssl}}"))" />
+    <set-variable name="rdwrAppEpTimeout" value="@(int.Parse("{{rdwr-app-ep-timeout-seconds}}"))" />
+    <set-variable name="rdwrAppId" value="{{rdwr-app-id}}" />
+    <set-variable name="rdwrApiKey" value="{{rdwr-api-key}}" />
+    <set-variable name="rdwrTrueClientIpHeaderNameFromNV" value="{{rdwr-true-client-ip-header}}" />
+    <set-variable name="rdwrBodyMaxSize" value="@(long.Parse("{{rdwr-body-max-size-bytes}}"))" />
+    <set-variable name="rdwrPartialBodySize" value="@(long.Parse("{{rdwr-partial-body-size-bytes}}"))" />
+    <set-variable name="rdwrMultipartMaxSize" value="@(long.Parse("{{rdwr-multipart-max-size-bytes}}"))" />
+    <set-variable name="staticExtensionsEnabled" value="@(bool.Parse("{{static-extensions-enabled}}"))" />
+    <set-variable name="staticMethodsNoInspect" value="{{static-list-of-methods-not-to-inspect}}" />
+    <set-variable name="staticBypassedExts" value="{{static-list-of-bypassed-extensions}}" />
+    <set-variable name="staticInspectWithQuery" value="@(bool.Parse("{{static-inspect-if-query-string-exists}}"))" />
+    <set-variable name="chunkedAllowedTypes" value="{{chunked-request-allowed-content-types}}" />
+    <set-variable name="pluginInfo" value="{{plugin-version-info}}" />
+    <set-variable name="rdwrBotManagerEnabledStr" value="{{rdwr-bot-manager-enabled}}" />
+    <set-variable name="rdwrBotManagerEnabled" value="@{
+      var s = (string)context.Variables.GetValueOrDefault("rdwrBotManagerEnabledStr", "");
+      bool b;
+      if (bool.TryParse(s, out b)) { return b; } else { return false; }
+    }" />
+
+    <!-- ====== Inline-bypass knobs ======
+         Using Named Values by default.
+         DISABLE TOKENS (case-insensitive): "", "-", "disabled", "off", "false", "none", "~", "##DISABLED##"
+         If you prefer inline literals, uncomment the two inline lines and comment the NV lines. -->
+    <set-variable name="trustedInlineSourcesCfg" value="{{rdwr-inline-trusted-sources}}" />
+    <set-variable name="inlineHeadersEnabledStr" value="{{rdwr-inline-headers-enabled}}" />
+    <!-- Inline literal fallbacks (commented by default):
+    <set-variable name="trustedInlineSourcesCfg" value="" />
+    <set-variable name="inlineHeadersEnabledStr" value="false" />
+    -->
+
+    <!-- sanity: required NV present -->
+    <choose>
+      <when condition="@(string.IsNullOrEmpty((string)context.Variables["rdwrAppId"]) || string.IsNullOrEmpty((string)context.Variables["rdwrApiKey"]) || string.IsNullOrEmpty((string)context.Variables["rdwrAppEpAddr"]))">
+        <return-response>
+          <set-status code="500" reason="Configuration Error" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{ "error": "InternalConfigurationError", "message": "Security provider configuration is incomplete." }</set-body>
+        </return-response>
+      </when>
+    </choose>
+
+    <!-- ====== Initialize bypass flag ====== -->
+    <set-variable name="shouldBypassRadware" value="@(false)" />
+
+    <!-- ====== Parse 'inline headers enabled' safely ====== -->
+    <set-variable name="inlineHeadersEnabled" value="@{
+      var s = (string)context.Variables.GetValueOrDefault("inlineHeadersEnabledStr", "");
+      bool b;
+      if (bool.TryParse(s, out b)) { return b; } else { return false; }
+    }" />
+
+    <!-- ====== Check presence of inline header signature (existence only, case-insensitive) ====== -->
+    <set-variable name="hasInlineHeaderSignature" value="@{
+      bool h1 = false, h2 = false, h3 = false, h4 = false, h5 = false;
+      foreach (var kv in context.Request.Headers)
+      {
+        var k = (kv.Key ?? "").ToLower();
+        if (k == "x-rdwr-ip") { h1 = true; }
+        else if (k == "x-rdwr-port") { h2 = true; }
+        else if (k == "x-rdwr-port-mm-orig-fe-port") { h3 = true; }
+        else if (k == "x-rdwr-port-mm") { h4 = true; }
+        else if (k == "x-rdwr-app-id") { h5 = true; }
+      }
+      return h1 && h2 && h3 && h4 && h5;
+    }" />
+
+    <!-- ====== IP allow-list (CIDR + single IPs). True if client socket IP matches. ====== -->
+    <set-variable name="isTrustedInlineSource" value="@{
+      try
+      {
+        string rawCfg = (string)context.Variables.GetValueOrDefault("trustedInlineSourcesCfg", "");
+        string cfg = (rawCfg ?? "").Trim();
+        string lc = cfg.ToLower();
+        // treat common tokens as DISABLED
+        if (string.IsNullOrWhiteSpace(cfg) || lc == "-" || lc == "disabled" || lc == "off" || lc == "false" || lc == "none" || lc == "~" || lc == "##disabled##")
+        {
+          return false;
+        }
+
+        string clientIpStr = context.Request.IpAddress;
+        if (string.IsNullOrEmpty(clientIpStr)) { return false; }
+
+        System.Net.IPAddress clientIp;
+        if (!System.Net.IPAddress.TryParse(clientIpStr, out clientIp)) { return false; }
+
+        bool anyMatch = false;
+        string[] tokens = cfg.Split(',');
+        foreach (string raw in tokens)
+        {
+          string token = (raw ?? "").Trim();
+          if (token.Length == 0)
+          {
+            // skip
+          }
+          else if (token.Contains("/"))
+          {
+            string[] parts = token.Split('/');
+            if (parts.Length == 2)
+            {
+              System.Net.IPAddress netIp;
+              int prefix;
+              bool ok1 = System.Net.IPAddress.TryParse(parts[0].Trim(), out netIp);
+              bool ok2 = int.TryParse(parts[1].Trim(), out prefix);
+              if (ok1 && ok2)
+              {
+                int maxPrefix = (netIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork) ? 32 : 128;
+                if (prefix >= 0 && prefix <= maxPrefix)
+                {
+                  byte[] ipBytes  = clientIp.GetAddressBytes();
+                  byte[] netBytes = netIp.GetAddressBytes();
+
+                  /* Families must match (no MapToIPv6 in APIM expressions) */
+                  if (ipBytes.Length == netBytes.Length)
+                  {
+                    int fullBytes = prefix / 8;
+                    int remBits   = prefix % 8;
+
+                    bool match = true;
+                    for (int i = 0; i < fullBytes; i++)
+                    {
+                      if (ipBytes[i] != netBytes[i]) { match = false; break; }
+                    }
+
+                    if (match && remBits > 0)
+                    {
+                      int idx = fullBytes;
+                      byte mask = (byte)(0xFF << (8 - remBits));
+                      if ((ipBytes[idx] & mask) != (netBytes[idx] & mask)) { match = false; }
+                    }
+
+                    if (match) { anyMatch = true; }
+                  }
+                }
+              }
+            }
+          }
+          else
+          {
+            System.Net.IPAddress single;
+            if (System.Net.IPAddress.TryParse(token, out single))
+            {
+              if (clientIp.Equals(single)) { anyMatch = true; }
+            }
+          }
+        }
+
+        return anyMatch;
+      }
+      catch
+      {
+        return false;
+      }
+    }" />
+
+    <!-- Track whether an IP list is configured at all -->
+    <set-variable name="ipListConfigured" value="@{
+      string rawCfg = (string)context.Variables.GetValueOrDefault("trustedInlineSourcesCfg", "");
+      string cfg = (rawCfg ?? "").Trim();
+      string lc = cfg.ToLower();
+      if (string.IsNullOrWhiteSpace(cfg) || lc == "-" || lc == "disabled" || lc == "off" || lc == "false" || lc == "none" || lc == "~" || lc == "##disabled##")
+      {
+        return false;
+      }
+      else
+      {
+        return true;
+      }
+    }" />
+
+    <!-- ====== Combine logic for inline bypass ====== -->
+    <set-variable name="isInlineBypass" value="@{
+      bool headersEnabled = (bool)context.Variables.GetValueOrDefault("inlineHeadersEnabled", false);
+      bool ipConfigured   = (bool)context.Variables.GetValueOrDefault("ipListConfigured", false);
+      bool ipMatch        = (bool)context.Variables.GetValueOrDefault("isTrustedInlineSource", false);
+      bool headersMatch   = (bool)context.Variables.GetValueOrDefault("hasInlineHeaderSignature", false);
+
+      if (headersEnabled && ipConfigured)
+      {
+        return headersMatch && ipMatch;
+      }
+      else if (headersEnabled && !ipConfigured)
+      {
+        return headersMatch;
+      }
+      else if (!headersEnabled && ipConfigured)
+      {
+        return ipMatch;
+      }
+      else
+      {
+        return false;
+      }
+    }" />
+
+    <!-- If inline bypass criteria met, set bypass before any reserved-header enforcement -->
+    <choose>
+      <when condition="@(context.Variables.GetValueOrDefault("isInlineBypass", false))">
+        <set-variable name="shouldBypassRadware" value="@(true)" />
+      </when>
+    </choose>
+
+    <!-- ====== Reserved-header enforcement (enumerated; plugin-info allowed) ====== -->
+    <set-variable name="hasReservedHeader" value="@{
+      bool found = false;
+      foreach (var kv in context.Request.Headers)
+      {
+        var k = (kv.Key ?? "").ToLower();
+        if (k == "x-rdwr-app-id" || k == "x-rdwr-api-key" || k == "x-rdwr-connector-ip" ||
+            k == "x-rdwr-partial-body" || k == "x-rdwr-cdn-ip" || k == "x-rdwr-ip")
+        {
+          found = true; break;
+        }
+      }
+      return found;
+    }" />
+
+    <!-- Skip this block when inline bypass is active -->
+    <choose>
+      <when condition="@(!context.Variables.GetValueOrDefault("isInlineBypass", false) && context.Variables.GetValueOrDefault("hasReservedHeader", false))">
+        <return-response>
+          <set-status code="403" reason="Forbidden" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{ "error": "ForbiddenHeader", "message": "Reserved Radware header present." }</set-body>
+        </return-response>
+      </when>
+    </choose>
+
+    <!-- ====== Static bypass (Tier-1) ====== -->
+    <choose>
+      <when condition="@(context.Variables.GetValueOrDefault("staticExtensionsEnabled", false))">
+        <set-variable name="reqPathForExt" value="@(context.Request.Url.Path.ToLower())" />
+        <set-variable name="reqMethod" value="@(context.Request.Method.ToUpper())" />
+        <set-variable name="reqQuery" value="@(context.Request.Url.QueryString)" />
+        <set-variable name="fileExt" value="@{
+          string path = (string)context.Variables.GetValueOrDefault("reqPathForExt","");
+          string extension = "";
+          if (!string.IsNullOrEmpty(path))
+          {
+            int lastDot = path.LastIndexOf('.');
+            if (lastDot != -1 && lastDot < path.Length - 1)
+            {
+              extension = path.Substring(lastDot + 1);
+            }
+          }
+          return extension;
+        }" />
+
+        <!-- isBypassCandidateMethod (no LINQ .Contains) -->
+        <set-variable name="isBypassCandidateMethod" value="@{
+          string list = ((string)context.Variables.GetValueOrDefault("staticMethodsNoInspect","")).ToUpper();
+          string method = (string)context.Variables.GetValueOrDefault("reqMethod","");
+          bool found = false;
+          foreach (var raw in list.Split(','))
+          {
+            string t = (raw ?? "").Trim();
+            if (t == method) { found = true; break; }
+          }
+          return found;
+        }" />
+
+        <!-- isBypassCandidateExtension (no LINQ .Contains) -->
+        <set-variable name="isBypassCandidateExtension" value="@{
+          string list = ((string)context.Variables.GetValueOrDefault("staticBypassedExts","")).ToLower();
+          string ext  = (string)context.Variables.GetValueOrDefault("fileExt","");
+          bool found = false;
+          if (!string.IsNullOrEmpty(ext))
+          {
+            foreach (var raw in list.Split(','))
+            {
+              string t = (raw ?? "").Trim();
+              if (t == ext) { found = true; break; }
+            }
+          }
+          return found;
+        }" />
+
+        <choose>
+          <when condition="@(context.Variables.GetValueOrDefault("isBypassCandidateMethod", false) && context.Variables.GetValueOrDefault("isBypassCandidateExtension", false))">
+            <choose>
+              <when condition="@(context.Variables.GetValueOrDefault("staticInspectWithQuery", false) && !string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("reqQuery","")))">
+                <!-- query forces inspection; no change -->
+              </when>
+              <otherwise>
+                <set-variable name="shouldBypassRadware" value="@(true)" />
+              </otherwise>
+            </choose>
+          </when>
+        </choose>
+      </when>
+    </choose>
+
+    <!-- ====== Tier-1 path (no-bypass) ====== -->
+    <choose>
+      <when condition="@( !((bool)context.Variables["shouldBypassRadware"]) )">
+
+        <!-- Body gating / partial-body (byte-accurate, raw bytes) -->
+        <set-variable name="radwareReqBodyBytes" value="@(new byte[0])" />
+        <set-variable name="radwareOverrideBody" value="@(false)" />
+        <set-variable name="radwareReqBodyLengthBytes" value="@(0L)" />
+        <set-variable name="setPartialBodyHeader" value="@(false)" />
+        <set-variable name="multipartHeadersOnly" value="@(false)" />
+        <set-variable name="origContentLengthStr" value="@(context.Request.Headers.GetValueOrDefault("Content-Length", default(string[]))?.FirstOrDefault())" />
+        <set-variable name="origTransferEncoding" value="@(context.Request.Headers.GetValueOrDefault("Transfer-Encoding", default(string[]))?.FirstOrDefault()?.ToLower() ?? "")" />
+        <set-variable name="origContentType" value="@(context.Request.Headers.GetValueOrDefault("Content-Type", default(string[]))?.FirstOrDefault() ?? "")" />
+        <set-variable name="origContentEncoding" value="@(context.Request.Headers.GetValueOrDefault("Content-Encoding", default(string[]))?.FirstOrDefault()?.ToLower() ?? "")" />
+        <set-variable name="readBodyFlag" value="@(false)" />
+        <set-variable name="isMultipart" value="@{
+          string ct = (string)context.Variables.GetValueOrDefault("origContentType", "");
+          return !string.IsNullOrEmpty(ct) && ct.ToLower().StartsWith("multipart/");
+        }" />
+        <set-variable name="gzipHeadersOnly" value="@{
+          string ce = (string)context.Variables.GetValueOrDefault("origContentEncoding", "");
+          return !string.IsNullOrEmpty(ce) && ce.Contains("gzip");
+        }" />
+
+        <choose>
+          <!-- Gzip content-encoding: headers-only to sideband (cannot forward body reliably) -->
+          <when condition="@((bool)context.Variables.GetValueOrDefault("gzipHeadersOnly", false))">
+            <set-variable name="radwareOverrideBody" value="@(true)" />
+            <set-variable name="radwareReqBodyBytes" value="@(new byte[0])" />
+            <set-variable name="radwareReqBodyLengthBytes" value="@(0L)" />
+            <set-variable name="radwareDiag" value="@("gzip_headers_only")" />
+          </when>
+          <!-- Multipart is treated as opaque: skip partial reads -->
+          <when condition="@((bool)context.Variables.GetValueOrDefault("isMultipart", false))">
+            <set-variable name="readBodyFlag" value="@(false)" />
+            <set-variable name="multipartContentLength" value="@{
+              string lenStr = (string)context.Variables.GetValueOrDefault("origContentLengthStr", "");
+              long parsed;
+              if (!string.IsNullOrEmpty(lenStr) && long.TryParse(lenStr, out parsed))
+              {
+                return parsed;
+              }
+              return -1L;
+            }" />
+            <choose>
+              <when condition="@((long)context.Variables.GetValueOrDefault("multipartContentLength", -1L) > context.Variables.GetValueOrDefault("rdwrMultipartMaxSize", long.MaxValue))">
+                <!-- Too large multipart: send headers only to sideband -->
+                <set-variable name="radwareOverrideBody" value="@(true)" />
+                <set-variable name="multipartHeadersOnly" value="@(true)" />
+                <set-variable name="radwareReqBodyBytes" value="@(new byte[0])" />
+                <set-variable name="radwareReqBodyLengthBytes" value="@(0L)" />
+              </when>
+              <when condition="@(((string)context.Variables.GetValueOrDefault("origTransferEncoding", "")).ToLower() == "chunked")">
+                <!-- Unknown size multipart with chunked TE: avoid buffering entire body -->
+                <set-variable name="radwareOverrideBody" value="@(true)" />
+                <set-variable name="multipartHeadersOnly" value="@(true)" />
+                <set-variable name="radwareReqBodyBytes" value="@(new byte[0])" />
+                <set-variable name="radwareReqBodyLengthBytes" value="@(0L)" />
+              </when>
+            </choose>
+          </when>
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables["origContentLengthStr"]))">
+            <set-variable name="origContentLength" value="@(long.Parse((string)context.Variables["origContentLengthStr"]))" />
+            <choose>
+              <when condition="@(context.Variables.GetValueOrDefault("origContentLength", 0L) > 0 && context.Variables.GetValueOrDefault("origContentLength", 0L) <= context.Variables.GetValueOrDefault("rdwrBodyMaxSize", long.MaxValue))">
+                <set-variable name="readBodyFlag" value="@(true)" />
+              </when>
+            </choose>
+          </when>
+          <when condition="@(((string)context.Variables["origTransferEncoding"]) == "chunked")">
+            <set-variable name="contentTypeShort" value="@{
+              string ct = (string)context.Variables["origContentType"];
+              string result = ""; 
+              if (!string.IsNullOrEmpty(ct))
+              {
+                int idx = ct.IndexOf(';');
+                result = (idx == -1 ? ct : ct.Substring(0, idx)).Trim().ToLower();
+              }
+              return result;
+            }" />
+            <set-variable name="chunkedAllowed" value="@{
+              string list = ((string)context.Variables.GetValueOrDefault("chunkedAllowedTypes","")).ToLower();
+              string ct   = (string)context.Variables.GetValueOrDefault("contentTypeShort","");
+              bool ok = false;
+              foreach (var raw in list.Split(','))
+              {
+                string t = (raw ?? "").Trim();
+                if (t == ct) { ok = true; break; }
+              }
+              return ok;
+            }" />
+            <choose>
+              <when condition="@(context.Variables.GetValueOrDefault("chunkedAllowed", false))">
+                <set-variable name="readBodyFlag" value="@(true)" />
+              </when>
+              <otherwise>
+                <!-- disallow chunked content types not on allowlist -->
+                <set-variable name="radwareOverrideBody" value="@(true)" />
+                <set-variable name="radwareReqBodyBytes" value="@(new byte[0])" />
+                <set-variable name="radwareReqBodyLengthBytes" value="@(0L)" />
+              </otherwise>
+            </choose>
+          </when>
+        </choose>
+
+        <choose>
+          <when condition="@(context.Variables.GetValueOrDefault("readBodyFlag", false))">
+            <set-variable name="currentBodyBytes" value="@(context.Request.Body.As<byte[]>(preserveContent: true) ?? new byte[0])" />
+            <set-variable name="currentBodyLength" value="@((long)((byte[])context.Variables.GetValueOrDefault("currentBodyBytes", new byte[0])).LongLength)" />
+            <set-variable name="radwareOverrideBody" value="@(true)" />
+            <choose>
+              <when condition="@(context.Variables.GetValueOrDefault("currentBodyLength", 0L) > context.Variables.GetValueOrDefault("rdwrBodyMaxSize", long.MaxValue))">
+                <set-variable name="radwareReqBodyBytes" value="@(new byte[0])" />
+                <set-variable name="radwareReqBodyLengthBytes" value="@(0L)" />
+              </when>
+              <when condition="@(context.Variables.GetValueOrDefault("currentBodyLength", 0L) > context.Variables.GetValueOrDefault("rdwrPartialBodySize", long.MaxValue))">
+                <set-variable name="radwareReqBodyBytes" value="@{
+                  byte[] bytes = (byte[])context.Variables.GetValueOrDefault("currentBodyBytes", new byte[0]);
+                  long limit = (long)context.Variables.GetValueOrDefault("rdwrPartialBodySize", 0L);
+                  int take = (int)Math.Min(bytes.LongLength, limit);
+                  byte[] truncated = new byte[take];
+                  for (int i = 0; i < take; i++) { truncated[i] = bytes[i]; }
+                  return truncated;
+                }" />
+                <set-variable name="setPartialBodyHeader" value="@(true)" />
+                <set-variable name="radwareReqBodyLengthBytes" value="@(Math.Min((long)((byte[])context.Variables.GetValueOrDefault("currentBodyBytes", new byte[0])).LongLength, (long)context.Variables.GetValueOrDefault("rdwrPartialBodySize", 0L)))" />
+              </when>
+              <otherwise>
+                <set-variable name="radwareReqBodyBytes" value="@((byte[])context.Variables.GetValueOrDefault("currentBodyBytes", new byte[0]))" />
+                <set-variable name="radwareReqBodyLengthBytes" value="@((long)((byte[])context.Variables.GetValueOrDefault("currentBodyBytes", new byte[0])).LongLength)" />
+              </otherwise>
+            </choose>
+          </when>
+        </choose>
+
+        <!-- mark diag if multipart headers-only path selected -->
+        <choose>
+          <when condition="@((bool)context.Variables.GetValueOrDefault("multipartHeadersOnly", false))">
+            <set-variable name="radwareDiag" value="@("multipart_headers_only")" />
+          </when>
+        </choose>
+
+        <!-- True client IP selection (optional override via NV) -->
+        <set-variable name="clientIpToSend" value="@(context.Request.IpAddress)" />
+        <set-variable name="configuredHeaderNameForClientIp" value="@((string)context.Variables.GetValueOrDefault("rdwrTrueClientIpHeaderNameFromNV", "##DISABLED##"))" />
+        <choose>
+          <when condition="@(((string)context.Variables["configuredHeaderNameForClientIp"]) != "##DISABLED##" && !string.IsNullOrEmpty((string)context.Variables["configuredHeaderNameForClientIp"]) && context.Request.Headers.ContainsKey((string)context.Variables["configuredHeaderNameForClientIp"]))">
+            <set-variable name="ipFromConfiguredHeader" value="@(context.Request.Headers.GetValueOrDefault((string)context.Variables["configuredHeaderNameForClientIp"], default(string[]))?.FirstOrDefault())" />
+            <choose>
+              <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("ipFromConfiguredHeader", "")))">
+                <set-variable name="clientIpToSend" value="@((string)context.Variables["ipFromConfiguredHeader"])" />
+              </when>
+            </choose>
+          </when>
+        </choose>
+
+        <!-- Build sideband URL -->
+        <set-variable name="urlScheme" value="@(context.Variables.GetValueOrDefault("rdwrAppEpSsl", true) ? "https" : "http")" />
+        <set-variable name="urlHost" value="@((string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", "localhost"))" />
+        <set-variable name="urlPortValue" value="@(context.Variables.GetValueOrDefault("rdwrAppEpPort", 443))" />
+        <set-variable name="urlPathAndQueryToUse" value="@{
+          var path = context.Request.OriginalUrl.Path ?? "";
+          var idx = path.IndexOf(";rev=");
+          if (idx >= 0)
+          {
+            var slashIdx = path.IndexOf("/", idx);
+            if (slashIdx >= 0)
+            {
+              path = path.Substring(0, idx) + path.Substring(slashIdx);
+            }
+            else
+            {
+              path = path.Substring(0, idx);
+            }
+          }
+          var qs = context.Request.OriginalUrl.QueryString;
+          return path + (string.IsNullOrEmpty(qs) ? "" : qs);
+        }" />
+
+        <!-- ====== Call SecurePath (ignore-error: fail-open by policy) -->
+        <choose>
+          <when condition="@((bool)context.Variables.GetValueOrDefault("radwareOverrideBody", false))">
+            <send-request mode="copy" response-variable-name="radwareResponse" timeout="@((int)context.Variables["rdwrAppEpTimeout"])" ignore-error="true">
+              <set-url>@($"{((string)context.Variables["urlScheme"])}://{((string)context.Variables["urlHost"])}:{((int)context.Variables["urlPortValue"])}{((string)context.Variables["urlPathAndQueryToUse"])}")</set-url>
+              <set-header name="Host" exists-action="override">
+                <value>@(context.Request.OriginalUrl.Host)</value>
+              </set-header>
+              <set-header name="Expect" exists-action="delete" />
+              <set-header name="X-Rdwr-App-Id" exists-action="override">
+                <value>@((string)context.Variables["rdwrAppId"])</value>
+              </set-header>
+              <set-header name="X-Rdwr-Api-Key" exists-action="override">
+                <value>@((string)context.Variables["rdwrApiKey"])</value>
+              </set-header>
+              <set-header name="X-Rdwr-Connector-Ip" exists-action="override">
+                <value>@((string)context.Variables["clientIpToSend"])</value>
+              </set-header>
+              <set-header name="X-Rdwr-Connector-Port" exists-action="override">
+                <value>@(context.Request.OriginalUrl.Port.ToString())</value>
+              </set-header>
+              <set-header name="X-Rdwr-Connector-Scheme" exists-action="override">
+                <value>@(context.Request.OriginalUrl.Scheme)</value>
+              </set-header>
+              <set-header name="X-Rdwr-Plugin-Info" exists-action="override">
+                <value>@((string)context.Variables["pluginInfo"])</value>
+              </set-header>
+              <set-header name="X-Rdwr-Partial-Body" exists-action="override">
+                <value>@(((bool)context.Variables.GetValueOrDefault("setPartialBodyHeader", false)).ToString().ToLower())</value>
+              </set-header>
+              <set-body>@((byte[])context.Variables["radwareReqBodyBytes"])</set-body>
+            </send-request>
+          </when>
+          <otherwise>
+            <send-request mode="copy" response-variable-name="radwareResponse" timeout="@((int)context.Variables["rdwrAppEpTimeout"])" ignore-error="true">
+              <set-url>@($"{((string)context.Variables["urlScheme"])}://{((string)context.Variables["urlHost"])}:{((int)context.Variables["urlPortValue"])}{((string)context.Variables["urlPathAndQueryToUse"])}")</set-url>
+              <set-header name="Host" exists-action="override">
+                <value>@(context.Request.OriginalUrl.Host)</value>
+              </set-header>
+              <set-header name="Expect" exists-action="delete" />
+              <set-header name="X-Rdwr-App-Id" exists-action="override">
+                <value>@((string)context.Variables["rdwrAppId"])</value>
+              </set-header>
+              <set-header name="X-Rdwr-Api-Key" exists-action="override">
+                <value>@((string)context.Variables["rdwrApiKey"])</value>
+              </set-header>
+              <set-header name="X-Rdwr-Connector-Ip" exists-action="override">
+                <value>@((string)context.Variables["clientIpToSend"])</value>
+              </set-header>
+              <set-header name="X-Rdwr-Connector-Port" exists-action="override">
+                <value>@(context.Request.OriginalUrl.Port.ToString())</value>
+              </set-header>
+              <set-header name="X-Rdwr-Connector-Scheme" exists-action="override">
+                <value>@(context.Request.OriginalUrl.Scheme)</value>
+              </set-header>
+              <set-header name="X-Rdwr-Plugin-Info" exists-action="override">
+                <value>@((string)context.Variables["pluginInfo"])</value>
+              </set-header>
+              <set-header name="X-Rdwr-Partial-Body" exists-action="override">
+                <value>@(((bool)context.Variables.GetValueOrDefault("setPartialBodyHeader", false)).ToString().ToLower())</value>
+              </set-header>
+            </send-request>
+          </otherwise>
+        </choose>
+
+        <!-- ====== Verdict handling (Tier-1) ====== -->
+        <choose>
+          <when condition="@(!context.Variables.ContainsKey("radwareDiag"))">
+            <set-variable name="radwareDiag" value="@(string.Empty)" />
+          </when>
+        </choose>
+          <choose>
+            <when condition="@(!context.Variables.ContainsKey("radwareResponse") || context.Variables["radwareResponse"] == null)">
+            <set-variable name="radwareDiag" value="@("sideband_error_or_timeout")" />
+            </when>
+            <otherwise>
+            <set-variable name="rwStatus" value="@(((IResponse)context.Variables["radwareResponse"]).StatusCode)" />
+            <set-variable name="oopRequestStatusHeader" value="@(((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("x-rdwr-oop-request-status", default(string[]))?.FirstOrDefault()?.ToLower() ?? "")" />
+            <set-variable name="radwareLocationHeader" value="@(((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("Location", default(string[]))?.FirstOrDefault() ?? "")" />
+            <set-variable name="radwareCt" value="@(((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("Content-Type", default(string[]))?.FirstOrDefault()?.ToLower() ?? "")" />
+            <set-variable name="uzmcrHeaderPresent" value="@{
+              var headers = ((IResponse)context.Variables["radwareResponse"]).Headers;
+              foreach (var kv in headers)
+              {
+                var k = (kv.Key ?? "").ToLower();
+                if (k == "uzmcr") { return true; }
+              }
+              return false;
+            }" />
+            <set-variable name="bmHeaderSourcePresent" value="@{
+              return context.Variables.ContainsKey("radwareResponse") && context.Variables["radwareResponse"] != null;
+            }" />
+            <set-variable name="bmSetCookie0" value="@{
+              if (!(bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false)) { return ""; }
+              if (!context.Variables.ContainsKey("radwareResponse") || context.Variables["radwareResponse"] == null) { return ""; }
+              var headers = ((IResponse)context.Variables["radwareResponse"]).Headers;
+              var setCookies = headers.GetValueOrDefault("Set-Cookie", default(string[]));
+              if (setCookies == null) { return ""; }
+              var list = new System.Collections.Generic.List<string>();
+              foreach (var c in setCookies)
+              {
+                var lc = (c ?? "").ToLower();
+                if (lc.Contains("__uzm") || lc.Contains("uzmcr") || lc.Contains("trkevent")) { list.Add(c); }
+              }
+              return list.Count > 0 ? list[0] : "";
+            }" />
+            <set-variable name="bmSetCookie1" value="@{
+              if (!(bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false)) { return ""; }
+              if (!context.Variables.ContainsKey("radwareResponse") || context.Variables["radwareResponse"] == null) { return ""; }
+              var headers = ((IResponse)context.Variables["radwareResponse"]).Headers;
+              var setCookies = headers.GetValueOrDefault("Set-Cookie", default(string[]));
+              if (setCookies == null) { return ""; }
+              var list = new System.Collections.Generic.List<string>();
+              foreach (var c in setCookies)
+              {
+                var lc = (c ?? "").ToLower();
+                if (lc.Contains("__uzm") || lc.Contains("uzmcr") || lc.Contains("trkevent")) { list.Add(c); }
+              }
+              return list.Count > 1 ? list[1] : "";
+            }" />
+            <set-variable name="bmSetCookie2" value="@{
+              if (!(bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false)) { return ""; }
+              if (!context.Variables.ContainsKey("radwareResponse") || context.Variables["radwareResponse"] == null) { return ""; }
+              var headers = ((IResponse)context.Variables["radwareResponse"]).Headers;
+              var setCookies = headers.GetValueOrDefault("Set-Cookie", default(string[]));
+              if (setCookies == null) { return ""; }
+              var list = new System.Collections.Generic.List<string>();
+              foreach (var c in setCookies)
+              {
+                var lc = (c ?? "").ToLower();
+                if (lc.Contains("__uzm") || lc.Contains("uzmcr") || lc.Contains("trkevent")) { list.Add(c); }
+              }
+              return list.Count > 2 ? list[2] : "";
+            }" />
+            <set-variable name="bmShieldSquareHeader0" value="@{
+              if (!(bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false)) { return ""; }
+              if (!context.Variables.ContainsKey("radwareResponse") || context.Variables["radwareResponse"] == null) { return ""; }
+              var headers = ((IResponse)context.Variables["radwareResponse"]).Headers;
+              var h = headers.GetValueOrDefault("shieldsquare-response", default(string[]));
+              if (h == null || h.Length < 1) { return ""; }
+              return h[0] ?? "";
+            }" />
+            <set-variable name="bmUzmcrHeader0" value="@{
+              if (!(bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false)) { return ""; }
+              if (!context.Variables.ContainsKey("radwareResponse") || context.Variables["radwareResponse"] == null) { return ""; }
+              var headers = ((IResponse)context.Variables["radwareResponse"]).Headers;
+              var h = headers.GetValueOrDefault("uzmcr", default(string[]));
+              if (h == null || h.Length < 1) { return ""; }
+              return h[0] ?? "";
+            }" />
+
+            <choose>
+              <!-- 200 OK verdicts -->
+              <when condition="@((int)context.Variables["rwStatus"] == 200)">
+                <choose>
+                  <!-- JSON block from SecurePath -> map to 403 -->
+                  <when condition="@(((string)context.Variables["radwareCt"]).StartsWith("application/json"))">
+                    <return-response>
+                      <set-status code="403" reason="Forbidden" />
+                      <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie0", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie1", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie2", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="shieldsquare-response" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmShieldSquareHeader0", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="uzmcr" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-body>@(((IResponse)context.Variables["radwareResponse"]).Body.As<string>())</set-body>
+                    </return-response>
+                  </when>
+                  <!-- Allowed explicitly -->
+                  <when condition="@((string)context.Variables["oopRequestStatusHeader"] == "allowed")" />
+                  <!-- Bot Manager mobile exception: allow if uzmcr header present -->
+                  <when condition="@((bool)context.Variables.GetValueOrDefault("uzmcrHeaderPresent", false))">
+                    <set-variable name="radwareDiag" value="@("uzmcr_allow")" />
+                  </when>
+                  <!-- implicit block -->
+                  <otherwise>
+                    <return-response>
+                      <set-status code="403" reason="Forbidden" />
+                      <set-header name="Content-Type" exists-action="override">
+                        <value>text/html</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie0", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie1", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie2", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="shieldsquare-response" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmShieldSquareHeader0", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="uzmcr" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-body><![CDATA[
+<html><head><title>Request Blocked</title></head>
+<body><h1>Request Blocked</h1><p>Your request was denied.</p></body></html>
+                      ]]></set-body>
+                    </return-response>
+                  </otherwise>
+                </choose>
+              </when>
+
+              <!-- 301/302 handling (Bot Manager redirects) -->
+              <when condition="@((int)context.Variables["rwStatus"] == 301 || (int)context.Variables["rwStatus"] == 302)">
+                <set-variable name="isWrongApiKeyRedirect" value="@{
+                  string loc = ((string)context.Variables.GetValueOrDefault("radwareLocationHeader","")) ?? "";
+                  return loc.ToLower().Contains("wrong-api-key.oop.radwarecloud.com");
+                }" />
+                <choose>
+                  <when condition="@((bool)context.Variables.GetValueOrDefault("isWrongApiKeyRedirect", false))">
+                    <set-variable name="radwareDiag" value="@("wrong_api_key_redirect")" />
+                    <!-- fail-open -->
+                  </when>
+                  <otherwise>
+                    <set-variable name="radwareDiag" value="@($"redirect_issued_{(int)context.Variables["rwStatus"]}")" />
+                    <return-response>
+                      <set-status code="@((int)context.Variables["rwStatus"])" reason="Redirect" />
+                      <set-header name="Location" exists-action="override">
+                        <value>@((string)context.Variables["radwareLocationHeader"])</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie0", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie1", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie2", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="shieldsquare-response" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmShieldSquareHeader0", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="uzmcr" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                    </return-response>
+                  </otherwise>
+                </choose>
+              </when>
+
+              <!-- Any other status: enforce Radware action -->
+              <otherwise>
+                <set-variable name="radwareDiag" value="@($"action_enforced_status_{(int)context.Variables["rwStatus"]}")" />
+                <return-response>
+                  <set-status code="@((int)context.Variables["rwStatus"])" reason="RadwareAction" />
+                  <set-header name="Content-Type" exists-action="override">
+                    <value>@((string)context.Variables["radwareCt"])</value>
+                  </set-header>
+                  <set-header name="Set-Cookie" exists-action="append">
+                    <value>@{
+                      var v = (string)context.Variables.GetValueOrDefault("bmSetCookie0", "");
+                      return string.IsNullOrEmpty(v) ? null : v;
+                    }</value>
+                  </set-header>
+                  <set-header name="Set-Cookie" exists-action="append">
+                    <value>@{
+                      var v = (string)context.Variables.GetValueOrDefault("bmSetCookie1", "");
+                      return string.IsNullOrEmpty(v) ? null : v;
+                    }</value>
+                  </set-header>
+                  <set-header name="Set-Cookie" exists-action="append">
+                    <value>@{
+                      var v = (string)context.Variables.GetValueOrDefault("bmSetCookie2", "");
+                      return string.IsNullOrEmpty(v) ? null : v;
+                    }</value>
+                  </set-header>
+                  <set-header name="shieldsquare-response" exists-action="append">
+                    <value>@{
+                      var v = (string)context.Variables.GetValueOrDefault("bmShieldSquareHeader0", "");
+                      return string.IsNullOrEmpty(v) ? null : v;
+                    }</value>
+                  </set-header>
+                  <set-header name="uzmcr" exists-action="append">
+                    <value>@{
+                      var v = (string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", "");
+                      return string.IsNullOrEmpty(v) ? null : v;
+                    }</value>
+                  </set-header>
+                  <set-body>@(((IResponse)context.Variables["radwareResponse"]).Body.As<string>())</set-body>
+                </return-response>
+              </otherwise>
+            </choose>
+          </otherwise>
+        </choose>
+
+        <!-- Propagate diagnostics to backend for observability -->
+        <choose>
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("radwareDiag", "")))">
+            <set-header name="X-Rdwr-Diag" exists-action="override">
+              <value>@((string)context.Variables["radwareDiag"])</value>
+            </set-header>
+          </when>
+        </choose>
+
+      </when>
+    </choose>
+  </inbound>
+
+  <backend>
+    <base />
+  </backend>
+
+  <outbound>
+    <base />
+    <choose>
+      <when condition="@((bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false))">
+        <choose>
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmSetCookie0", "")))">
+            <set-header name="Set-Cookie" exists-action="append">
+              <value>@((string)context.Variables["bmSetCookie0"])</value>
+            </set-header>
+          </when>
+        </choose>
+        <choose>
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmSetCookie1", "")))">
+            <set-header name="Set-Cookie" exists-action="append">
+              <value>@((string)context.Variables["bmSetCookie1"])</value>
+            </set-header>
+          </when>
+        </choose>
+        <choose>
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmSetCookie2", "")))">
+            <set-header name="Set-Cookie" exists-action="append">
+              <value>@((string)context.Variables["bmSetCookie2"])</value>
+            </set-header>
+          </when>
+        </choose>
+        <choose>
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmShieldSquareHeader0", "")))">
+            <set-header name="shieldsquare-response" exists-action="append">
+              <value>@((string)context.Variables["bmShieldSquareHeader0"])</value>
+            </set-header>
+          </when>
+        </choose>
+        <choose>
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", "")))">
+            <set-header name="uzmcr" exists-action="append">
+              <value>@((string)context.Variables["bmUzmcrHeader0"])</value>
+            </set-header>
+          </when>
+        </choose>
+      </when>
+    </choose>
+  </outbound>
+
+  <on-error>
+    <base />
+  </on-error>
+</policies>
