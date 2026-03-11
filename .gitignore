@@ -1,0 +1,17 @@
+# Archive (previous versions and dev docs)
+_archive/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local CA bundles
+*.pem
+*.cer
+
+# Python cache
+__pycache__/
+
+# Other connector sources
+rdwr_lambda_connector_v1.2.9/
+rdwr_nginx_connector_v1.0.6/
