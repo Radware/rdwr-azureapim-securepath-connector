@@ -224,7 +224,8 @@
       {
         var k = (kv.Key ?? "").ToLower();
         if (k == "x-rdwr-app-id" || k == "x-rdwr-api-key" || k == "x-rdwr-connector-ip" ||
-            k == "x-rdwr-partial-body" || k == "x-rdwr-cdn-ip" || k == "x-rdwr-ip")
+            k == "x-rdwr-partial-body" || k == "x-rdwr-cdn-ip" || k == "x-rdwr-ip" ||
+            k == "x-rdwr-request-host-b60f5e78-5bc7-4441-aac8-20b1e7cddda5")
         {
           found = true; break;
         }
@@ -1067,7 +1068,7 @@
             <value>log</value>
           </set-header>
           <set-header name="x-rdwr-plugin-info" exists-action="override">
-            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "300-v1.3.0"))</value>
+            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.0"))</value>
           </set-header>
           <set-header name="x-rdwr-app-id" exists-action="override">
             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>

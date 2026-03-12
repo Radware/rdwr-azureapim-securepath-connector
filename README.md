@@ -26,9 +26,9 @@ Client ──> Azure APIM ──> [SecurePath Policy] ──> Backend API
 
 In the **outbound** pipeline, the policy optionally sends a fire-and-forget response-phase log back to SecurePath for analytics correlation.
 
-## Feature Tiers
+## Capabilities
 
-### Tier 1 — Foundational Security
+### Application Protection
 - Full sideband request assembly with all required `x-rdwr-*` headers
 - Verdict enforcement: allow, block (HTML + JSON), 301/302 redirect
 - Fail-open mode (default): traffic flows to backend if SecurePath is unreachable
@@ -40,7 +40,7 @@ In the **outbound** pipeline, the policy optionally sends a fire-and-forget resp
 - Client IP detection via configurable header (e.g., `X-Forwarded-For`)
 - API base path stripping for correct URI forwarding to SecurePath
 
-### Tier 2 — Bot Manager
+### Bot Manager Support
 - Bot Manager cookie propagation (`__uzma`, `__uzmb`, `__uzmc`, `__uzmd`, `__uzmf`, `uzmcr`) on all verdict paths
 - `ShieldSquare-Response` header forwarding
 - `uzmcr` header detection for mobile redirect exception handling
@@ -48,10 +48,10 @@ In the **outbound** pipeline, the policy optionally sends a fire-and-forget resp
 
 > **Note:** APIM cannot perform JavaScript injection into response bodies. This is an inherent platform limitation — XML policies have no response body modification capability. This has minimal practical impact because APIM is an API gateway; traffic is typically JSON/XML consumed by backend services, not HTML rendered in browsers. Bot Manager browser fingerprinting targets `</head>` in browser-rendered HTML, which is not relevant for API consumers.
 
-### Tier 3 — Operational Excellence
-- **v2 Response-Phase Logging**: Fire-and-forget (`send-one-way-request`) POSTs origin response metadata back to SecurePath correlated via `x-rdwr-oop-id` — near-zero client latency
+### Response Logging and Analytics
+- **Response Logging**: Fire-and-forget (`send-one-way-request`) POSTs origin response metadata back to SecurePath correlated via `x-rdwr-oop-id` — near-zero client latency
 - Response body capture with configurable size limits (base64-encoded, mode 3)
-- Always-on when SecurePath returns v2 control headers (no configuration gate needed)
+- Always-on when SecurePath returns control headers (no configuration gate needed)
 
 ## Prerequisites
 
@@ -94,8 +94,8 @@ The policy reads all configuration from APIM [Named Values](https://learn.micros
 | `rdwr-multipart-max-size-bytes` | `100000` | Max multipart form-data body size |
 | `rdwr-true-client-ip-header` | `x-forwarded-for` | Header containing the real client IP |
 | `rdwr-api-base-path` | *(empty)* | API base path to strip from sideband URI (e.g., `/api`) |
-| `rdwr-bot-manager-enabled` | `true` | Enable Bot Manager cookie/header handling |
-| `plugin-version-info` | `azure-apim-radware-v1.3.0` | Plugin version string for sideband |
+| `rdwr-bot-manager-enabled` | `false` | Enable Bot Manager cookie/header handling |
+| `plugin-version-info` | `700-v1.3.0` | Plugin version string for sideband |
 | `static-extensions-enabled` | `true` | Enable static resource bypass |
 | `static-list-of-methods-not-to-inspect` | `GET,HEAD` | HTTP methods for static bypass |
 | `static-list-of-bypassed-extensions` | `png,jpg,css,js,gif,ico,svg,woff,woff2` | Extensions to bypass |
@@ -187,7 +187,7 @@ When `rdwr-bot-manager-enabled` is `true`:
 - `uzmcr` header presence overrides block verdicts for mobile redirect handling
 - BM cookies propagate on ALL verdict paths (allow, block, redirect) — matching NGINX behavior
 
-### v2 Response-Phase Logging
+### Response Logging
 
 The response-phase log fires automatically when SecurePath returns:
 - `x-rdwr-oop-id` — correlation UUID
@@ -213,9 +213,9 @@ The policy sends these headers to SecurePath:
 | `x-rdwr-connector-port` | Always `443` (Azure infrastructure) |
 | `x-rdwr-connector-scheme` | Always `https` (Azure infrastructure forces HTTPS) |
 | `x-rdwr-host` | Original Host header from the client request |
-| `x-rdwr-plugin-info` | Connector version (e.g., `300-v1.3.0`) |
+| `x-rdwr-plugin-info` | Connector version (e.g., `700-v1.3.0`) |
 | `x-rdwr-partial-body` | `true` when body is truncated |
-| `x-rdwr-connector-proto` | `2` in v2 response-phase log |
+| `x-rdwr-connector-proto` | `2` in response-phase log |
 | `x-rdwr-connector-stage` | `request` (sideband) or `log` (response phase) |
 
 ## Security
@@ -264,7 +264,7 @@ Store `rdwr-api-key` as a **secret** Named Value in APIM to prevent exposure in 
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 1.3.0 | 2026-03 | v2 response-phase logging via `send-one-way-request`, partial body size support, multipart body handling, API base path stripping, Bot Manager cookie propagation on all verdict paths, custom block page support, comprehensive Named Values configuration |
+| 1.3.0 | 2026-03 | Response-phase logging via `send-one-way-request`, partial body size support, multipart body handling, API base path stripping, Bot Manager cookie propagation on all verdict paths, custom block page support, comprehensive Named Values configuration |
 | 1.2.0 | 2025-11 | Bot Manager cookie/header handling, reserved header security, static bypass, sideband Host header override for Azure Web Apps |
 | 1.1.0 | 2025-09 | Body handling improvements, chunked request support |
 | 1.0.0 | 2025-05 | Initial release — basic sideband and verdict enforcement |
