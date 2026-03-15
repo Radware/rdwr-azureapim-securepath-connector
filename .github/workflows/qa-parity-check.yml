@@ -6,8 +6,6 @@ name: QA Parity Check
 on:
   pull_request:
     branches: [main, master, develop]
-  push:
-    branches: [main, master]
   workflow_dispatch:
 
 jobs:
