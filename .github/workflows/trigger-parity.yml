@@ -1,34 +1,19 @@
 name: Trigger Parity Check
 
 on:
-  pull_request:
-    branches: [main, master]
   push:
     branches: [main, master]
-  workflow_dispatch:
+  pull_request:
+    branches: [main, master]
 
 jobs:
   trigger-parity:
-    name: Trigger QA Parity Suite
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch parity check to QA Validator
-        run: |
-          gh api repos/Radware/SecurePath-Connector-QA-Validator/dispatches \
-            -f event_type="connector-change" \
-            -f "client_payload[connector]=${{ github.event.repository.name }}" \
-            -f "client_payload[ref]=${{ github.sha }}" \
-            -f "client_payload[pr_number]=${{ github.event.pull_request.number || '' }}" \
-            -f "client_payload[trigger]=${{ github.event_name }}"
-        env:
-          GH_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
-
-      - name: Summary
-        run: |
-          echo "### Parity Check Dispatched" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Connector:** ${{ github.event.repository.name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Ref:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Results: [QA Validator Actions](https://github.com/Radware/SecurePath-Connector-QA-Validator/actions)" >> $GITHUB_STEP_SUMMARY
+      - name: Trigger QA Validator parity suite
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.CROSS_REPO_TOKEN }}
+          repository: Radware/SecurePath-Connector-QA-Validator
+          event-type: parity-check
+          client-payload: '{"connector": "apim", "repo": "${{ github.repository }}", "ref": "${{ github.sha }}", "pr_number": "${{ github.event.pull_request.number || 0 }}"}'
