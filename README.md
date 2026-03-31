@@ -50,6 +50,8 @@ In the **outbound** pipeline, the policy optionally sends a fire-and-forget resp
 
 ### Response Logging and Analytics
 - **Response Logging**: Fire-and-forget (`send-one-way-request`) POSTs origin response metadata back to SecurePath correlated via `x-rdwr-oop-id` — near-zero client latency
+- **Disposition reporting**: `x-rdwr-o2h-rdwr-response` header in response-phase log — `allowed` (request reached origin) or `blocked` (connector blocked/redirected)
+- **v2 log on all verdict paths**: Response-phase log fires on block and redirect verdicts (not just allow), enabling full analytics visibility
 - Response body capture with configurable size limits (base64-encoded, mode 3)
 - Always-on when SecurePath returns control headers (no configuration gate needed)
 
@@ -217,6 +219,7 @@ The policy sends these headers to SecurePath:
 | `x-rdwr-partial-body` | `true` when body is truncated |
 | `x-rdwr-connector-proto` | `2` in response-phase log |
 | `x-rdwr-connector-stage` | `request` (sideband) or `log` (response phase) |
+| `x-rdwr-o2h-rdwr-response` | `allowed` or `blocked` — connector disposition (response-phase log only) |
 
 ## Security
 
@@ -264,6 +267,7 @@ Store `rdwr-api-key` as a **secret** Named Value in APIM to prevent exposure in 
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.3.1 | 2026-03 | Connector disposition header (`x-rdwr-o2h-rdwr-response`), v2 log on block/redirect, large body truncation fix |
 | 1.3.0 | 2026-03 | Response-phase logging via `send-one-way-request`, partial body size support, multipart body handling, API base path stripping, Bot Manager cookie propagation on all verdict paths, custom block page support, comprehensive Named Values configuration |
 | 1.2.0 | 2025-11 | Bot Manager cookie/header handling, reserved header security, static bypass, sideband Host header override for Azure Web Apps |
 | 1.1.0 | 2025-09 | Body handling improvements, chunked request support |

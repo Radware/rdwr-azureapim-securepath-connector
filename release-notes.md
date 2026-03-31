@@ -1,5 +1,33 @@
 # Azure APIM SecurePath Connector Release Notes
 
+## v1.3.1 (2026-03-31)
+
+**Bug fix + analytics enhancement.** Adds connector disposition reporting, response-phase logging on all verdict paths, and fixes large body handling.
+
+### Bug Fixes
+- **Large body truncation**: Requests with Content-Length exceeding `rdwr-body-max-size-bytes` now correctly send an empty body to SecurePath. Previously, the full body was forwarded when Content-Length exceeded the limit (the truncation branch was not reached because the body read was skipped, causing the passthrough branch to copy the full body).
+
+### Features
+- **Connector disposition header**: Response-phase log POST now includes `x-rdwr-o2h-rdwr-response` with value `allowed` (request reached origin) or `blocked` (connector blocked or redirected the request). This enables the SecurePath portal to show which requests actually reached the origin.
+- **v2 response-phase log on block/redirect**: The response-phase log POST now fires on all verdict paths — allow, block, and redirect. Previously, block and redirect verdicts terminated the inbound pipeline before the outbound response-phase log could execute. Fixed by adding `send-one-way-request` blocks in the inbound pipeline before each verdict `return-response`.
+
+### Removed
+- QA test harness headers (`x-qa-correlation-id` passthrough) removed from release build
+
+### Testing & Validation
+- **Deep test suites**: 60 PASS, 5 SKIP (expected platform limitations), 0 FAIL
+  - Keepalive state isolation: 10/10 PASS (3 JS injection skipped — platform limitation)
+  - Error path recovery: 6/6 PASS (1 JS injection skipped)
+  - Sideband integrity: 21/21 PASS (1 partial-body format skipped, 1 Host header infra-only)
+  - Origin integrity: 19/19 PASS
+  - v2 body accumulation: 1/1 PASS
+  - v2 disposition (VD01-VD03): 3/3 PASS — allow=`allowed`, block=`blocked`, redirect=`blocked`
+
+### Deployment
+Same XML policy file (`rdwr-azureapim-securepath-connector-v1.3.xml`). No new Named Values required.
+
+---
+
 ## v1.3.0 (2026-03-12)
 
 **Graduate from beta.** Full alignment with R&D NGINX v1.1.0 reference connector. v2 response-phase support via `send-one-way-request`. Complete sideband assembly with all `x-rdwr-*` headers. Custom block page support. Platform code `400-v1.3.0`.
@@ -55,7 +83,8 @@ Initial beta release. XML policy-based connector with sideband assembly, verdict
 
 | Version | Date | Status | Notes |
 |---------|------|--------|-------|
-| v1.3.0 | 2026-03-12 | **RELEASED** | Graduate from beta; full R&D alignment |
+| v1.3.1 | 2026-03-31 | **RELEASED** | Disposition header, v2 on block, body truncation fix |
+| v1.3.0 | 2026-03-12 | Superseded | Graduate from beta; full R&D alignment |
 | v1.3.0-beta | 2026-02-28 | Deprecated | Initial beta |
 | v1.2.0 | 2026-02-14 | Deprecated | Previous stable (pre-v2 response-phase) |
 | v1.1.0 | 2025-11-30 | EOL | Early release |
