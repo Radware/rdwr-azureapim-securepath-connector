@@ -527,7 +527,7 @@
             <send-request mode="copy" response-variable-name="radwareResponse" timeout="@((int)context.Variables["rdwrAppEpTimeout"])" ignore-error="true">
               <set-url>@($"{((string)context.Variables["urlScheme"])}://{((string)context.Variables["urlHost"])}:{((int)context.Variables["urlPortValue"])}{((string)context.Variables["urlPathAndQueryToUse"])}")</set-url>
               <set-header name="Host" exists-action="override">
-                <value>@((string)context.Variables["urlHost"])</value>
+                <value>@(context.Request.OriginalUrl.Host)</value>
               </set-header>
               <set-header name="X-Rdwr-Host" exists-action="override">
                 <value>@(context.Request.OriginalUrl.Host)</value>
@@ -570,7 +570,7 @@
             <send-request mode="copy" response-variable-name="radwareResponse" timeout="@((int)context.Variables["rdwrAppEpTimeout"])" ignore-error="true">
               <set-url>@($"{((string)context.Variables["urlScheme"])}://{((string)context.Variables["urlHost"])}:{((int)context.Variables["urlPortValue"])}{((string)context.Variables["urlPathAndQueryToUse"])}")</set-url>
               <set-header name="Host" exists-action="override">
-                <value>@((string)context.Variables["urlHost"])</value>
+                <value>@(context.Request.OriginalUrl.Host)</value>
               </set-header>
               <set-header name="X-Rdwr-Host" exists-action="override">
                 <value>@(context.Request.OriginalUrl.Host)</value>
@@ -700,6 +700,13 @@
               return h[0] ?? "";
             }" />
 
+            <!-- Cache SP response body (stream can only be read once) -->
+            <set-variable name="radwareResponseBody" value="@{
+              try {
+                return ((IResponse)context.Variables["radwareResponse"]).Body.As<string>();
+              } catch { return ""; }
+            }" />
+
             <!-- ====== Pre-compute custom block page (if enabled) ====== -->
             <set-variable name="rdwrCustomBlockPageEnabled" value="@(true)" />
             <set-variable name="rdwrRenderedBlockPage" value="@{
@@ -723,7 +730,7 @@
               // Extract transaction ID from SP body
               string transId = "";
               try {
-                string body = ((IResponse)context.Variables["radwareResponse"]).Body.As<string>();
+                string body = (string)context.Variables.GetValueOrDefault("radwareResponseBody", "");
                 if (!string.IsNullOrEmpty(body)) {
                   // Pattern 1: _event_transid='...'
                   int idx = body.IndexOf("_event_transid='");
@@ -794,7 +801,7 @@
                           }</set-url>
                           <set-method>POST</set-method>
                           <set-header name="Host" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", ""))</value>
+                            <value>@(context.Request.OriginalUrl.Host)</value>
                           </set-header>
                           <set-header name="x-rdwr-connector-proto" exists-action="override">
                             <value>2</value>
@@ -803,7 +810,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.0"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.2"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -871,7 +878,7 @@
                           return string.IsNullOrEmpty(v) ? null : v;
                         }</value>
                       </set-header>
-                      <set-body>@(((IResponse)context.Variables["radwareResponse"]).Body.As<string>())</set-body>
+                      <set-body>@((string)context.Variables.GetValueOrDefault("radwareResponseBody", ""))</set-body>
                     </return-response>
                   </when>
                   <!-- Allowed explicitly -->
@@ -900,7 +907,7 @@
                           }</set-url>
                           <set-method>POST</set-method>
                           <set-header name="Host" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", ""))</value>
+                            <value>@(context.Request.OriginalUrl.Host)</value>
                           </set-header>
                           <set-header name="x-rdwr-connector-proto" exists-action="override">
                             <value>2</value>
@@ -909,7 +916,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.0"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.2"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -985,7 +992,7 @@
                         if (enabled) {
                           return (string)context.Variables.GetValueOrDefault("rdwrRenderedBlockPage", "");
                         }
-                        return ((IResponse)context.Variables["radwareResponse"]).Body.As<string>();
+                        return (string)context.Variables.GetValueOrDefault("radwareResponseBody", "");
                       }</set-body>
                     </return-response>
                   </otherwise>
@@ -1023,7 +1030,7 @@
                           }</set-url>
                           <set-method>POST</set-method>
                           <set-header name="Host" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", ""))</value>
+                            <value>@(context.Request.OriginalUrl.Host)</value>
                           </set-header>
                           <set-header name="x-rdwr-connector-proto" exists-action="override">
                             <value>2</value>
@@ -1032,7 +1039,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.0"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.2"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -1126,7 +1133,7 @@
                       }</set-url>
                       <set-method>POST</set-method>
                       <set-header name="Host" exists-action="override">
-                        <value>@((string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", ""))</value>
+                        <value>@(context.Request.OriginalUrl.Host)</value>
                       </set-header>
                       <set-header name="x-rdwr-connector-proto" exists-action="override">
                         <value>2</value>
@@ -1135,7 +1142,7 @@
                         <value>log</value>
                       </set-header>
                       <set-header name="x-rdwr-plugin-info" exists-action="override">
-                        <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.0"))</value>
+                        <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.2"))</value>
                       </set-header>
                       <set-header name="x-rdwr-app-id" exists-action="override">
                         <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -1215,7 +1222,7 @@
                     if (enabled && !isJson) {
                       return (string)context.Variables.GetValueOrDefault("rdwrRenderedBlockPage", "");
                     }
-                    return ((IResponse)context.Variables["radwareResponse"]).Body.As<string>();
+                    return (string)context.Variables.GetValueOrDefault("radwareResponseBody", "");
                   }</set-body>
                 </return-response>
               </otherwise>
@@ -1304,7 +1311,7 @@
           }</set-url>
           <set-method>POST</set-method>
           <set-header name="Host" exists-action="override">
-            <value>@((string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", ""))</value>
+            <value>@(context.Request.OriginalUrl.Host)</value>
           </set-header>
           <!-- Identity headers -->
           <set-header name="x-rdwr-connector-proto" exists-action="override">
@@ -1314,7 +1321,7 @@
             <value>log</value>
           </set-header>
           <set-header name="x-rdwr-plugin-info" exists-action="override">
-            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.0"))</value>
+            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.2"))</value>
           </set-header>
           <set-header name="x-rdwr-app-id" exists-action="override">
             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -1339,9 +1346,25 @@
           </set-header>
           <set-header name="x-rdwr-o2v-bytes-sent" exists-action="override">
             <value>@{
+              // bytes-sent = status line (~20 bytes) + serialized response
+              // headers ("name: value\r\n" each) + final empty line (2 bytes)
+              // + body. Matches NGINX $bytes_sent semantics. Without the
+              // header term, this previously equalled x-rdwr-o2v-body-bytes-sent.
+              // Fixed in v1.3.2 (2026-05-03).
               try {
                 var body = context.Response.Body.As<byte[]>(preserveContent: true);
-                return (body != null ? body.Length : 0).ToString();
+                int bodyLen = body != null ? body.Length : 0;
+                int headerBytes = 0;
+                if (context.Response.Headers != null) {
+                  foreach (var h in context.Response.Headers) {
+                    string name = h.Key ?? "";
+                    string val = string.Join(", ", h.Value ?? new string[0]);
+                    headerBytes += name.Length + 2 + val.Length + 2; // ": " + "\r\n"
+                  }
+                }
+                const int statusLine = 20;
+                const int finalCrlf = 2;
+                return (statusLine + headerBytes + finalCrlf + bodyLen).ToString();
               } catch { return "0"; }
             }</value>
           </set-header>

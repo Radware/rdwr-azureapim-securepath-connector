@@ -15,3 +15,8 @@ __pycache__/
 # Other connector sources
 rdwr_lambda_connector_v1.2.9/
 rdwr_nginx_connector_v1.0.6/
+
+# Built release artifacts (uploaded to GitHub releases, never committed)
+*.zip
+*.tar.gz
+SHA256SUMS
