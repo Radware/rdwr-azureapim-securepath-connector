@@ -1,130 +1,187 @@
 # Radware SecurePath Connector for Azure API Management
 
-**Version 1.3.2** — Production release, Azure API Management (any tier)
+The SecurePath connector adds Radware Cloud WAF and Bot Manager protection to Azure API Management (APIM). Every request your APIs serve is inspected by SecurePath before it reaches your backend, with allow / block / redirect verdicts enforced at the gateway. The connector is delivered as a **single XML policy file** that runs entirely inside APIM's policy pipeline — no custom C# code, no Functions, no sidecars, no separate compute.
 
-An Azure API Management (APIM) policy that integrates [Radware SecurePath](https://www.radware.com/products/securepath/) into your APIM gateway, providing real-time WAF and Bot Manager protection for your APIs without changing application code or backend infrastructure.
+| What you get | Where it shows up |
+|--------------|-------------------|
+| **WAF** — SQL-injection / XSS / RFI / file-upload / path traversal blocking, plus the rest of the SecurePath rule set | HTTP 403 to the client with SecurePath's block page (HTML) or structured block JSON |
+| **Redirect / challenge** — risk-based redirects to a SecurePath-issued challenge URL | HTTP 301/302 to the client |
+| **Bot Manager** — BM cookie propagation (`__uzma`, `__uzmf`, `uzmcr`, etc.) and `ShieldSquare-Response` forwarding on every verdict path | `Set-Cookie` and BM headers on the client response (allow, block, redirect alike) |
+| **Response-phase analytics (v2)** — fire-and-forget log POST after every response, with disposition header (`allowed` / `blocked`) | Visible in the Radware Cloud "events" view; near-zero client-visible latency |
+| **Reserved header security** — rejects (HTTP 403) any client request that contains spoofed `x-rdwr-*` headers | 403 returned at the gateway, request never forwarded |
+| **Static-asset bypass** — configured methods + extensions skip inspection | Lower per-request cost on cacheable static traffic |
+| **Fail-open by default** — if SecurePath is unreachable, traffic continues to your backend | Configurable via Named Values |
 
-The connector is delivered as a single XML policy file. It runs entirely inside APIM's policy pipeline — no custom C# code, no Functions, no sidecars.
+**Is this for you?** If you run Azure API Management (any tier — Developer, Basic, Standard, Premium, v2, with caveats for Consumption) and have (or want) a Radware Cloud SecurePath subscription. If your gateway is something else — Kong, NGINX, MuleSoft Flex Gateway, F5, HAProxy, Envoy — Radware ships a separate connector for each; this repo is APIM only.
 
----
-
-## Table of Contents
-
-1. [How It Works](#how-it-works)
-2. [Capabilities](#capabilities)
-3. [Prerequisites](#prerequisites)
-4. [Onboarding Walkthrough](#onboarding-walkthrough)
-5. [Configuration Reference](#configuration-reference)
-6. [Do's and Don'ts](#dos-and-donts)
-7. [Sideband Headers](#sideband-headers)
-8. [Security Notes](#security-notes)
-9. [Known Platform Constraints](#known-platform-constraints)
-10. [Troubleshooting](#troubleshooting)
-11. [Version History](#version-history)
-12. [License](#license)
+> **What APIM does NOT do — JavaScript injection.** APIM XML policies cannot modify response bodies, so the Bot Manager browser-fingerprinting JS injection that other SecurePath connectors do is not available here. This is rarely an issue: APIM is an API gateway, so the traffic is typically JSON / XML / gRPC consumed by backend services, not HTML rendered in browsers. Bot Manager cookie propagation (the part that matters for non-browser clients) works in full.
 
 ---
 
-## How It Works
-
-For every incoming API request, the policy:
-
-1. **Intercepts** the request in APIM's inbound pipeline.
-2. **Sends a sideband copy** to the SecurePath cloud service via APIM's `send-request` policy, with all required `x-rdwr-*` headers attached.
-3. **Receives a verdict** (allow, block, redirect, or challenge).
-4. **Enforces the verdict** before forwarding to the backend.
+## Architecture
 
 ```
-Client ──> Azure APIM ──> [SecurePath Policy] ──> Backend API
-                                  │
-                                  ├── send-request ──> SecurePath Cloud
-                                  │                          │
-                                  │<── Verdict ──────────────┘
-                                  │
-                            Enforce verdict:
-                            allow    → forward to backend
-                            block    → return 403 (HTML or JSON)
-                            redirect → 302 to challenge page
+        ┌──────────────────┐
+        │  Client request  │  (Host: api.example.com, /v1/orders, ...)
+        └────────┬─────────┘
+                 │ HTTPS (Azure-terminated)
+                 ▼
+        ┌──────────────────────────────────────────┐
+        │  Azure API Management gateway            │
+        │                                          │
+        │  ┌────────────────────────────────────┐  │
+        │  │ <inbound> SecurePath policy        │  │      ┌────────────────┐
+        │  │   • build sideband request         │  │      │  SecurePath    │
+        │  │   • send-request to SP   ──────────┼──┼─────▶│  Cloud         │
+        │  │   • parse verdict        ◀─────────┼──┼──────│  endpoint      │
+        │  │   • allow / block / redirect       │  │      └────────────────┘
+        │  └────────────────────────────────────┘  │              ▲
+        │                                          │              │ async
+        │  ┌────────────────────────────────────┐  │              │ log POST
+        │  │ <outbound> response-phase log      │  │              │
+        │  │   • send-one-way-request to SP ────┼──┼──────────────┘
+        │  └────────────────────────────────────┘  │
+        └─────────────────┬────────────────────────┘
+                          │ allowed → forward
+                          ▼
+        ┌──────────────────────────────────────────┐
+        │  Your backend (App Service, AKS, AWS,    │
+        │  on-prem, function app, anything APIM    │
+        │  can reach)                              │
+        └──────────────────────────────────────────┘
 ```
 
-In the **outbound** pipeline, the policy sends a fire-and-forget response-phase log back to SecurePath for analytics correlation. Latency overhead is near zero.
+For each client request, APIM:
+
+1. Runs the SecurePath policy in the **inbound** pipeline.
+2. The policy assembles the SecurePath sideband headers (`x-rdwr-app-id`, `x-rdwr-api-key`, `x-rdwr-connector-ip`, etc.) and dispatches an HTTPS sideband request to your SecurePath application's endpoint via APIM's `<send-request>` policy.
+3. SecurePath returns a verdict (`allow`, `block`, `redirect`, or challenge).
+4. The policy enforces the verdict — forward to backend, return 403 with a block page, or 302 to a challenge URL.
+5. After the response is delivered to the client, the **outbound** pipeline fires an asynchronous v2 response-phase log POST to SecurePath via `<send-one-way-request>`. This is fire-and-forget and adds no client-visible latency.
+
+The policy is **stateless**. All configuration lives in APIM Named Values, read fresh on every request. Multi-region APIM, multi-zone APIM, scale-out APIM — all work the same way.
 
 ---
 
-## Capabilities
+## Quickstart (~15 minutes, end-to-end)
 
-### Application Protection
-- Full sideband request assembly with all required `x-rdwr-*` headers
-- Verdict enforcement: allow, block (HTML and JSON), 301 / 302 redirect
-- Fail-open by default — traffic flows to backend if SecurePath is unreachable
-- Reserved header security — rejects (403) any client request containing spoofed `x-rdwr-*` headers
-- Static resource bypass — skip inspection for configured file extensions and HTTP methods
-- Configurable request body forwarding with size limits and partial-body truncation
-- Multipart form-data body support with separate size limit
-- Chunked request body forwarding for configured content types
-- Client IP detection via configurable header (e.g., `X-Forwarded-For`)
-- API base path stripping for correct URI forwarding to SecurePath
+The fastest path from "we have an APIM instance" to "SecurePath is inspecting traffic." All commands assume Azure CLI; the Portal-equivalent steps are documented in the same section below.
 
-### Bot Manager Support
-- Bot Manager cookie propagation (`__uzma`, `__uzmb`, `__uzmc`, `__uzmd`, `__uzmf`, `uzmcr`) on all verdict paths
-- `ShieldSquare-Response` header forwarding
-- `uzmcr` header detection for mobile redirect exception handling
-- Invalid API key detection with safe fail-open behaviour
+> **You'll need:** an APIM instance you can edit, an active SecurePath application in the [Radware Cloud portal](https://portal.radwarecloud.com) (with the Application ID, API key, and `*.oop.radwarecloud.net` endpoint hostname handy), and Azure CLI signed in.
 
-> **Note on JavaScript injection.** APIM cannot perform JavaScript injection into response bodies — XML policies have no response-body modification capability. Practical impact is minimal because APIM is an API gateway: traffic is typically JSON or XML consumed by backend services, not HTML rendered in browsers. Bot Manager browser fingerprinting via injected JS is not relevant for API consumers.
+**1. Upload the Radware CA chain** so APIM can verify SecurePath's TLS cert. Both certs are required (root + intermediate):
 
-### Response Logging and Analytics
-- **Asynchronous response-phase log** posted to SecurePath via `send-one-way-request`, correlated with the inspection request via `x-rdwr-oop-id`. Adds near-zero client latency.
-- **Disposition reporting** via the `x-rdwr-o2h-rdwr-response` header — value `allowed` (request reached origin) or `blocked` (connector blocked or redirected).
-- **Logs fire on every verdict path** — allow, block, and redirect — giving full analytics visibility.
-- Optional response body capture (mode 3, base64-encoded, size-capped).
+```bash
+az apim certificate create \
+  --resource-group <rg> --service-name <apim> \
+  --certificate-id rdwr-root-r1 \
+  --certificate-path certs/rdwr-root-ca.pem
+
+az apim certificate create \
+  --resource-group <rg> --service-name <apim> \
+  --certificate-id rdwr-ca-1a1 \
+  --certificate-path certs/rdwr-intermediate-ca.pem
+```
+
+**2. Create the three required Named Values:**
+
+```bash
+RG=<your-resource-group>
+APIM=<your-apim-instance>
+
+az apim nv create -g $RG --service-name $APIM \
+  --named-value-id rdwr-app-ep-addr  --display-name rdwr-app-ep-addr \
+  --value "<your-app-id>.oop.radwarecloud.net"
+
+az apim nv create -g $RG --service-name $APIM \
+  --named-value-id rdwr-app-id       --display-name rdwr-app-id \
+  --value "<your-app-id>"
+
+az apim nv create -g $RG --service-name $APIM \
+  --named-value-id rdwr-api-key      --display-name rdwr-api-key \
+  --secret true \
+  --value "<your-api-key>"
+```
+
+**3. Apply the policy** to the API you want to protect (typically all operations):
+
+```bash
+az apim api policy create-or-update \
+  --resource-group $RG \
+  --service-name $APIM \
+  --api-id <your-api-id> \
+  --xml-policy @rdwr-azureapim-securepath-connector-v1.3.xml
+```
+
+**4. Smoke-test:**
+
+```bash
+# Should pass — request reaches your backend
+curl -i https://$APIM.azure-api.net/<api-path>/health \
+  -H "Ocp-Apim-Subscription-Key: <key>"
+# Expected: HTTP 200 from your backend.
+
+# Should be blocked — SQL-injection probe in query string
+curl -i "https://$APIM.azure-api.net/<api-path>/?id=1' OR '1'='1" \
+  -H "Ocp-Apim-Subscription-Key: <key>"
+# Expected: HTTP 403 with the SecurePath block page.
+```
+
+If both checks pass, the connector is working end-to-end. The deeper walkthrough — every Named Value, deployment-shape caveats, configuration details, troubleshooting, and uninstall procedure — lives in [Onboarding Walkthrough](#onboarding-walkthrough) below.
 
 ---
 
-## Prerequisites
+## Deployment shapes — does this work in MY APIM?
 
-- An **Azure API Management** instance. See "Tier and networking caveats" below for tier-specific behavior.
-- A **SecurePath application** provisioned in the [Radware Cloud portal](https://portal.radwarecloud.com). You will need:
-  - Application ID
-  - API key
-  - Endpoint hostname (typically `<app-id>.oop.radwarecloud.net`)
-- **Outbound HTTPS connectivity** from your APIM instance to `*.oop.radwarecloud.net` on port 443.
-- The Radware CA chain uploaded to APIM's CA certificate store (provided in `certs/`). SecurePath endpoints use a private Radware CA, not a public CA.
-- Azure CLI **or** Azure Portal access with permission to manage APIM Named Values, policies, and CA certificates.
+The same policy XML works across every APIM deployment shape. Where the shapes differ is in **what you need to do operationally** to give APIM outbound network reach to SecurePath:
 
-### Tier and networking caveats
-
-| Topic | Notes |
-|-------|-------|
-| **Developer / Basic / Standard / Premium** | Fully supported. The XML policy compiles and runs identically on all four tiers. |
-| **v2 (Standard v2 / Premium v2)** | Fully supported. The `send-request` and `send-one-way-request` policies behave the same way. |
-| **Consumption tier** | Partial support. Consumption-tier APIM imposes [policy expression limits](https://learn.microsoft.com/en-us/azure/api-management/api-management-features) that the policy edges around (no large body buffering, smaller header set, no `set-status` after a forward). The policy degrades gracefully — sideband and verdict enforcement still work; some edge-case headers and the inline-bypass IP allow-list are skipped. **Test in Consumption** before committing to it; the certified test matrix uses Developer-tier APIM. |
-| **Self-hosted gateway** | Supported. The Self-Hosted Gateway uses the same policy engine as cloud APIM, so the policy applies as-is. The `<send-one-way-request>` log POST runs from the self-hosted node, not from cloud APIM, so make sure that node has outbound 443 to `*.oop.radwarecloud.net` and the Radware CA in its trust store. |
-| **Internal VNet (stv2 / Premium internal mode)** | Supported, but the APIM gateway must have outbound network access to `*.oop.radwarecloud.net`. If your subnet route-tables / firewall rules force-tunnel internet egress, you must explicitly allow the SecurePath endpoint FQDN. The `Microsoft.Web` service tag is **not** sufficient. |
-| **Custom domains and mTLS to backend** | Independent of the connector. The policy operates on the APIM-side request/response pipeline; backend mTLS, custom domains, and gateway certificates do not interact with the SecurePath sideband. |
+| APIM shape | Status | What you need to do |
+|------------|:------:|---------------------|
+| **Developer / Basic / Standard / Premium** (the v1 family) | ✅ Fully supported | Standard onboarding — ensure outbound 443 to `*.oop.radwarecloud.net` works (it does by default unless you've added route-table restrictions). |
+| **Standard v2 / Premium v2** | ✅ Fully supported | Same as v1. The v2 family uses an updated runtime but the same policy engine. |
+| **Consumption tier** | ⚠️ Partial | Consumption-tier APIM imposes [policy-expression and execution limits](https://learn.microsoft.com/en-us/azure/api-management/api-management-features) — large-body buffering is limited and some advanced expressions are not available. The policy degrades gracefully (sideband and verdict enforcement still work; some edge-case headers and the inline-bypass IP allow-list are skipped). **Test in Consumption** before committing to it for production. |
+| **Self-hosted gateway** | ✅ Supported | The Self-Hosted Gateway uses the same policy engine as cloud APIM. The `<send-one-way-request>` log POST runs from the self-hosted node — make sure that node has outbound 443 to `*.oop.radwarecloud.net` and the Radware CA in its trust store. |
+| **Internal VNet (stv2 / Premium internal mode)** | ✅ Supported | The APIM gateway must have outbound network access to `*.oop.radwarecloud.net`. If your subnet route-tables / Azure Firewall / NSGs force-tunnel internet egress, explicitly allow the SecurePath endpoint FQDN. The `Microsoft.Web` service tag is **not** sufficient — SecurePath endpoints don't sit inside that tag's IP ranges. |
+| **Custom domains and backend mTLS** | ✅ Independent | The connector operates on the APIM-side request/response pipeline. Backend mTLS, custom domains, and gateway certificates do not interact with the SecurePath sideband. |
 
 ### Latency expectations
 
-The sideband request adds approximately **20–80 ms** of synchronous overhead per request (median ~30 ms; p99 < 100 ms over public-internet egress to the closest SecurePath PoP). The default `rdwr-app-ep-timeout-seconds` is `10`, so a slow SecurePath PoP causes at most a 10-second stall before the policy **fails open** and forwards the request to the backend.
+The sideband request adds approximately **20–80 ms** of synchronous overhead per request (median ~30 ms; p99 < 100 ms over public-internet egress to the closest SecurePath PoP). The default `rdwr-app-ep-timeout-seconds` is `10`, so a slow PoP causes at most a 10-second stall before the policy **fails open** and forwards the request to the backend.
 
 The response-phase log uses `<send-one-way-request>`, which is fire-and-forget — it adds no measurable client-visible latency on the response path.
 
 ---
 
+## What's in this repo
+
+| Path | Purpose |
+|------|---------|
+| `rdwr-azureapim-securepath-connector-v1.3.xml` | The policy XML you apply to your APIM API |
+| `release-notes.md` | Per-version release notes — what changed, when |
+| `certs/rdwr-root-ca.pem` | Radware Root CA — upload to APIM CA store |
+| `certs/rdwr-intermediate-ca.pem` | Radware Intermediate CA — upload to APIM CA store |
+| `certs/rdwr-ca-chain.pem` | Combined chain (informational; APIM needs them uploaded individually) |
+| `certs/README.md` | CA upload guide for Portal / CLI / ARM-Bicep |
+
+---
+
 ## Onboarding Walkthrough
 
-Follow these steps in order. The full workflow takes about 15 minutes for a standard deployment.
+The full step-by-step. Pick the path that matches your tooling.
 
 ### Step 1 — Upload the Radware CA chain to APIM
 
 The SecurePath endpoint (`*.oop.radwarecloud.net`) is signed by a private Radware CA. APIM must trust the chain before sideband calls will succeed.
 
+**Via Portal:**
 1. Open the Azure Portal, navigate to your APIM instance.
 2. Go to **Security → CA certificates** and click **+ Add**.
 3. Upload `certs/rdwr-root-ca.pem` — name it `rdwr-root-r1`.
 4. Click **+ Add** again and upload `certs/rdwr-intermediate-ca.pem` — name it `rdwr-ca-1a1`.
 
-Both certificates are required. CLI and ARM/Bicep equivalents are documented in `certs/README.md`.
+**Via Azure CLI:** see the Quickstart above.
+
+Both certificates are required. ARM/Bicep equivalents are documented in `certs/README.md`.
 
 ### Step 2 — Create Named Values
 
@@ -138,7 +195,7 @@ The policy reads all configuration from APIM [Named Values](https://learn.micros
 | `rdwr-app-id`     | `your-app-id`                        |    —    | Application ID from the Radware Cloud portal    |
 | `rdwr-api-key`    | `your-api-key`                       |  **✓**  | API key from the Radware Cloud portal — **always** create with `--secret true` |
 
-**Required (with recommended defaults):**
+**Required (with recommended defaults — already wired in the policy XML):**
 
 | Named Value                                | Default                                                | Secret? | Description                                                  |
 |--------------------------------------------|--------------------------------------------------------|:-------:|--------------------------------------------------------------|
@@ -315,6 +372,8 @@ The log is sent via `send-one-way-request` (fire-and-forget) in the outbound pip
 
 **Captured response metadata includes:**
 - `x-rdwr-o2v-status` — origin response status code
+- `x-rdwr-o2v-bytes-sent` — total wire bytes (status line + headers + body, matching NGINX `$bytes_sent` semantics; v1.3.2 fix)
+- `x-rdwr-o2v-body-bytes-sent` — body bytes only (matching NGINX `$body_bytes_sent`)
 - `x-rdwr-o2h-content-type` — origin Content-Type header
 - `x-rdwr-o2h-rdwr-response` — connector disposition (`allowed` / `blocked`)
 - Base64-encoded response body sample (mode 3 only, configurable size)
@@ -357,7 +416,7 @@ The policy sends the following headers in every sideband request to SecurePath:
 | `x-rdwr-connector-port`      | Always `443` (Azure APIM ingress)                                            |
 | `x-rdwr-connector-scheme`    | Always `https` (Azure forces HTTPS termination)                              |
 | `x-rdwr-host`                | Original `Host` header from the client request                               |
-| `x-rdwr-plugin-info`         | Connector platform and version (e.g., `700-v1.3.1`)                          |
+| `x-rdwr-plugin-info`         | Connector platform and version (default `700-v1.3.2`)                        |
 | `x-rdwr-partial-body`        | `true` when the body was truncated due to size limits                        |
 | `x-rdwr-connector-proto`     | `2` in the response-phase log                                                |
 | `x-rdwr-connector-stage`     | `request` (sideband) or `log` (response-phase)                               |
@@ -425,35 +484,33 @@ Always store `rdwr-api-key` as a **secret** Named Value. Secret Named Values are
 
 ---
 
+## Where to go next
+
+| You want to | Read |
+|-------------|------|
+| Get something running | The [Quickstart](#quickstart-15-minutes-end-to-end) at the top |
+| See every config knob | [Configuration Reference](#configuration-reference) |
+| Understand tier / VNet / Consumption / self-hosted differences | [Deployment shapes](#deployment-shapes--does-this-work-in-my-apim) |
+| Roll back or disable the connector | Step 5 — [Uninstall / rollback](#step-5--uninstall--rollback-when-needed) |
+| Debug something that's not working | [Troubleshooting](#troubleshooting) |
+| See what changed between versions | [release-notes.md](release-notes.md) |
+
+For SecurePath-account questions (provisioning, billing, application configuration on the SecurePath side) contact your Radware account team. For connector bugs and feature requests, file an issue on this GitHub repo.
+
+---
+
 ## Version History
 
 | Version    | Date       | Status      | Highlights                                                       |
 |------------|------------|-------------|------------------------------------------------------------------|
-| **v1.3.2** | 2026-05-03 | **Current** | `x-rdwr-o2v-bytes-sent` reports total wire bytes (not body alone) |
+| **v1.3.2** | 2026-05-03 | **Current** | `x-rdwr-o2v-bytes-sent` reports total wire bytes (status line + headers + body) |
 | v1.3.1     | 2026-03-31 | Superseded  | Disposition header, v2 log on block/redirect, body-truncation fix |
-| v1.3.0     | 2026-03-12 | Superseded  | GA release, full feature parity, response-phase logging          |
+| v1.3.0     | 2026-03-12 | Superseded  | GA release, full SecurePath feature coverage, response-phase logging |
 | v1.2.0     | 2025-11-30 | Superseded  | Bot Manager support, reserved header enforcement                 |
 | v1.1.0     | 2025-09-15 | Superseded  | Body handling, chunked request support                           |
 | v1.0.0     | 2025-05-01 | Superseded  | Initial release                                                  |
 
 For full release notes, see [`release-notes.md`](release-notes.md).
-
----
-
-## Repository Structure
-
-```
-rdwr-azureapim-securepath-connector/
-├── README.md                                         # This file
-├── release-notes.md                                  # Detailed release notes
-├── rdwr-azureapim-securepath-connector-v1.3.xml      # The policy XML
-├── certs/                                            # Radware CA chain + upload guide
-│   ├── README.md
-│   ├── rdwr-root-ca.pem
-│   ├── rdwr-intermediate-ca.pem
-│   └── rdwr-ca-chain.pem
-└── .gitignore
-```
 
 ---
 
