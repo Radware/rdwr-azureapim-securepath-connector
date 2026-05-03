@@ -1485,7 +1485,7 @@
                       int.TryParse(limitStr, out limit);
                     }
                   }
-                  // Cap at body max size (align with R&D v1.1.0)
+                  // Cap at the configured body max size
                   var maxBody = (long)context.Variables.GetValueOrDefault("rdwrBodyMaxSize", 100000L);
                   if (limit > maxBody) {
                     limit = (int)maxBody;

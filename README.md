@@ -351,7 +351,7 @@ Always store `rdwr-api-key` as a **secret** Named Value. Secret Named Values are
 - Set `rdwr-api-base-path` correctly so SecurePath sees the right URI path.
 
 ### Response-phase log not arriving in SecurePath portal
-- Confirm `x-rdwr-bot-manager-enabled` and the response-logging Named Values are configured.
+- Confirm `rdwr-bot-manager-enabled` and the response-logging Named Values are configured.
 - Verify SecurePath returned `x-rdwr-oop-id` in the sideband response — without it, the log is not emitted.
 - `send-one-way-request` is fire-and-forget; failures are not visible in APIM. Use SecurePath portal correlation as the source of truth.
 

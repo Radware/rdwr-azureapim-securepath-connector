@@ -45,7 +45,7 @@ Same XML policy file (`rdwr-azureapim-securepath-connector-v1.3.xml`). No new Na
 
 ## v1.3.0 (2026-03-12)
 
-**General availability.** Full feature parity with the reference NGINX connector. Adds asynchronous response-phase logging via `send-one-way-request`, complete sideband header assembly, and a customisable block page.
+**General availability.** Full SecurePath feature coverage at the API Management policy layer. Adds asynchronous response-phase logging via `send-one-way-request`, complete sideband header assembly, and a customisable block page.
 
 ### Features
 - **XML policy-based architecture.** No custom C# code; all SecurePath logic is implemented as Azure APIM XML policies.
@@ -61,7 +61,7 @@ Same XML policy file (`rdwr-azureapim-securepath-connector-v1.3.xml`). No new Na
 ### Platform Notes
 - **No JavaScript injection.** Azure APIM XML policies cannot modify response bodies; the `inject_js` verdict is treated as `allow`. This is an APIM platform constraint, not a connector limitation. Practical impact is minimal for API gateway traffic (typically JSON/XML).
 - **`x-rdwr-connector-scheme` always `https`.** Azure APIM forces HTTPS termination; the scheme value reflects this.
-- **Partial body format.** APIM forwards a truncated body when oversize is detected; reference connectors may instead send `Content-Length: 0`. Both are valid SecurePath inputs.
+- **Partial body format.** APIM forwards a truncated body when oversize is detected; other Radware SecurePath connectors may instead send `Content-Length: 0`. Both are valid SecurePath inputs.
 
 ### Sideband Plugin Info
 - `x-rdwr-plugin-info` value: `700-v1.3.0`. Platform code `700` identifies this connector as the Azure API Management variant.
@@ -98,8 +98,9 @@ Initial release. Basic sideband and verdict enforcement.
 
 | Version    | Date       | Status      | Highlights                                                       |
 |------------|------------|-------------|------------------------------------------------------------------|
-| **v1.3.1** | 2026-03-31 | **Current** | Disposition header, v2 log on block/redirect, body-truncation fix |
-| v1.3.0     | 2026-03-12 | Superseded  | GA release, full feature parity, response-phase logging          |
+| **v1.3.2** | 2026-05-03 | **Current** | `x-rdwr-o2v-bytes-sent` reports total wire bytes (status line + headers + body) |
+| v1.3.1     | 2026-03-31 | Superseded  | Disposition header, v2 log on block/redirect, body-truncation fix |
+| v1.3.0     | 2026-03-12 | Superseded  | GA release, full feature coverage, response-phase logging        |
 | v1.2.0     | 2025-11-30 | Superseded  | Bot Manager support, reserved header enforcement                 |
 | v1.1.0     | 2025-09-15 | Superseded  | Body handling, chunked support                                   |
 | v1.0.0     | 2025-05-01 | Superseded  | Initial release                                                  |
