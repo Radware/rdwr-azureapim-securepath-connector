@@ -16,6 +16,9 @@ __pycache__/
 rdwr_lambda_connector_v1.2.9/
 rdwr_nginx_connector_v1.0.6/
 
+# Internal-only files (must not appear in customer-facing repo)
+.github/COPILOT_INSTRUCTIONS.md
+
 # Built release artifacts (uploaded to GitHub releases, never committed)
 *.zip
 *.tar.gz

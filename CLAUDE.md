@@ -21,7 +21,7 @@ This repo is published to `Radware/rdwr-azureapim-securepath-connector` on GitHu
 | `rdwr-partial-body-size-bytes` | `10240` | ~10KB |
 | `static-extensions-enabled` | `true` | |
 | `static-inspect-if-query-string-exists` | `true` | Query string overrides static bypass |
-| `plugin-version-info` | `700-v1.3.0` | Platform ID 700 = Azure APIM |
+| `plugin-version-info` | `700-v1.3.2` | Platform ID 700 = Azure APIM |
 
 ## Naming & Terminology
 
@@ -77,16 +77,17 @@ Outbound:
 ## Version Strings to Update (on version bump)
 
 - `README.md`: version header, plugin-version-info table entry, changelog section
-- `rdwr-azureapim-securepath-connector-v1.3.xml`: default plugin-info fallback value (line with `"700-v1.3.0"`)
+- `rdwr-azureapim-securepath-connector-v1.3.xml`: default plugin-info fallback value (line with `"700-v1.3.2"`)
 - Rename the XML file if the minor version changes (e.g., `v1.3.xml` to `v1.4.xml`)
 
-## Certification (v1.3.1 -- Current)
+## Certification (v1.3.2 -- Current)
 
-- **Deep tests**: 60 PASS, 5 SKIP (expected platform limitations), 0 FAIL (2026-03-31)
+- **Deep tests**: 60 PASS, 5 SKIP (expected platform limitations), 0 FAIL
 - **Body handling**: Large body correctly sends empty body to SecurePath, partial body truncation verified, gzip passthrough verified
 - **Host header**: Sideband HTTP Host carries original client Host (not SecurePath endpoint hostname)
 - **Bot Manager**: Cookie propagation on all verdict paths (allow, block, redirect)
 - **Response logging**: 4/4 o2v headers, 21/21 o2h headers, mode 3 body capture with base64 encoding
+- **`x-rdwr-o2v-bytes-sent`**: v1.3.2 fix -- now reports total wire bytes (status line + headers + body), matching NGINX `$bytes_sent` semantics
 - **Disposition header**: `x-rdwr-o2h-rdwr-response` reports `allowed`/`blocked` on all verdict paths (VD01-VD03: 3/3 PASS)
 - **v2 on block**: Response-phase log fires on block and redirect verdicts (not just allow)
 - **Known variances**: `x-rdwr-connector-scheme` always `https`, no JS injection, no dedicated path proxying
