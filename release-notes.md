@@ -2,9 +2,21 @@
 
 ---
 
-## v1.3.2 (2026-05-03) — Current
+## v1.3.2 (2026-05-03, docs refreshed 2026-05-07) — Current
 
-**Bug fix.** Corrects `x-rdwr-o2v-bytes-sent` reporting in the response-phase log to match NGINX `$bytes_sent` semantics.
+**Bug fix in v1.3.2.** Corrects `x-rdwr-o2v-bytes-sent` reporting in the response-phase log to match NGINX `$bytes_sent` semantics.
+
+### 2026-05-07 doc refresh — onboarding accuracy fixes (no policy XML change)
+
+Customer feedback revealed two onboarding failures driven by inaccurate documentation; the policy XML itself is unchanged. Both are now corrected in the README and `certs/README.md`:
+
+- **CA certificate upload — wrong CLI command.** The README and `certs/README.md` previously documented `az apim certificate create` and `az apim certificate-authority create` as the Azure CLI path for uploading the Radware CA chain. **Neither command exists** in the `az apim` CLI tree (verified against the canonical `learn.microsoft.com/en-us/cli/azure/apim` reference). Customers attempting this hit confusing errors and ultimately fell back to the Portal — which itself only accepts `.cer` files (PEM and CER are the same Base64 X.509 format; rename suffices, no conversion needed). Microsoft's canonical doc is [Add a Custom CA Certificate](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-ca-certificates), which describes Portal and PowerShell paths only and explicitly references uploading a `.cer` file. Documentation now leads with the Portal path (rename `.pem` → `.cer` first), notes the missing CLI support up front, lists PowerShell (`New-AzApiManagementSystemCertificate`) and ARM/Bicep alternatives for IaC pipelines, and flags the v2 / Consumption tier exclusion (Microsoft requires per-backend trust on those tiers).
+
+- **Named Values — "default" framing was misleading + empty-string CLI trap.** The Step 2 table previously listed 15 Named Values as having "recommended defaults already wired in the policy XML," implying customers could skip them. The XML uses standard `{{name}}` substitution at policy-save time, so **every referenced Named Value must exist** — if any is missing, APIM rejects the policy upload with *"Named Value 'rdwr-...' not found"*. Worse: two of those 15 (`rdwr-api-base-path` and `rdwr-inline-trusted-sources`) had `(empty)` listed as their default, but `az apim nv create --value ""` silently fails (CLI rejects empty strings), so customers following the table verbatim ended up with two missing Named Values and a failed policy upload. The customer reported this exact symptom: *"weird there seem to be more in the named value list than i pasted, yet a couple are not there"* — the two missing ones were exactly the empty-default rows. Documentation now: (a) reframes the column as "Recommended value to set the Named Value to," with an explicit callout that the policy doesn't fall back if you skip the Named Value; (b) shows sentinel-disable values (`/` for `rdwr-api-base-path`; `##DISABLED##` for `rdwr-inline-trusted-sources` — both already recognised by the policy as disabled) instead of empty strings; (c) ships a complete bash loop for all 15 Tier-2 Named Values so customers don't have to hand-construct the CLI calls; (d) adds a verification step to confirm 18 Named Values exist before applying the policy.
+
+The Quickstart section (lines 67–124) was also expanded with a new Step 2a covering the 15 Tier-2 Named Values — previously the Quickstart only created 3, which would have produced a failed policy upload at Step 3 for any customer following it literally.
+
+### Bug Fixes
 
 ### Bug Fixes
 

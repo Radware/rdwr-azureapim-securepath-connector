@@ -69,21 +69,15 @@ The fastest path from "we have an APIM instance" to "SecurePath is inspecting tr
 
 > **You'll need:** an APIM instance you can edit, an active SecurePath application in the [Radware Cloud portal](https://portal.radwarecloud.com) (with the Application ID, API key, and `*.oop.radwarecloud.net` endpoint hostname handy), and Azure CLI signed in.
 
-**1. Upload the Radware CA chain** so APIM can verify SecurePath's TLS cert. Both certs are required (root + intermediate):
+**1. Upload the Radware CA chain** so APIM can verify SecurePath's TLS cert. Both certs are required (root + intermediate). **Use the Azure Portal — there is no `az apim` CLI command for CA certificates** (Azure CLI does not currently expose this; PowerShell `New-AzApiManagementSystemCertificate` and ARM templates are the only programmatic options):
 
-```bash
-az apim certificate create \
-  --resource-group <rg> --service-name <apim> \
-  --certificate-id rdwr-root-r1 \
-  --certificate-path certs/rdwr-root-ca.pem
+1. Azure Portal → your APIM instance → **Security → Certificates → CA certificates → + Add**.
+2. **Rename `certs/rdwr-root-ca.pem` to `rdwr-root-ca.cer` first** — APIM's upload dialog only accepts `.cer` files. PEM and CER are the same Base64 X.509 format, so a rename is sufficient (no conversion needed). Set the certificate ID to `rdwr-root-r1` and the **Store** to *Trusted Root Certification Authorities*.
+3. Click **+ Add** again, repeat for `certs/rdwr-intermediate-ca.pem` → rename to `.cer`, certificate ID `rdwr-ca-1a1`, **Store** *Intermediate Certification Authorities*.
 
-az apim certificate create \
-  --resource-group <rg> --service-name <apim> \
-  --certificate-id rdwr-ca-1a1 \
-  --certificate-path certs/rdwr-intermediate-ca.pem
-```
+> **Tier note:** CA certificate upload is supported on Developer / Basic / Standard / Premium tiers only. **Standard v2 / Premium v2 (the v2 tiers) and Consumption tier** require trust to be configured per backend instead — see Microsoft's [Add a Custom CA Certificate](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-ca-certificates) doc.
 
-**2. Create the three required Named Values:**
+**2. Create the three environment-specific Named Values** (the API Management policy expects these and 15 others — see Step 2a below):
 
 ```bash
 RG=<your-resource-group>
@@ -102,6 +96,37 @@ az apim nv create -g $RG --service-name $APIM \
   --secret true \
   --value "<your-api-key>"
 ```
+
+**2a. Create the 15 policy-config Named Values.** The policy substitutes all 18 Named Values literally at upload time — if any are missing, the policy save will fail validation. Paste the bash loop below to create them with their recommended values:
+
+```bash
+declare -a NV=(
+  "rdwr-app-ep-port=443"
+  "rdwr-app-ep-ssl=true"
+  "rdwr-app-ep-timeout-seconds=10"
+  "rdwr-body-max-size-bytes=100000"
+  "rdwr-partial-body-size-bytes=10240"
+  "rdwr-multipart-max-size-bytes=100000"
+  "rdwr-true-client-ip-header=x-forwarded-for"
+  "rdwr-api-base-path=/"
+  "rdwr-bot-manager-enabled=false"
+  "plugin-version-info=700-v1.3.2"
+  "static-extensions-enabled=true"
+  "static-list-of-methods-not-to-inspect=GET,HEAD"
+  "static-list-of-bypassed-extensions=png,jpg,css,js,gif,ico,svg,woff,woff2"
+  "static-inspect-if-query-string-exists=true"
+  "chunked-request-allowed-content-types=application/json,application/x-www-form-urlencoded"
+  "rdwr-inline-trusted-sources=##DISABLED##"
+  "rdwr-inline-headers-enabled=false"
+)
+for kv in "${NV[@]}"; do
+  name="${kv%%=*}"; value="${kv#*=}"
+  az apim nv create -g "$RG" --service-name "$APIM" \
+    --named-value-id "$name" --display-name "$name" --value "$value"
+done
+```
+
+> ⚠ **Heads up — empty-string values:** `rdwr-api-base-path` and `rdwr-inline-trusted-sources` would naturally be empty for most users (no path-prefix to strip; no IP allow-list). The Azure CLI rejects `--value ""`, so the recommended values above use sentinels the policy recognises: `/` (the policy strips trailing slash, so `/` resolves to "no path stripping") and `##DISABLED##` (the policy treats `##DISABLED##` / `disabled` / `off` / `false` / `none` / `~` / `-` as disabled). Set them to your real base path or CIDR list if you actually want those features.
 
 **3. Apply the policy** to the API you want to protect (typically all operations):
 
@@ -173,21 +198,28 @@ The full step-by-step. Pick the path that matches your tooling.
 
 The SecurePath endpoint (`*.oop.radwarecloud.net`) is signed by a private Radware CA. APIM must trust the chain before sideband calls will succeed.
 
-**Via Portal:**
-1. Open the Azure Portal, navigate to your APIM instance.
-2. Go to **Security → CA certificates** and click **+ Add**.
-3. Upload `certs/rdwr-root-ca.pem` — name it `rdwr-root-r1`.
-4. Click **+ Add** again and upload `certs/rdwr-intermediate-ca.pem` — name it `rdwr-ca-1a1`.
+**Important — Azure CLI does NOT support APIM CA certificate upload.** The `az apim` command tree has no `certificate` or `certificate-authority` subcommand. You must use the Portal, PowerShell, or ARM/Bicep. (Earlier versions of these docs incorrectly suggested an `az apim certificate create` command — that command has never existed in `az apim`. The only available paths are below.)
 
-**Via Azure CLI:** see the Quickstart above.
+**Tier prerequisite:** This step applies to **Developer / Basic / Standard / Premium** tiers (the v1 family). If your APIM is on **Standard v2 / Premium v2** or **Consumption** tier, the CA-certificates page is unavailable; trust is configured per-backend instead — see Microsoft's [Add a Custom CA Certificate](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-ca-certificates) doc.
 
-Both certificates are required. ARM/Bicep equivalents are documented in `certs/README.md`.
+**Path A — Azure Portal (recommended):**
+
+1. Rename `certs/rdwr-root-ca.pem` to `certs/rdwr-root-ca.cer` and `certs/rdwr-intermediate-ca.pem` to `certs/rdwr-intermediate-ca.cer`. **PEM and CER are the same Base64 X.509 format**; APIM's upload dialog filters by extension and accepts only `.cer` (no conversion needed, just rename).
+2. Open the Azure Portal → your APIM instance → **Security → Certificates → CA certificates** → **+ Add**.
+3. **Upload `rdwr-root-ca.cer`**: certificate ID `rdwr-root-r1`, **Store** = *Trusted Root Certification Authorities*. Password field is optional (leave blank — only the public key is needed). Save.
+4. Click **+ Add** again. **Upload `rdwr-intermediate-ca.cer`**: certificate ID `rdwr-ca-1a1`, **Store** = *Intermediate Certification Authorities*. Save.
+
+**Path B — PowerShell:** Microsoft documents `New-AzApiManagementSystemCertificate` for this — see [Microsoft's CA certificate doc](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-ca-certificates).
+
+**Path C — ARM / Bicep:** an example template is in `certs/README.md` for IaC pipelines.
+
+Both certificates are required. The provisioning step ("CA certificate update in progress") can take 15+ minutes on larger instances.
 
 ### Step 2 — Create Named Values
 
 The policy reads all configuration from APIM [Named Values](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-properties). Create them via the Azure Portal, Azure CLI, or your IaC tool of choice.
 
-**Required (no defaults — must be set per environment):**
+**Tier 1 — required, set per-environment from your Radware Cloud portal:**
 
 | Named Value       | Example                              | Secret? | Description                                     |
 |-------------------|--------------------------------------|:-------:|-------------------------------------------------|
@@ -195,9 +227,11 @@ The policy reads all configuration from APIM [Named Values](https://learn.micros
 | `rdwr-app-id`     | `your-app-id`                        |    —    | Application ID from the Radware Cloud portal    |
 | `rdwr-api-key`    | `your-api-key`                       |  **✓**  | API key from the Radware Cloud portal — **always** create with `--secret true` |
 
-**Required (with recommended defaults — already wired in the policy XML):**
+**Tier 2 — required, set to the recommended value below (the policy doesn't fall back if you skip them):**
 
-| Named Value                                | Default                                                | Secret? | Description                                                  |
+> **All 18 Named Values must exist.** The policy uses `{{name}}` substitution at policy-save time — if any referenced Named Value is missing, APIM rejects the policy upload with a *"Named Value 'rdwr-...' not found"* error. The "Recommended value" column below is **the literal string to set as the Named Value's value**, not a fallback that's auto-applied if you skip the Named Value.
+
+| Named Value                                | Recommended value                                      | Secret? | Description                                                  |
 |--------------------------------------------|--------------------------------------------------------|:-------:|--------------------------------------------------------------|
 | `rdwr-app-ep-port`                         | `443`                                                  |    —    | SecurePath endpoint port                                     |
 | `rdwr-app-ep-ssl`                          | `true`                                                 |    —    | Use HTTPS for sideband requests                              |
@@ -206,7 +240,7 @@ The policy reads all configuration from APIM [Named Values](https://learn.micros
 | `rdwr-partial-body-size-bytes`             | `10240`                                                |    —    | Partial body size for oversized chunked requests             |
 | `rdwr-multipart-max-size-bytes`            | `100000`                                               |    —    | Max multipart form-data body size                            |
 | `rdwr-true-client-ip-header`               | `x-forwarded-for`                                      |    —    | Header containing the real client IP                         |
-| `rdwr-api-base-path`                       | *(empty)*                                              |    —    | API base path to strip from sideband URI (e.g., `/api`)      |
+| `rdwr-api-base-path` ⚠                      | `/`  *(see callout below)*                             |    —    | API base path to strip from sideband URI (e.g., `/api`)      |
 | `rdwr-bot-manager-enabled`                 | `false`                                                |    —    | Enable Bot Manager cookie and header handling                |
 | `plugin-version-info`                      | `700-v1.3.2`                                           |    —    | Plugin version string sent in `x-rdwr-plugin-info`           |
 | `static-extensions-enabled`                | `true`                                                 |    —    | Enable static resource bypass                                |
@@ -214,27 +248,63 @@ The policy reads all configuration from APIM [Named Values](https://learn.micros
 | `static-list-of-bypassed-extensions`       | `png,jpg,css,js,gif,ico,svg,woff,woff2`                |    —    | File extensions to bypass                                    |
 | `static-inspect-if-query-string-exists`    | `true`                                                 |    —    | Force inspection when a query string is present              |
 | `chunked-request-allowed-content-types`    | `application/json,application/x-www-form-urlencoded`   |    —    | Content types eligible for chunked body forwarding           |
-| `rdwr-inline-trusted-sources`              | *(empty)*                                              |    —    | Optional inline-bypass IP allow-list                         |
+| `rdwr-inline-trusted-sources` ⚠             | `##DISABLED##`  *(see callout below)*                  |    —    | Optional inline-bypass IP allow-list                         |
 | `rdwr-inline-headers-enabled`              | `false`                                                |    —    | Optional inline-bypass header signature mode                 |
 
-> Only `rdwr-api-key` should be created as a secret. The other Named Values are non-sensitive configuration and can be plain (this matters because secret Named Values cannot be referenced in trace output, which makes plain-Named-Value debugging easier).
+> ⚠ **Empty-string trap.** Two of these Named Values would naturally be left empty (`rdwr-api-base-path` if you have no path-prefix to strip; `rdwr-inline-trusted-sources` if you don't want an IP allow-list). **`az apim nv create --value ""` rejects empty strings** — the create call fails and the Named Value never gets created, which then fails the policy upload. The policy is built to recognise sentinel-disable tokens for both:
+>
+> - **`rdwr-api-base-path`**: set to `/` to mean "no path stripping". The policy strips the trailing `/`, resolving to empty internally — same effect as a true empty value, but the CLI accepts it. If your API actually does sit under a base path (e.g. all operations under `/api/v1`), set this to that path.
+> - **`rdwr-inline-trusted-sources`**: set to `##DISABLED##` to disable the inline-bypass IP allow-list. The policy treats `##DISABLED##` / `disabled` / `off` / `false` / `none` / `~` / `-` (case-insensitive) as disabled. If you do want an allow-list, set this to a comma-separated list of CIDRs and/or single IPs (e.g., `10.0.0.0/16,1.2.3.4`).
 
-#### Azure CLI examples
+> **About marking secrets:** only `rdwr-api-key` should be marked as a Secret Named Value (`--secret true`). Plain Named Values are returned by `az apim nv show` directly and visible in the Portal — useful for operational checks. Secret Named Values are encrypted at rest, masked as `••••` in the Portal display, and require `az apim nv show-secret` (a separate command) to read back. **Note:** APIM's API Inspector trace shows the *resolved* Named Value at policy-execution time, so Secret Named Values are not masked in trace output once a policy stamps them into a header / URL / body. For production, restrict tracing-enabled subscriptions or store `rdwr-api-key` in [Azure Key Vault](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-properties#key-vault-secrets) (Microsoft's recommended option — supports automatic four-hour rotation).
+
+#### Azure CLI — complete create script for the 15 Tier-2 Named Values
+
+If you ran the [Quickstart](#quickstart-15-minutes-end-to-end), the 3 Tier-1 Named Values are already created. Paste the script below for the remaining 15. Set `RG` and `APIM` first.
 
 ```bash
-# Plain Named Value
-az apim nv create --resource-group <rg> --service-name <apim> \
-  --named-value-id rdwr-app-ep-addr \
-  --display-name rdwr-app-ep-addr \
-  --value "your-app-id.oop.radwarecloud.net"
+RG=<your-resource-group>
+APIM=<your-apim-instance>
 
-# Secret Named Value — always use --secret true for the API key
-az apim nv create --resource-group <rg> --service-name <apim> \
-  --named-value-id rdwr-api-key \
-  --display-name rdwr-api-key \
-  --secret true \
-  --value "your-api-key"
+# Tier 2 — Named Values that the policy substitutes literally; create with the recommended value.
+declare -a NV=(
+  "rdwr-app-ep-port=443"
+  "rdwr-app-ep-ssl=true"
+  "rdwr-app-ep-timeout-seconds=10"
+  "rdwr-body-max-size-bytes=100000"
+  "rdwr-partial-body-size-bytes=10240"
+  "rdwr-multipart-max-size-bytes=100000"
+  "rdwr-true-client-ip-header=x-forwarded-for"
+  "rdwr-api-base-path=/"
+  "rdwr-bot-manager-enabled=false"
+  "plugin-version-info=700-v1.3.2"
+  "static-extensions-enabled=true"
+  "static-list-of-methods-not-to-inspect=GET,HEAD"
+  "static-list-of-bypassed-extensions=png,jpg,css,js,gif,ico,svg,woff,woff2"
+  "static-inspect-if-query-string-exists=true"
+  "chunked-request-allowed-content-types=application/json,application/x-www-form-urlencoded"
+  "rdwr-inline-trusted-sources=##DISABLED##"
+  "rdwr-inline-headers-enabled=false"
+)
+
+for kv in "${NV[@]}"; do
+  name="${kv%%=*}"
+  value="${kv#*=}"
+  az apim nv create -g "$RG" --service-name "$APIM" \
+    --named-value-id "$name" --display-name "$name" \
+    --value "$value"
+done
 ```
+
+If a Named Value already exists from an earlier attempt, `az apim nv create` returns *"NamedValue with the specified id already exists"* — switch that one Named Value to `az apim nv update` for the value you want.
+
+#### Verify — every Named Value the policy will reference
+
+```bash
+az apim nv list -g "$RG" --service-name "$APIM" --query "[].{name:name,secret:secret}" -o table
+```
+
+Expect 18 rows total (3 Tier-1 + 15 Tier-2). If any are missing, the policy upload in Step 3 will fail validation. If you see extras with the `rdwr-` prefix that aren't in the tables above, those are stale from an earlier release and can be deleted with `az apim nv delete -g $RG --service-name $APIM --named-value-id <name>`.
 
 ### Step 3 — Apply the Policy
 
