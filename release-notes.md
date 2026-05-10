@@ -2,11 +2,11 @@
 
 ---
 
-## v1.3.2 (2026-05-03) — Current
+## v1.3.2 (GA 2026-05-04) — Current
 
 ### Bug Fixes
 
-- **`x-rdwr-o2v-bytes-sent` now reports total wire bytes** (status line + serialized response headers + body), not body length alone. Before this fix the field equalled `x-rdwr-o2v-body-bytes-sent`, which under-reported actual response size by the size of the response headers. The XML allow-path expression now sums `~20` bytes for the status line approximation, every response header serialized as `Name: Value\r\n`, the final empty-line CRLF (`2` bytes), and the body length. `x-rdwr-o2v-body-bytes-sent` continues to report body bytes only, matching NGINX `$body_bytes_sent`.
+- **`x-rdwr-o2v-bytes-sent` now reports total wire bytes** (status line + headers + body), not body length alone. `x-rdwr-o2v-body-bytes-sent` continues to report body bytes only.
 
 ### Sideband Plugin Info
 
