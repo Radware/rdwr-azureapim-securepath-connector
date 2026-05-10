@@ -128,15 +128,29 @@ done
 
 > ⚠ **Heads up — empty-string values:** `rdwr-api-base-path` and `rdwr-inline-trusted-sources` would naturally be empty for most users (no path-prefix to strip; no IP allow-list). The Azure CLI rejects `--value ""`, so the recommended values above use sentinels the policy recognises: `/` (the policy strips trailing slash, so `/` resolves to "no path stripping") and `##DISABLED##` (the policy treats `##DISABLED##` / `disabled` / `off` / `false` / `none` / `~` / `-` as disabled). Set them to your real base path or CIDR list if you actually want those features.
 
-**3. Apply the policy** to the API you want to protect (typically all operations):
+**3. Apply the policy** to the API you want to protect (typically all operations).
+
+> **`<your-api-id>`** is the resource name of an APIM API you've already created (e.g. `proxy-all`, `orders-api`) — **not** the SecurePath endpoint hostname (that goes into Step 2 as `rdwr-app-ep-addr`). List your APIs with `az apim api list -g $RG --service-name $APIM --query "[].name" -o tsv`.
+
+The Azure CLI does not expose policy upload via `az apim api …` (there is no `policy` subgroup). Use `az rest` against the canonical ARM REST API — `az rest` is part of core CLI and needs no extensions:
 
 ```bash
-az apim api policy create-or-update \
-  --resource-group $RG \
-  --service-name $APIM \
-  --api-id <your-api-id> \
-  --xml-policy @rdwr-azureapim-securepath-connector-v1.3.xml
+SUB=$(az account show --query id -o tsv)
+API_ID=<your-api-id>
+URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/$API_ID/policies/policy?api-version=2024-05-01"
+
+# Wrap the policy XML into the JSON envelope APIM expects.
+# format MUST be "rawxml" — the default "xml" rejects {{named-value}} references inside attributes.
+jq -Rs '{properties: {format: "rawxml", value: .}}' \
+   rdwr-azureapim-securepath-connector-v1.3.xml \
+   > /tmp/apim-policy-body.json
+
+az rest --method PUT --uri "$URI" \
+        --headers "Content-Type=application/json" \
+        --body @/tmp/apim-policy-body.json
 ```
+
+Success returns the stored policy contract. If you don't have `jq` (or are on Windows PowerShell), the [Onboarding Walkthrough](#step-3--apply-the-policy) below shows PowerShell, Bicep, and Azure Portal alternatives.
 
 **4. Smoke-test:**
 
@@ -317,13 +331,48 @@ Apply the XML policy at the **API level** (covers all operations) or per-operati
 4. Paste the contents of `rdwr-azureapim-securepath-connector-v1.3.xml`.
 5. Click **Save**.
 
-**Via Azure CLI:**
+**Via Azure CLI** — **`az apim` does NOT have a `policy` subgroup**. Verify with `az apim api -h`: only `operation`, `release`, `revision`, `schema`, `versionset` exist. Upload via `az rest` against the canonical ARM REST API (works on core CLI; no extension required):
+
 ```bash
-az apim api policy create-or-update \
-  --resource-group <rg> \
-  --service-name <apim> \
-  --api-id <api-id> \
-  --xml-policy @rdwr-azureapim-securepath-connector-v1.3.xml
+RG=<your-resource-group>
+APIM=<your-apim-instance>
+API_ID=<your-api-id>          # the resource name of an APIM API in this instance,
+                              # NOT the SecurePath endpoint hostname.
+                              # List yours: az apim api list -g $RG --service-name $APIM --query "[].name" -o tsv
+SUB=$(az account show --query id -o tsv)
+URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/$API_ID/policies/policy?api-version=2024-05-01"
+
+# Wrap the XML file into the JSON envelope APIM's REST API expects.
+# format MUST be "rawxml" — the default "xml" rejects {{named-value}} references inside XML attribute values.
+jq -Rs '{properties: {format: "rawxml", value: .}}' \
+   rdwr-azureapim-securepath-connector-v1.3.xml \
+   > /tmp/apim-policy-body.json
+
+az rest --method PUT --uri "$URI" \
+        --headers "Content-Type=application/json" \
+        --body @/tmp/apim-policy-body.json
+```
+
+A successful response is the stored policy contract (HTTP 201 on first apply, 200 on update). If validation fails, APIM responds with `400 ValidationError` and a per-line diagnostic (`Line N, position M`) — fix the XML and retry.
+
+**Via PowerShell** (Windows / cross-platform):
+```powershell
+$ctx = New-AzApiManagementContext -ResourceGroupName "<rg>" -ServiceName "<apim>"
+Set-AzApiManagementPolicy -Context $ctx -ApiId "<api-id>" `
+    -PolicyFilePath ".\rdwr-azureapim-securepath-connector-v1.3.xml" `
+    -Format "application/vnd.ms-azure-apim.policy.raw+xml"
+```
+The `raw+xml` format mirrors `rawxml` from the REST call — required for the same `{{named-value}}`-in-attribute reasons.
+
+**Via Bicep / ARM template** (declarative / GitOps):
+```bicep
+resource apiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = {
+  name: '${apimName}/${apiId}/policy'
+  properties: {
+    format: 'rawxml'
+    value: loadTextContent('./rdwr-azureapim-securepath-connector-v1.3.xml')
+  }
+}
 ```
 
 ### Step 4 — Verify
@@ -367,9 +416,14 @@ Via Azure Portal:
    ```
 3. Click **Save**. Inspection stops immediately on the next request.
 
-Via Azure CLI:
+Via Azure CLI — same `az rest` PUT used in Step 3, with the default scope policy as the body:
 ```bash
-# Replace the SecurePath policy XML with the default scope policy
+RG=<your-resource-group>
+APIM=<your-apim-instance>
+API_ID=<your-api-id>
+SUB=$(az account show --query id -o tsv)
+URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/$API_ID/policies/policy?api-version=2024-05-01"
+
 cat <<'EOF' > /tmp/default-scope-policy.xml
 <policies>
     <inbound><base /></inbound>
@@ -379,11 +433,12 @@ cat <<'EOF' > /tmp/default-scope-policy.xml
 </policies>
 EOF
 
-az apim api policy create-or-update \
-  --resource-group <rg> \
-  --service-name <apim> \
-  --api-id <api-id> \
-  --xml-policy @/tmp/default-scope-policy.xml
+jq -Rs '{properties: {format: "rawxml", value: .}}' /tmp/default-scope-policy.xml \
+   > /tmp/default-scope-body.json
+
+az rest --method PUT --uri "$URI" \
+        --headers "Content-Type=application/json" \
+        --body @/tmp/default-scope-body.json
 ```
 
 To verify the rollback worked:

@@ -2,9 +2,17 @@
 
 ---
 
-## v1.3.2 (2026-05-03, docs refreshed 2026-05-07) — Current
+## v1.3.2 (2026-05-03, docs refreshed 2026-05-08) — Current
 
 **Bug fix in v1.3.2.** Corrects `x-rdwr-o2v-bytes-sent` reporting in the response-phase log to match NGINX `$bytes_sent` semantics.
+
+### 2026-05-08 doc refresh — policy-upload command corrected (no policy XML change)
+
+Partner feedback (Dennis Usle) revealed a third inaccurate CLI command shipped in the README. The policy XML itself is unchanged.
+
+- **Policy upload — wrong CLI command.** Three sites in the README and one site in earlier release-notes documented `az apim api policy create-or-update` (and one site `az apim api policy update`) as the Azure CLI path for applying the SecurePath XML policy to an APIM API. **The `policy` subgroup does not exist** under `az apim api` — verified live against `az 2.77.0` (`az apim api -h` lists only `operation`, `release`, `revision`, `schema`, `versionset`) and against the canonical [`learn.microsoft.com/en-us/cli/azure/apim/api`](https://learn.microsoft.com/en-us/cli/azure/apim/api) reference. The customer's exact reported error — `'policy' is misspelled or not recognized by the system.` — was reproduced verbatim. Documentation now uses `az rest --method PUT` against the canonical [Api Policy - Create Or Update](https://learn.microsoft.com/en-us/rest/api/apimanagement/api-policy/create-or-update) ARM REST endpoint (`/apis/{api-id}/policies/policy?api-version=2024-05-01`). **Critical detail learned from live testing**: the request body's `properties.format` MUST be `rawxml`, not the default `xml` — the `xml` format rejects `{{named-value}}` references inside XML attribute values with `ValidationError: Name cannot begin with the '{' character`. PowerShell (`Set-AzApiManagementPolicy -Format "application/vnd.ms-azure-apim.policy.raw+xml"`) and Bicep (`Microsoft.ApiManagement/service/apis/policies` with `format: 'rawxml'`) alternatives are also documented. The end-to-end PUT was verified live against the QA APIM instance with the actual `rdwr-azureapim-securepath-connector-v1.3.xml` file: the PUT returned the canonical PolicyContract, the GET-after-PUT confirmed the policy is stored at `/apis/proxy-all/policies/policy`, and the gateway processes inbound requests through the policy as expected.
+
+- **`<api-id>` clarification.** The customer also pasted the SecurePath endpoint hostname (`<app-id>.oop.radwarecloud.net`) into `--api-id`, since "the api id" is ambiguous. Docs now explicitly call out that `<api-id>` is the resource name of an APIM API in their instance (e.g. `proxy-all`, `orders-api`) — discoverable with `az apim api list -g $RG --service-name $APIM --query "[].name" -o tsv` — and is **not** the SecurePath endpoint hostname (which goes into the `rdwr-app-ep-addr` Named Value at Step 2).
 
 ### 2026-05-07 doc refresh — onboarding accuracy fixes (no policy XML change)
 
@@ -28,7 +36,7 @@ The Quickstart section (lines 67–124) was also expanded with a new Step 2a cov
 
 ### Deployment
 
-Same XML policy file (`rdwr-azureapim-securepath-connector-v1.3.xml`). No new Named Values required. Existing deployments can upgrade by replacing the policy XML in place via `az apim api policy update` or the Azure Portal.
+Same XML policy file (`rdwr-azureapim-securepath-connector-v1.3.xml`). No new Named Values required. Existing deployments can upgrade by replacing the policy XML in place via the Azure Portal (Design → Policies code editor) or via `az rest --method PUT` against `/apis/{api-id}/policies/policy?api-version=2024-05-01` with `format: rawxml` — see README §Step 3 for the full command.
 
 ---
 
@@ -79,7 +87,7 @@ Same XML policy file (`rdwr-azureapim-securepath-connector-v1.3.xml`). No new Na
 - `x-rdwr-plugin-info` value: `700-v1.3.0`. Platform code `700` identifies this connector as the Azure API Management variant.
 
 ### Deployment
-Deploy the XML policy file (`rdwr-azureapim-securepath-connector-v1.3.xml`) to your APIM instance via the Azure Portal or `az apim api policy create-or-update`. Configure all required Named Values before applying the policy. See `README.md` for the complete onboarding walkthrough.
+Deploy the XML policy file (`rdwr-azureapim-securepath-connector-v1.3.xml`) to your APIM instance via the Azure Portal (Design → Policies code editor) or via `az rest --method PUT` against the ARM REST API. Configure all required Named Values before applying the policy. See `README.md` for the complete onboarding walkthrough.
 
 ### Requirements
 - Azure API Management instance (any tier: Developer, Basic, Standard, Premium, v2)
