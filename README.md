@@ -80,18 +80,22 @@ The fastest path from "we have an APIM instance" to "SecurePath is inspecting tr
 **2. Create the three Named Values that identify your SecurePath app** (the API Management policy expects these plus the 17 connector-configuration values from Step 2a — 20 Named Values total):
 
 ```bash
-RG=<your-resource-group>
-APIM=<your-apim-instance>
+# Replace each <placeholder> with your value. The angle-brackets mark
+# placeholders only — substitute the entire token (including the < and >)
+# with your actual value before pasting. The strings are quoted so bash
+# won't treat the angle-brackets as redirection if you paste literally.
+RG="<your-resource-group>"
+APIM="<your-apim-instance>"
 
-az apim nv create -g $RG --service-name $APIM \
+az apim nv create -g "$RG" --service-name "$APIM" \
   --named-value-id rdwr-app-ep-addr  --display-name rdwr-app-ep-addr \
   --value "<your-app-id>.oop.radwarecloud.net"
 
-az apim nv create -g $RG --service-name $APIM \
+az apim nv create -g "$RG" --service-name "$APIM" \
   --named-value-id rdwr-app-id       --display-name rdwr-app-id \
   --value "<your-app-id>"
 
-az apim nv create -g $RG --service-name $APIM \
+az apim nv create -g "$RG" --service-name "$APIM" \
   --named-value-id rdwr-api-key      --display-name rdwr-api-key \
   --secret true \
   --value "<your-api-key>"
@@ -100,6 +104,11 @@ az apim nv create -g $RG --service-name $APIM \
 **2a. Create the 17 policy-config Named Values.** The policy substitutes all 20 Named Values literally at upload time — if any are missing, the policy save will fail validation. Paste the bash loop below to create them with their recommended values:
 
 ```bash
+# RG and APIM should still be set from Step 2 above. If your shell session
+# has ended, re-set them here (same values as Step 2):
+#   RG="<your-resource-group>"
+#   APIM="<your-apim-instance>"
+
 declare -a NV=(
   "rdwr-app-ep-port=443"
   "rdwr-app-ep-ssl=true"
@@ -160,14 +169,23 @@ Success returns the stored policy contract (HTTP 201 on first apply, 200 on upda
 **4. Smoke-test:**
 
 ```bash
+# APIM is your APIM service name (set in Step 2). Re-set if your shell ended:
+#   APIM="<your-apim-instance>"
+#
+# Replace <api-path> with the path of the API you applied the policy to in Step 3
+# (e.g. "orders" for an API created with `az apim api create --path orders`).
+# Replace <subscription-key> with an APIM subscription key from your APIM instance
+# (Portal → APIM → Subscriptions → "Built-in all-access" or any product key).
+# This is the APIM subscription key — it is NOT the SecurePath rdwr-api-key from Step 2.
+
 # Should pass — request reaches your backend
-curl -i https://$APIM.azure-api.net/<api-path>/health \
-  -H "Ocp-Apim-Subscription-Key: <key>"
+curl -i "https://$APIM.azure-api.net/<api-path>/health" \
+  -H "Ocp-Apim-Subscription-Key: <subscription-key>"
 # Expected: HTTP 200 from your backend.
 
 # Should be blocked — SQL-injection probe in query string
 curl -i "https://$APIM.azure-api.net/<api-path>/?id=1' OR '1'='1" \
-  -H "Ocp-Apim-Subscription-Key: <key>"
+  -H "Ocp-Apim-Subscription-Key: <subscription-key>"
 # Expected: HTTP 403 with the SecurePath block page.
 ```
 
