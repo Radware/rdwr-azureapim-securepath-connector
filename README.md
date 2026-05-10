@@ -77,7 +77,7 @@ The fastest path from "we have an APIM instance" to "SecurePath is inspecting tr
 
 > **Tier note:** CA certificate upload is supported on Developer / Basic / Standard / Premium tiers only. **Standard v2 / Premium v2 (the v2 tiers) and Consumption tier** require trust to be configured per backend instead — see Microsoft's [Add a Custom CA Certificate](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-ca-certificates) doc.
 
-**2. Create the three environment-specific Named Values** (the API Management policy expects these and 15 others — see Step 2a below):
+**2. Create the three Named Values that identify your SecurePath app** (the API Management policy expects these plus the 17 connector-configuration values from Step 2a — 20 Named Values total):
 
 ```bash
 RG=<your-resource-group>
@@ -97,7 +97,7 @@ az apim nv create -g $RG --service-name $APIM \
   --value "<your-api-key>"
 ```
 
-**2a. Create the 15 policy-config Named Values.** The policy substitutes all 18 Named Values literally at upload time — if any are missing, the policy save will fail validation. Paste the bash loop below to create them with their recommended values:
+**2a. Create the 17 policy-config Named Values.** The policy substitutes all 20 Named Values literally at upload time — if any are missing, the policy save will fail validation. Paste the bash loop below to create them with their recommended values:
 
 ```bash
 declare -a NV=(
@@ -130,13 +130,18 @@ done
 
 **3. Apply the policy** to the API you want to protect (typically all operations).
 
-> **`<your-api-id>`** is the resource name of an APIM API you've already created (e.g. `proxy-all`, `orders-api`) — **not** the SecurePath endpoint hostname (that goes into Step 2 as `rdwr-app-ep-addr`). List your APIs with `az apim api list -g $RG --service-name $APIM --query "[].name" -o tsv`.
+> **`<your-api-id>`** is the resource name of an APIM API you've already created (e.g. `proxy-all`, `orders-api`) — **not** the SecurePath endpoint hostname (that goes into Step 2 as `rdwr-app-ep-addr`). List your APIs with `az apim api list -g "$RG" --service-name "$APIM" --query "[].name" -o tsv`.
 
 The Azure CLI does not expose policy upload via `az apim api …` (there is no `policy` subgroup). Use `az rest` against the canonical ARM REST API — `az rest` is part of core CLI and needs no extensions:
 
 ```bash
+# Re-declare here in case you're running this snippet in a fresh shell.
+# Replace each <placeholder> with your value (the angle-brackets are placeholders, not literal):
+RG="<your-resource-group>"
+APIM="<your-apim-instance>"
+API_ID="<your-api-id>"
+
 SUB=$(az account show --query id -o tsv)
-API_ID=<your-api-id>
 URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/$API_ID/policies/policy?api-version=2024-05-01"
 
 # Wrap the policy XML into the JSON envelope APIM expects.
@@ -150,7 +155,7 @@ az rest --method PUT --uri "$URI" \
         --body @/tmp/apim-policy-body.json
 ```
 
-Success returns the stored policy contract. If you don't have `jq` (or are on Windows PowerShell), the [Onboarding Walkthrough](#step-3--apply-the-policy) below shows PowerShell, Bicep, and Azure Portal alternatives.
+Success returns the stored policy contract (HTTP 201 on first apply, 200 on update). If you don't have `jq` (or are on Windows PowerShell), the [Onboarding Walkthrough](#step-3--apply-the-policy) below shows PowerShell, Bicep, and Azure Portal alternatives.
 
 **4. Smoke-test:**
 
@@ -233,7 +238,7 @@ Both certificates are required. The provisioning step ("CA certificate update in
 
 The policy reads all configuration from APIM [Named Values](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-properties). Create them via the Azure Portal, Azure CLI, or your IaC tool of choice.
 
-**Tier 1 — required, set per-environment from your Radware Cloud portal:**
+**Your SecurePath app credentials (3 values) — set these from your Radware Cloud portal:**
 
 | Named Value       | Example                              | Secret? | Description                                     |
 |-------------------|--------------------------------------|:-------:|-------------------------------------------------|
@@ -241,9 +246,9 @@ The policy reads all configuration from APIM [Named Values](https://learn.micros
 | `rdwr-app-id`     | `your-app-id`                        |    —    | Application ID from the Radware Cloud portal    |
 | `rdwr-api-key`    | `your-api-key`                       |  **✓**  | API key from the Radware Cloud portal — **always** create with `--secret true` |
 
-**Tier 2 — required, set to the recommended value below (the policy doesn't fall back if you skip them):**
+**Connector configuration (17 values) — set each to the recommended value below (the policy doesn't fall back if you skip them):**
 
-> **All 18 Named Values must exist.** The policy uses `{{name}}` substitution at policy-save time — if any referenced Named Value is missing, APIM rejects the policy upload with a *"Named Value 'rdwr-...' not found"* error. The "Recommended value" column below is **the literal string to set as the Named Value's value**, not a fallback that's auto-applied if you skip the Named Value.
+> **All 20 Named Values must exist.** The policy uses `{{name}}` substitution at policy-save time — if any referenced Named Value is missing, APIM rejects the policy upload with a *"Named Value 'rdwr-...' not found"* error. The "Recommended value" column below is **the literal string to set as the Named Value's value**, not a fallback that's auto-applied if you skip the Named Value.
 
 | Named Value                                | Recommended value                                      | Secret? | Description                                                  |
 |--------------------------------------------|--------------------------------------------------------|:-------:|--------------------------------------------------------------|
@@ -272,15 +277,15 @@ The policy reads all configuration from APIM [Named Values](https://learn.micros
 
 > **About marking secrets:** only `rdwr-api-key` should be marked as a Secret Named Value (`--secret true`). Plain Named Values are returned by `az apim nv show` directly and visible in the Portal — useful for operational checks. Secret Named Values are encrypted at rest, masked as `••••` in the Portal display, and require `az apim nv show-secret` (a separate command) to read back. **Note:** APIM's API Inspector trace shows the *resolved* Named Value at policy-execution time, so Secret Named Values are not masked in trace output once a policy stamps them into a header / URL / body. For production, restrict tracing-enabled subscriptions or store `rdwr-api-key` in [Azure Key Vault](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-properties#key-vault-secrets) (Microsoft's recommended option — supports automatic four-hour rotation).
 
-#### Azure CLI — complete create script for the 15 Tier-2 Named Values
+#### Azure CLI — complete create script for the 17 connector-configuration Named Values
 
-If you ran the [Quickstart](#quickstart-15-minutes-end-to-end), the 3 Tier-1 Named Values are already created. Paste the script below for the remaining 15. Set `RG` and `APIM` first.
+If you ran the [Quickstart](#quickstart-15-minutes-end-to-end), the 3 SecurePath-app-credential Named Values are already created. Paste the script below for the remaining 17. Set `RG` and `APIM` first.
 
 ```bash
 RG=<your-resource-group>
 APIM=<your-apim-instance>
 
-# Tier 2 — Named Values that the policy substitutes literally; create with the recommended value.
+# Connector configuration — Named Values the policy substitutes literally; create each with the recommended value.
 declare -a NV=(
   "rdwr-app-ep-port=443"
   "rdwr-app-ep-ssl=true"
@@ -318,7 +323,7 @@ If a Named Value already exists from an earlier attempt, `az apim nv create` ret
 az apim nv list -g "$RG" --service-name "$APIM" --query "[].{name:name,secret:secret}" -o table
 ```
 
-Expect 18 rows total (3 Tier-1 + 15 Tier-2). If any are missing, the policy upload in Step 3 will fail validation. If you see extras with the `rdwr-` prefix that aren't in the tables above, those are stale from an earlier release and can be deleted with `az apim nv delete -g $RG --service-name $APIM --named-value-id <name>`.
+Expect 20 rows total (3 SecurePath-app credentials + 17 connector configuration). If any are missing, the policy upload in Step 3 will fail validation. If you see extras with the `rdwr-` prefix that aren't in the tables above, those are stale from an earlier release and can be deleted with `az apim nv delete -g "$RG" --service-name "$APIM" --named-value-id <name>`.
 
 ### Step 3 — Apply the Policy
 

@@ -98,3 +98,25 @@ Outbound:
 - **Policy applied at**: API level (all operations) or per-operation
 - **SecurePath app**: configured via Named Values
 - **Subscription key**: required if APIM subscription validation is enabled
+
+## Release-zip build recipe — IMPORTANT: certs/ MUST be force-included
+
+`*.pem` and `*.cer` are gitignored (so working-tree CA bundles never accidentally land in commits), and the `certs/` directory only tracks `certs/README.md`. **`git archive` therefore EXCLUDES the cert PEM files.** Customers download the zip and find `certs/README.md` only — no `rdwr-root-ca.pem`, no `rdwr-intermediate-ca.pem`, no `rdwr-ca-chain.pem` — which silently breaks Step 1 of the onboarding flow (CA upload to APIM).
+
+This was a pre-existing bug across v1.3.0, v1.3.1, and the original v1.3.2 release; caught in the 2026-05-08 customer-audit pass. Every release-zip build MUST copy the cert PEMs from the working tree into the staged tarball directory before zipping:
+
+```bash
+TMP=$(mktemp -d) && cd "$TMP"
+git -C <repo> archive --format=tar --prefix='rdwr-azureapim-securepath-connector-v1.3.2/' HEAD | tar -x
+rm -f rdwr-azureapim-securepath-connector-v1.3.2/CLAUDE.md          # engineering-only
+cp <repo>/certs/rdwr-root-ca.pem         rdwr-azureapim-securepath-connector-v1.3.2/certs/   # GITIGNORED but customer-required
+cp <repo>/certs/rdwr-intermediate-ca.pem rdwr-azureapim-securepath-connector-v1.3.2/certs/   # GITIGNORED but customer-required
+cp <repo>/certs/rdwr-ca-chain.pem        rdwr-azureapim-securepath-connector-v1.3.2/certs/   # GITIGNORED but informational
+zip -qr /tmp/rdwr-azureapim-securepath-connector-v1.3.2.zip rdwr-azureapim-securepath-connector-v1.3.2/
+```
+
+Verify the resulting zip contains all three PEM files plus `certs/README.md`:
+```bash
+unzip -l /tmp/rdwr-azureapim-securepath-connector-v1.3.2.zip | grep certs
+# expect: certs/README.md, certs/rdwr-root-ca.pem, certs/rdwr-intermediate-ca.pem, certs/rdwr-ca-chain.pem
+```
