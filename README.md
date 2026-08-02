@@ -667,3 +667,31 @@ For full release notes, see [`release-notes.md`](release-notes.md).
 Copyright © 2024–2026 Radware Ltd. All rights reserved.
 
 Proprietary and confidential. Unauthorized copying, distribution, or use of this software is strictly prohibited.
+
+
+---
+
+## Certificate verification
+
+SecurePath endpoints present a certificate issued by **Radware's own certificate
+authority**, which is not one of the public authorities API Management trusts by default.
+The connector ships that authority as `certs/rdwr-ca-chain.pem`.
+
+If your API Management instance validates certificates on outbound calls, upload the
+authority so the inspection call is trusted:
+
+**Portal** — *APIs → your instance → Security → Certificates → CA certificates → + Add*,
+then upload `certs/rdwr-ca-chain.pem`.
+
+**Azure CLI:**
+
+```bash
+az apim api-version-set list --resource-group <rg> --service-name <apim>   # confirm access first
+az rest --method PUT \
+  --uri "https://management.azure.com/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.ApiManagement/service/<apim>/certificates/rdwr-ca?api-version=2022-08-01" \
+  --body @rdwr-ca-body.json
+```
+
+**Without it,** the inspection call fails the TLS handshake. Inspection failures fail
+open, so requests are served **uninspected** while everything appears healthy — check the
+policy trace after any change here.

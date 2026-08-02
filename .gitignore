@@ -23,3 +23,9 @@ rdwr_nginx_connector_v1.0.6/
 *.zip
 *.tar.gz
 SHA256SUMS
+
+# ...but the Radware CA chain MUST ship so customers can upload it to API
+# Management. These are public CA certificates presented on every TLS
+# handshake, not secrets.
+!certs/rdwr-ca-chain.pem
+!rdwr_ca_chain.pem
