@@ -1,697 +1,608 @@
 # Radware SecurePath Connector for Azure API Management
 
-The SecurePath connector adds Radware Cloud WAF and Bot Manager protection to Azure API Management (APIM). Every request your APIs serve is inspected by SecurePath before it reaches your backend, with allow / block / redirect verdicts enforced at the gateway. The connector is delivered as a **single XML policy file** that runs entirely inside APIM's policy pipeline — no custom C# code, no Functions, no sidecars, no separate compute.
+This guide takes you from an existing API Management instance to SecurePath inspecting your API
+traffic.
 
-| What you get | Where it shows up |
-|--------------|-------------------|
-| **WAF** — SQL-injection / XSS / RFI / file-upload / path traversal blocking, plus the rest of the SecurePath rule set | HTTP 403 to the client with SecurePath's block page (HTML) or structured block JSON |
-| **Redirect / challenge** — risk-based redirects to a SecurePath-issued challenge URL | HTTP 301/302 to the client |
-| **Bot Manager** — BM cookie propagation (`__uzma`, `__uzmf`, `uzmcr`, etc.) and `ShieldSquare-Response` forwarding on every verdict path | `Set-Cookie` and BM headers on the client response (allow, block, redirect alike) |
-| **Response-phase analytics (v2)** — fire-and-forget log POST after every response, with disposition header (`allowed` / `blocked`) | Visible in the Radware Cloud "events" view; near-zero client-visible latency |
-| **Reserved header security** — rejects (HTTP 403) any client request that contains spoofed `x-rdwr-*` headers | 403 returned at the gateway, request never forwarded |
-| **Static-asset bypass** — configured methods + extensions skip inspection | Lower per-request cost on cacheable static traffic |
-| **Fail-open by default** — if SecurePath is unreachable, traffic continues to your backend | Configurable via Named Values |
-
-**Is this for you?** If you run Azure API Management (any tier — Developer, Basic, Standard, Premium, v2, with caveats for Consumption) and have (or want) a Radware Cloud SecurePath subscription. If your gateway is something else — Kong, NGINX, MuleSoft Flex Gateway, F5, HAProxy, Envoy — Radware ships a separate connector for each; this repo is APIM only.
-
-> **What APIM does NOT do — JavaScript injection.** APIM XML policies cannot modify response bodies, so the Bot Manager browser-fingerprinting JS injection that other SecurePath connectors do is not available here. This is rarely an issue: APIM is an API gateway, so the traffic is typically JSON / XML / gRPC consumed by backend services, not HTML rendered in browsers. Bot Manager cookie propagation (the part that matters for non-browser clients) works in full.
+The connector is a single XML policy applied to an API Management API. On every request it makes
+a short inspection call to your SecurePath application and enforces the verdict it returns. On the
+response it sends an asynchronous log entry, which adds no client-visible latency.
 
 ---
 
-## Architecture
+## How to run this guide
 
-```
-        ┌──────────────────┐
-        │  Client request  │  (Host: api.example.com, /v1/orders, ...)
-        └────────┬─────────┘
-                 │ HTTPS (Azure-terminated)
-                 ▼
-        ┌──────────────────────────────────────────┐
-        │  Azure API Management gateway            │
-        │                                          │
-        │  ┌────────────────────────────────────┐  │
-        │  │ <inbound> SecurePath policy        │  │      ┌────────────────┐
-        │  │   • build sideband request         │  │      │  SecurePath    │
-        │  │   • send-request to SP   ──────────┼──┼─────▶│  Cloud         │
-        │  │   • parse verdict        ◀─────────┼──┼──────│  endpoint      │
-        │  │   • allow / block / redirect       │  │      └────────────────┘
-        │  └────────────────────────────────────┘  │              ▲
-        │                                          │              │ async
-        │  ┌────────────────────────────────────┐  │              │ log POST
-        │  │ <outbound> response-phase log      │  │              │
-        │  │   • send-one-way-request to SP ────┼──┼──────────────┘
-        │  └────────────────────────────────────┘  │
-        └─────────────────┬────────────────────────┘
-                          │ allowed → forward
-                          ▼
-        ┌──────────────────────────────────────────┐
-        │  Your backend (App Service, AKS, AWS,    │
-        │  on-prem, function app, anything APIM    │
-        │  can reach)                              │
-        └──────────────────────────────────────────┘
-```
+**Every command block on this page is self-contained.** Each one begins with the same six settings
+block. Fill those six values in once, keep them somewhere handy, and paste the same header at the
+top of each block as you work through the steps. You can stop, close your terminal, come back
+tomorrow, and any block will still run on its own.
 
-For each client request, APIM:
+There are no comments inside the command blocks, so they paste cleanly into macOS Terminal, Linux
+and Azure Cloud Shell alike.
 
-1. Runs the SecurePath policy in the **inbound** pipeline.
-2. The policy assembles the SecurePath sideband headers (`x-rdwr-app-id`, `x-rdwr-api-key`, `x-rdwr-connector-ip`, etc.) and dispatches an HTTPS sideband request to your SecurePath application's endpoint via APIM's `<send-request>` policy.
-3. SecurePath returns a verdict (`allow`, `block`, `redirect`, or challenge).
-4. The policy enforces the verdict — forward to backend, return 403 with a block page, or 302 to a challenge URL.
-5. After the response is delivered to the client, the **outbound** pipeline fires an asynchronous v2 response-phase log POST to SecurePath via `<send-one-way-request>`. This is fire-and-forget and adds no client-visible latency.
+### Your six settings
 
-The policy is **stateless**. All configuration lives in APIM Named Values, read fresh on every request. Multi-region APIM, multi-zone APIM, scale-out APIM — all work the same way.
+| Variable | What it is | Where to get it |
+|---|---|---|
+| `RG` | Azure resource group holding your API Management instance | Azure portal |
+| `APIM` | API Management instance name | Azure portal |
+| `API_ID` | Resource name of the API you want to protect | `az apim api list`, in Step 0 |
+| `APP_ID` | Your SecurePath **Application ID** | Radware Cloud portal |
+| `API_KEY` | Your SecurePath **API key** | Radware Cloud portal |
+| `APP_EP` | Your SecurePath **inspection endpoint** hostname | Radware Cloud portal |
 
----
+### Worked example of the shapes
 
-## Quickstart (~15 minutes, end-to-end)
+The values below are illustrative — they show the *shape* each value takes, not values you can
+use:
 
-The fastest path from "we have an APIM instance" to "SecurePath is inspecting traffic." All commands assume Azure CLI; the Portal-equivalent steps are documented in the same section below.
+| Variable | Example |
+|---|---|
+| `RG` | `waaap` |
+| `APIM` | `securepath-apim` |
+| `API_ID` | `orders-api` |
+| `APP_ID` | `afa37f7d53ce4e76a4988c4955c2d7e5` |
+| `API_KEY` | `f4b1c2d3-1111-2222-3333-abcdefabcdef` |
+| `APP_EP` | `afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net` |
 
-> **You'll need:** an APIM instance you can edit, an active SecurePath application in the [Radware Cloud portal](https://portal.radwarecloud.com) (with the Application ID, API key, and `*.oop.radwarecloud.net` endpoint hostname handy), and Azure CLI signed in.
-
-**1. Upload the Radware CA chain** so APIM can verify SecurePath's TLS cert. Both certs are required (root + intermediate). **Use the Azure Portal — there is no `az apim` CLI command for CA certificates** (Azure CLI does not currently expose this; PowerShell `New-AzApiManagementSystemCertificate` and ARM templates are the only programmatic options):
-
-1. Azure Portal → your APIM instance → **Security → Certificates → CA certificates → + Add**.
-2. **Rename `certs/rdwr-root-ca.pem` to `rdwr-root-ca.cer` first** — APIM's upload dialog only accepts `.cer` files. PEM and CER are the same Base64 X.509 format, so a rename is sufficient (no conversion needed). Set the certificate ID to `rdwr-root-r1` and the **Store** to *Trusted Root Certification Authorities*.
-3. Click **+ Add** again, repeat for `certs/rdwr-intermediate-ca.pem` → rename to `.cer`, certificate ID `rdwr-ca-1a1`, **Store** *Intermediate Certification Authorities*.
-
-> **Tier note:** CA certificate upload is supported on Developer / Basic / Standard / Premium tiers only. **Standard v2 / Premium v2 (the v2 tiers) and Consumption tier** require trust to be configured per backend instead — see Microsoft's [Add a Custom CA Certificate](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-ca-certificates) doc.
-
-**2. Create the three Named Values that identify your SecurePath app** (the API Management policy expects these plus the 17 connector-configuration values from Step 2a — 20 Named Values total):
-
-```bash
-# Replace each <placeholder> with your value. The angle-brackets mark
-# placeholders only — substitute the entire token (including the < and >)
-# with your actual value before pasting. The strings are quoted so bash
-# won't treat the angle-brackets as redirection if you paste literally.
-RG="<your-resource-group>"
-APIM="<your-apim-instance>"
-
-az apim nv create -g "$RG" --service-name "$APIM" \
-  --named-value-id rdwr-app-ep-addr  --display-name rdwr-app-ep-addr \
-  --value "<your-app-id>.oop.radwarecloud.net"
-
-az apim nv create -g "$RG" --service-name "$APIM" \
-  --named-value-id rdwr-app-id       --display-name rdwr-app-id \
-  --value "<your-app-id>"
-
-az apim nv create -g "$RG" --service-name "$APIM" \
-  --named-value-id rdwr-api-key      --display-name rdwr-api-key \
-  --secret true \
-  --value "<your-api-key>"
-```
-
-**2a. Create the 17 policy-config Named Values.** The policy substitutes all 20 Named Values literally at upload time — if any are missing, the policy save will fail validation. Paste the bash loop below to create them with their recommended values:
-
-```bash
-# RG and APIM should still be set from Step 2 above. If your shell session
-# has ended, re-set them here (same values as Step 2):
-#   RG="<your-resource-group>"
-#   APIM="<your-apim-instance>"
-
-declare -a NV=(
-  "rdwr-app-ep-port=443"
-  "rdwr-app-ep-ssl=true"
-  "rdwr-app-ep-timeout-seconds=10"
-  "rdwr-body-max-size-bytes=100000"
-  "rdwr-partial-body-size-bytes=10240"
-  "rdwr-multipart-max-size-bytes=100000"
-  "rdwr-true-client-ip-header=x-forwarded-for"
-  "rdwr-api-base-path=/"
-  "rdwr-bot-manager-enabled=false"
-  "plugin-version-info=700-v1.3.2"
-  "static-extensions-enabled=true"
-  "static-list-of-methods-not-to-inspect=GET,HEAD"
-  "static-list-of-bypassed-extensions=png,jpg,css,js,gif,ico,svg,woff,woff2"
-  "static-inspect-if-query-string-exists=true"
-  "chunked-request-allowed-content-types=application/json,application/x-www-form-urlencoded"
-  "rdwr-inline-trusted-sources=##DISABLED##"
-  "rdwr-inline-headers-enabled=false"
-)
-for kv in "${NV[@]}"; do
-  name="${kv%%=*}"; value="${kv#*=}"
-  az apim nv create -g "$RG" --service-name "$APIM" \
-    --named-value-id "$name" --display-name "$name" --value "$value"
-done
-```
-
-> ⚠ **Heads up — empty-string values:** `rdwr-api-base-path` and `rdwr-inline-trusted-sources` would naturally be empty for most users (no path-prefix to strip; no IP allow-list). The Azure CLI rejects `--value ""`, so the recommended values above use sentinels the policy recognises: `/` (the policy strips trailing slash, so `/` resolves to "no path stripping") and `##DISABLED##` (the policy treats `##DISABLED##` / `disabled` / `off` / `false` / `none` / `~` / `-` as disabled). Set them to your real base path or CIDR list if you actually want those features.
-
-**3. Apply the policy** to the API you want to protect (typically all operations).
-
-> **`<your-api-id>`** is the resource name of an APIM API you've already created (e.g. `proxy-all`, `orders-api`) — **not** the SecurePath endpoint hostname (that goes into Step 2 as `rdwr-app-ep-addr`). List your APIs with `az apim api list -g "$RG" --service-name "$APIM" --query "[].name" -o tsv`.
-
-The Azure CLI does not expose policy upload via `az apim api …` (there is no `policy` subgroup). Use `az rest` against the canonical ARM REST API — `az rest` is part of core CLI and needs no extensions:
-
-```bash
-# Re-declare here in case you're running this snippet in a fresh shell.
-# Replace each <placeholder> with your value (the angle-brackets are placeholders, not literal):
-RG="<your-resource-group>"
-APIM="<your-apim-instance>"
-API_ID="<your-api-id>"
-
-SUB=$(az account show --query id -o tsv)
-URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/$API_ID/policies/policy?api-version=2024-05-01"
-
-# Wrap the policy XML into the JSON envelope APIM expects.
-# format MUST be "rawxml" — the default "xml" rejects {{named-value}} references inside attributes.
-jq -Rs '{properties: {format: "rawxml", value: .}}' \
-   rdwr-azureapim-securepath-connector-v1.3.xml \
-   > /tmp/apim-policy-body.json
-
-az rest --method PUT --uri "$URI" \
-        --headers "Content-Type=application/json" \
-        --body @/tmp/apim-policy-body.json
-```
-
-Success returns the stored policy contract (HTTP 201 on first apply, 200 on update). If you don't have `jq` (or are on Windows PowerShell), the [Onboarding Walkthrough](#step-3--apply-the-policy) below shows PowerShell, Bicep, and Azure Portal alternatives.
-
-**4. Smoke-test:**
-
-```bash
-# APIM is your APIM service name (set in Step 2). Re-set if your shell ended:
-#   APIM="<your-apim-instance>"
-#
-# Replace <api-path> with the path of the API you applied the policy to in Step 3
-# (e.g. "orders" for an API created with `az apim api create --path orders`).
-# Replace <subscription-key> with an APIM subscription key from your APIM instance
-# (Portal → APIM → Subscriptions → "Built-in all-access" or any product key).
-# This is the APIM subscription key — it is NOT the SecurePath rdwr-api-key from Step 2.
-
-# Should pass — request reaches your backend
-curl -i "https://$APIM.azure-api.net/<api-path>/health" \
-  -H "Ocp-Apim-Subscription-Key: <subscription-key>"
-# Expected: HTTP 200 from your backend.
-
-# Should be blocked — SQL-injection probe in query string
-curl -i "https://$APIM.azure-api.net/<api-path>/?id=1' OR '1'='1" \
-  -H "Ocp-Apim-Subscription-Key: <subscription-key>"
-# Expected: HTTP 403 with the SecurePath block page.
-```
-
-If both checks pass, the connector is working end-to-end. The deeper walkthrough — every Named Value, deployment-shape caveats, configuration details, troubleshooting, and uninstall procedure — lives in [Onboarding Walkthrough](#onboarding-walkthrough) below.
-
----
-
-## Deployment shapes — does this work in MY APIM?
-
-The same policy XML works across every APIM deployment shape. Where the shapes differ is in **what you need to do operationally** to give APIM outbound network reach to SecurePath:
-
-| APIM shape | Status | What you need to do |
-|------------|:------:|---------------------|
-| **Developer / Basic / Standard / Premium** (the v1 family) | ✅ Fully supported | Standard onboarding — ensure outbound 443 to `*.oop.radwarecloud.net` works (it does by default unless you've added route-table restrictions). |
-| **Standard v2 / Premium v2** | ✅ Fully supported | Same as v1. The v2 family uses an updated runtime but the same policy engine. |
-| **Consumption tier** | ⚠️ Partial | Consumption-tier APIM imposes [policy-expression and execution limits](https://learn.microsoft.com/en-us/azure/api-management/api-management-features) — large-body buffering is limited and some advanced expressions are not available. The policy degrades gracefully (sideband and verdict enforcement still work; some edge-case headers and the inline-bypass IP allow-list are skipped). **Test in Consumption** before committing to it for production. |
-| **Self-hosted gateway** | ✅ Supported | The Self-Hosted Gateway uses the same policy engine as cloud APIM. The `<send-one-way-request>` log POST runs from the self-hosted node — make sure that node has outbound 443 to `*.oop.radwarecloud.net` and the Radware CA in its trust store. |
-| **Internal VNet (stv2 / Premium internal mode)** | ✅ Supported | The APIM gateway must have outbound network access to `*.oop.radwarecloud.net`. If your subnet route-tables / Azure Firewall / NSGs force-tunnel internet egress, explicitly allow the SecurePath endpoint FQDN. The `Microsoft.Web` service tag is **not** sufficient — SecurePath endpoints don't sit inside that tag's IP ranges. |
-| **Custom domains and backend mTLS** | ✅ Independent | The connector operates on the APIM-side request/response pipeline. Backend mTLS, custom domains, and gateway certificates do not interact with the SecurePath sideband. |
-
-### Latency expectations
-
-The sideband request adds approximately **20–80 ms** of synchronous overhead per request (median ~30 ms; p99 < 100 ms over public-internet egress to the closest SecurePath PoP). The default `rdwr-app-ep-timeout-seconds` is `10`, so a slow PoP causes at most a 10-second stall before the policy **fails open** and forwards the request to the backend.
-
-The response-phase log uses `<send-one-way-request>`, which is fire-and-forget — it adds no measurable client-visible latency on the response path.
-
----
-
-## What's in this repo
-
-| Path | Purpose |
-|------|---------|
-| `rdwr-azureapim-securepath-connector-v1.3.xml` | The policy XML you apply to your APIM API |
-| `release-notes.md` | Per-version release notes — what changed, when |
-| `certs/rdwr-root-ca.pem` | Radware Root CA — upload to APIM CA store |
-| `certs/rdwr-intermediate-ca.pem` | Radware Intermediate CA — upload to APIM CA store |
-| `certs/rdwr-ca-chain.pem` | Combined chain (informational; APIM needs them uploaded individually) |
-| `certs/README.md` | CA upload guide for Portal / CLI / ARM-Bicep |
-
----
-
-## Onboarding Walkthrough
-
-The full step-by-step. Pick the path that matches your tooling.
-
-### Step 1 — Upload the Radware CA chain to APIM
-
-The SecurePath endpoint (`*.oop.radwarecloud.net`) is signed by a private Radware CA. APIM must trust the chain before sideband calls will succeed.
-
-**Important — Azure CLI does NOT support APIM CA certificate upload.** The `az apim` command tree has no `certificate` or `certificate-authority` subcommand. You must use the Portal, PowerShell, or ARM/Bicep. (Earlier versions of these docs incorrectly suggested an `az apim certificate create` command — that command has never existed in `az apim`. The only available paths are below.)
-
-**Tier prerequisite:** This step applies to **Developer / Basic / Standard / Premium** tiers (the v1 family). If your APIM is on **Standard v2 / Premium v2** or **Consumption** tier, the CA-certificates page is unavailable; trust is configured per-backend instead — see Microsoft's [Add a Custom CA Certificate](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-ca-certificates) doc.
-
-**Path A — Azure Portal (recommended):**
-
-1. Rename `certs/rdwr-root-ca.pem` to `certs/rdwr-root-ca.cer` and `certs/rdwr-intermediate-ca.pem` to `certs/rdwr-intermediate-ca.cer`. **PEM and CER are the same Base64 X.509 format**; APIM's upload dialog filters by extension and accepts only `.cer` (no conversion needed, just rename).
-2. Open the Azure Portal → your APIM instance → **Security → Certificates → CA certificates** → **+ Add**.
-3. **Upload `rdwr-root-ca.cer`**: certificate ID `rdwr-root-r1`, **Store** = *Trusted Root Certification Authorities*. Password field is optional (leave blank — only the public key is needed). Save.
-4. Click **+ Add** again. **Upload `rdwr-intermediate-ca.cer`**: certificate ID `rdwr-ca-1a1`, **Store** = *Intermediate Certification Authorities*. Save.
-
-**Path B — PowerShell:** Microsoft documents `New-AzApiManagementSystemCertificate` for this — see [Microsoft's CA certificate doc](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-ca-certificates).
-
-**Path C — ARM / Bicep:** an example template is in `certs/README.md` for IaC pipelines.
-
-Both certificates are required. The provisioning step ("CA certificate update in progress") can take 15+ minutes on larger instances.
-
-### Step 2 — Create Named Values
-
-The policy reads all configuration from APIM [Named Values](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-properties). Create them via the Azure Portal, Azure CLI, or your IaC tool of choice.
-
-**Your SecurePath app credentials (3 values) — set these from your Radware Cloud portal:**
-
-| Named Value       | Example                              | Secret? | Description                                     |
-|-------------------|--------------------------------------|:-------:|-------------------------------------------------|
-| `rdwr-app-ep-addr`| `your-app-id.oop.radwarecloud.net`   |    —    | SecurePath endpoint hostname                    |
-| `rdwr-app-id`     | `your-app-id`                        |    —    | Application ID from the Radware Cloud portal    |
-| `rdwr-api-key`    | `your-api-key`                       |  **✓**  | API key from the Radware Cloud portal — **always** create with `--secret true` |
-
-**Connector configuration (17 values) — set each to the recommended value below (the policy doesn't fall back if you skip them):**
-
-> **All 20 Named Values must exist.** The policy uses `{{name}}` substitution at policy-save time — if any referenced Named Value is missing, APIM rejects the policy upload with a *"Named Value 'rdwr-...' not found"* error. The "Recommended value" column below is **the literal string to set as the Named Value's value**, not a fallback that's auto-applied if you skip the Named Value.
-
-| Named Value                                | Recommended value                                      | Secret? | Description                                                  |
-|--------------------------------------------|--------------------------------------------------------|:-------:|--------------------------------------------------------------|
-| `rdwr-app-ep-port`                         | `443`                                                  |    —    | SecurePath endpoint port                                     |
-| `rdwr-app-ep-ssl`                          | `true`                                                 |    —    | Use HTTPS for sideband requests                              |
-| `rdwr-app-ep-timeout-seconds`              | `10`                                                   |    —    | Sideband request timeout (seconds)                           |
-| `rdwr-body-max-size-bytes`                 | `100000`                                               |    —    | Max request body forwarded to SecurePath                     |
-| `rdwr-partial-body-size-bytes`             | `10240`                                                |    —    | Partial body size for oversized chunked requests             |
-| `rdwr-multipart-max-size-bytes`            | `100000`                                               |    —    | Max multipart form-data body size                            |
-| `rdwr-true-client-ip-header`               | `x-forwarded-for`                                      |    —    | Header containing the real client IP                         |
-| `rdwr-api-base-path` ⚠                      | `/`  *(see callout below)*                             |    —    | API base path to strip from sideband URI (e.g., `/api`)      |
-| `rdwr-bot-manager-enabled`                 | `false`                                                |    —    | Enable Bot Manager cookie and header handling                |
-| `plugin-version-info`                      | `700-v1.3.2`                                           |    —    | Plugin version string sent in `x-rdwr-plugin-info`           |
-| `static-extensions-enabled`                | `true`                                                 |    —    | Enable static resource bypass                                |
-| `static-list-of-methods-not-to-inspect`    | `GET,HEAD`                                             |    —    | HTTP methods eligible for static bypass                      |
-| `static-list-of-bypassed-extensions`       | `png,jpg,css,js,gif,ico,svg,woff,woff2`                |    —    | File extensions to bypass                                    |
-| `static-inspect-if-query-string-exists`    | `true`                                                 |    —    | Force inspection when a query string is present              |
-| `chunked-request-allowed-content-types`    | `application/json,application/x-www-form-urlencoded`   |    —    | Content types eligible for chunked body forwarding           |
-| `rdwr-inline-trusted-sources` ⚠             | `##DISABLED##`  *(see callout below)*                  |    —    | Optional inline-bypass IP allow-list                         |
-| `rdwr-inline-headers-enabled`              | `false`                                                |    —    | Optional inline-bypass header signature mode                 |
-
-> ⚠ **Empty-string trap.** Two of these Named Values would naturally be left empty (`rdwr-api-base-path` if you have no path-prefix to strip; `rdwr-inline-trusted-sources` if you don't want an IP allow-list). **`az apim nv create --value ""` rejects empty strings** — the create call fails and the Named Value never gets created, which then fails the policy upload. The policy is built to recognise sentinel-disable tokens for both:
+> **The mistake almost everyone makes once.** The Radware Cloud portal also shows a hostname ending
+> `.v1.radwarecloud.net`. That is your application's front-end address and this connector does not
+> use it. **If the value you are about to put in `APP_ID` contains a dot, it is not the Application
+> ID** — the Application ID has no dots.
 >
-> - **`rdwr-api-base-path`**: set to `/` to mean "no path stripping". The policy strips the trailing `/`, resolving to empty internally — same effect as a true empty value, but the CLI accepts it. If your API actually does sit under a base path (e.g. all operations under `/api/v1`), set this to that path.
-> - **`rdwr-inline-trusted-sources`**: set to `##DISABLED##` to disable the inline-bypass IP allow-list. The policy treats `##DISABLED##` / `disabled` / `off` / `false` / `none` / `~` / `-` (case-insensitive) as disabled. If you do want an allow-list, set this to a comma-separated list of CIDRs and/or single IPs (e.g., `10.0.0.0/16,1.2.3.4`).
+> A wrong Application ID produces no error at all. The connector keeps serving traffic, uninspected.
+> Step 2c catches it.
 
-> **About marking secrets:** only `rdwr-api-key` should be marked as a Secret Named Value (`--secret true`). Plain Named Values are returned by `az apim nv show` directly and visible in the Portal — useful for operational checks. Secret Named Values are encrypted at rest, masked as `••••` in the Portal display, and require `az apim nv show-secret` (a separate command) to read back. **Note:** APIM's API Inspector trace shows the *resolved* Named Value at policy-execution time, so Secret Named Values are not masked in trace output once a policy stamps them into a header / URL / body. For production, restrict tracing-enabled subscriptions or store `rdwr-api-key` in [Azure Key Vault](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-properties#key-vault-secrets) (Microsoft's recommended option — supports automatic four-hour rotation).
+### The order, and why it matters
 
-#### Azure CLI — complete create script for the 17 connector-configuration Named Values
+| # | Step | Why it belongs here |
+|---|------|---------------------|
+| 0 | Confirm your tier and find your API | The tier decides which path you take in Step 1. The two paths are not interchangeable. |
+| 1 | Establish TLS trust | Until this is in place, every inspection call fails and traffic is served **uninspected**. On some tiers it takes 15+ minutes to provision, so start it early. |
+| 2 | Create the Named Values | The policy resolves them when it is saved. If one is missing, Step 3 is rejected outright. This is the most common reason Step 3 fails. |
+| 3 | Apply the policy | Needs an existing API and all 20 Named Values already in place. |
+| 4 | Verify | Only meaningful once Step 1 has finished provisioning. Running it earlier reports a false failure. |
 
-If you ran the [Quickstart](#quickstart-15-minutes-end-to-end), the 3 SecurePath-app-credential Named Values are already created. Paste the script below for the remaining 17. Set `RG` and `APIM` first.
+**For the Azure CLI path** you need `jq`, and a shell opened in the directory containing the policy
+XML. If you would rather not install `jq`, the Azure Portal path in Step 3 needs no local tooling.
+
+---
+---
+
+# ▶ STEP 0 — Confirm your tier and find your API
+
+**What this does:** tells you which Step 1 path to take, and gives you the `API_ID` value.
 
 ```bash
-RG=<your-resource-group>
-APIM=<your-apim-instance>
+RG="your-resource-group"
+APIM="your-apim-instance"
 
-# Connector configuration — Named Values the policy substitutes literally; create each with the recommended value.
-declare -a NV=(
-  "rdwr-app-ep-port=443"
-  "rdwr-app-ep-ssl=true"
-  "rdwr-app-ep-timeout-seconds=10"
-  "rdwr-body-max-size-bytes=100000"
-  "rdwr-partial-body-size-bytes=10240"
-  "rdwr-multipart-max-size-bytes=100000"
-  "rdwr-true-client-ip-header=x-forwarded-for"
-  "rdwr-api-base-path=/"
-  "rdwr-bot-manager-enabled=false"
-  "plugin-version-info=700-v1.3.2"
-  "static-extensions-enabled=true"
-  "static-list-of-methods-not-to-inspect=GET,HEAD"
-  "static-list-of-bypassed-extensions=png,jpg,css,js,gif,ico,svg,woff,woff2"
-  "static-inspect-if-query-string-exists=true"
-  "chunked-request-allowed-content-types=application/json,application/x-www-form-urlencoded"
-  "rdwr-inline-trusted-sources=##DISABLED##"
-  "rdwr-inline-headers-enabled=false"
-)
-
-for kv in "${NV[@]}"; do
-  name="${kv%%=*}"
-  value="${kv#*=}"
-  az apim nv create -g "$RG" --service-name "$APIM" \
-    --named-value-id "$name" --display-name "$name" \
-    --value "$value"
-done
+az apim show -g "$RG" -n "$APIM" --query "{name:name, tier:sku.name}" -o table
+az apim api list -g "$RG" --service-name "$APIM" --query "[].{name:name,path:path}" -o table
 ```
 
-If a Named Value already exists from an earlier attempt, `az apim nv create` returns *"NamedValue with the specified id already exists"* — switch that one Named Value to `az apim nv update` for the value you want.
+The first table gives your tier. The second lists your APIs — the `name` column is your `API_ID`.
 
-#### Verify — every Named Value the policy will reference
+- Tier is **Developer, Basic, Standard or Premium** → Step 1, **Path A**
+- Tier is **Standard v2 or Premium v2** → Step 1, **Path B**
+- Tier is **Consumption** → not currently supported; contact Radware
+
+---
+---
+
+# ▶ STEP 1 — Establish TLS trust for the inspection endpoint
+
+**What this does:** lets API Management trust the certificate your SecurePath endpoint presents.
+Until this is done, every inspection call fails silently and traffic is served uninspected.
+
+The inspection endpoint uses a private Radware certificate authority, which API Management does not
+trust by default.
+
+## Path A — Developer, Basic, Standard, Premium
+
+These tiers have a service-level CA certificate store. Azure CLI cannot upload to it, so use the
+Portal, PowerShell or ARM/Bicep.
+
+1. Rename `certs/rdwr-root-ca.pem` to `rdwr-root-ca.cer`, and `certs/rdwr-intermediate-ca.pem` to
+   `rdwr-intermediate-ca.cer`. PEM and CER are the same Base64 X.509 format — the upload dialog
+   filters on the extension, so renaming is enough.
+2. Portal → your API Management instance → **Security → Certificates → CA certificates → + Add**.
+3. Upload `rdwr-root-ca.cer`, store **Trusted Root Certification Authorities**.
+4. **+ Add** again, upload `rdwr-intermediate-ca.cer`, store **Intermediate Certification
+   Authorities**.
+
+> **Two tabs look alike — only one works.** Under *Security → Certificates* there are separate
+> **Certificates** and **CA certificates** tabs. The plain **Certificates** tab holds client
+> certificates used to authenticate *to* a backend; putting the Radware CAs there has no effect on
+> the inspection call. They must go in **CA certificates**.
+
+Provisioning shows as *"CA certificate update in progress"* and takes **15 minutes or more**. Do
+not run Step 4 until it finishes.
+
+**Confirm they landed in the trust store:**
 
 ```bash
-az apim nv list -g "$RG" --service-name "$APIM" --query "[].{name:name,secret:secret}" -o table
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+az apim show -g "$RG" -n "$APIM" --query "certificates[].{store:storeName,subject:certificate.subject}" -o table
 ```
 
-Expect 20 rows total (3 SecurePath-app credentials + 17 connector configuration). If any are missing, the policy upload in Step 3 will fail validation. If you see extras with the `rdwr-` prefix that aren't in the tables above, those are stale from an earlier release and can be deleted with `az apim nv delete -g "$RG" --service-name "$APIM" --named-value-id <name>`.
+Expect two rows, one `Root` and one `CertificateAuthority`. An empty result means they are **not**
+in the trust store, whatever the Certificates blade shows you.
 
-### Step 3 — Apply the Policy
+## Path B — Standard v2, Premium v2
 
-Apply the XML policy at the **API level** (covers all operations) or per-operation as required.
+The v2 tiers have no service-level CA certificate store, and the platform rejects any attempt to
+add one. Trust is configured on a **backend entity** instead.
 
-**Via Azure Portal:**
-1. Navigate to **APIM instance → APIs → [your API]**.
-2. Select **All operations** (or a specific operation).
-3. Open the **Policy code editor**.
-4. Paste the contents of `rdwr-azureapim-securepath-connector-v1.3.xml`.
-5. Click **Save**.
+A backend entity records how API Management should talk to one particular URL. API Management
+applies it automatically to any outbound call matching that URL, so **no policy change is needed**.
 
-**Via Azure CLI** — **`az apim` does NOT have a `policy` subgroup**. Verify with `az apim api -h`: only `operation`, `release`, `revision`, `schema`, `versionset` exist. Upload via `az rest` against the canonical ARM REST API (works on core CLI; no extension required):
+**Azure Portal:**
 
-```bash
-RG=<your-resource-group>
-APIM=<your-apim-instance>
-API_ID=<your-api-id>          # the resource name of an APIM API in this instance,
-                              # NOT the SecurePath endpoint hostname.
-                              # List yours: az apim api list -g $RG --service-name $APIM --query "[].name" -o tsv
-SUB=$(az account show --query id -o tsv)
-URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/$API_ID/policies/policy?api-version=2024-05-01"
-
-# Wrap the XML file into the JSON envelope APIM's REST API expects.
-# format MUST be "rawxml" — the default "xml" rejects {{named-value}} references inside XML attribute values.
-jq -Rs '{properties: {format: "rawxml", value: .}}' \
-   rdwr-azureapim-securepath-connector-v1.3.xml \
-   > /tmp/apim-policy-body.json
-
-az rest --method PUT --uri "$URI" \
-        --headers "Content-Type=application/json" \
-        --body @/tmp/apim-policy-body.json
-```
-
-A successful response is the stored policy contract (HTTP 201 on first apply, 200 on update). If validation fails, APIM responds with `400 ValidationError` and a per-line diagnostic (`Line N, position M`) — fix the XML and retry.
-
-**Via PowerShell** (Windows / cross-platform):
-```powershell
-$ctx = New-AzApiManagementContext -ResourceGroupName "<rg>" -ServiceName "<apim>"
-Set-AzApiManagementPolicy -Context $ctx -ApiId "<api-id>" `
-    -PolicyFilePath ".\rdwr-azureapim-securepath-connector-v1.3.xml" `
-    -Format "application/vnd.ms-azure-apim.policy.raw+xml"
-```
-The `raw+xml` format mirrors `rawxml` from the REST call — required for the same `{{named-value}}`-in-attribute reasons.
-
-**Via Bicep / ARM template** (declarative / GitOps):
-```bicep
-resource apiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = {
-  name: '${apimName}/${apiId}/policy'
-  properties: {
-    format: 'rawxml'
-    value: loadTextContent('./rdwr-azureapim-securepath-connector-v1.3.xml')
-  }
-}
-```
-
-### Step 4 — Verify
-
-```bash
-# Send a benign test request
-curl -v https://<apim-name>.azure-api.net/<api-path>/ \
-  -H "Ocp-Apim-Subscription-Key: <subscription-key>"
-```
-
-Expected: `HTTP 200` from the backend, indicating the request was inspected and allowed.
-
-```bash
-# Trigger a block — embed a typical SQL injection probe in the query string
-curl -v "https://<apim-name>.azure-api.net/<api-path>/?id=1' OR '1'='1" \
-  -H "Ocp-Apim-Subscription-Key: <subscription-key>"
-```
-
-Expected: `HTTP 403` with the SecurePath block page, confirming the connector is enforcing verdicts.
-
-To inspect the sideband flow in detail, enable APIM Tracing for one request and look at the `send-request` step — it will show the outgoing `x-rdwr-*` headers and the SecurePath verdict response.
-
-### Step 5 — Uninstall / rollback (when needed)
-
-If you need to remove the policy (e.g., during incident response or to revert to a prior version), there are two safe paths:
-
-**Path A — disable inspection without removing the policy.** Set `rdwr-app-ep-addr` to an unreachable value or set `rdwr-app-ep-timeout-seconds` to `0`. The policy fails open on connection error / timeout, so traffic flows to the backend without inspection. This is **non-destructive** and reversible by editing the Named Value back. Useful when you want to keep the policy in place for fast re-enablement after a SecurePath-side incident.
-
-**Path B — fully remove the policy.** Replace the policy XML with the APIM default scope policy.
-
-Via Azure Portal:
-1. Navigate to **APIM instance → APIs → [your API] → All operations → Policy code editor**.
-2. Replace the policy body with the default APIM scope policy:
-   ```xml
-   <policies>
-       <inbound><base /></inbound>
-       <backend><base /></backend>
-       <outbound><base /></outbound>
-       <on-error><base /></on-error>
-   </policies>
-   ```
-3. Click **Save**. Inspection stops immediately on the next request.
-
-Via Azure CLI — same `az rest` PUT used in Step 3, with the default scope policy as the body:
-```bash
-RG=<your-resource-group>
-APIM=<your-apim-instance>
-API_ID=<your-api-id>
-SUB=$(az account show --query id -o tsv)
-URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/$API_ID/policies/policy?api-version=2024-05-01"
-
-cat <<'EOF' > /tmp/default-scope-policy.xml
-<policies>
-    <inbound><base /></inbound>
-    <backend><base /></backend>
-    <outbound><base /></outbound>
-    <on-error><base /></on-error>
-</policies>
-EOF
-
-jq -Rs '{properties: {format: "rawxml", value: .}}' /tmp/default-scope-policy.xml \
-   > /tmp/default-scope-body.json
-
-az rest --method PUT --uri "$URI" \
-        --headers "Content-Type=application/json" \
-        --body @/tmp/default-scope-body.json
-```
-
-To verify the rollback worked:
-```bash
-curl -v "https://<apim-name>.azure-api.net/<api-path>/?id=1' OR '1'='1" \
-  -H "Ocp-Apim-Subscription-Key: <subscription-key>"
-```
-Expected: `HTTP 200` (or whatever the backend returns) instead of `HTTP 403` — the SQL-injection probe is no longer blocked, confirming the connector is no longer in the request path.
-
-The Named Values created in Step 2 do not need to be deleted — they are inert without the policy. Leave them in place if you might re-enable inspection later, or `az apim nv delete` them if doing a permanent removal.
-
----
-
-## Configuration Reference
-
-### Body Handling
-
-The policy decides how to forward request bodies based on `Content-Length` and content type:
-
-| Condition                                                            | Behaviour                                                |
-|---------------------------------------------------------------------|----------------------------------------------------------|
-| Content-Length ≤ `rdwr-body-max-size-bytes`                          | Full body forwarded                                      |
-| Content-Length > `rdwr-body-max-size-bytes`                          | Body **not** forwarded (`Content-Length: 0` sent)        |
-| Chunked (no Content-Length) + matching content type                  | Body forwarded up to `rdwr-partial-body-size-bytes`      |
-| Chunked + non-matching content type                                  | No body forwarded                                        |
-| `multipart/form-data`                                                | Body forwarded up to `rdwr-multipart-max-size-bytes`     |
-| Body truncated                                                       | `x-rdwr-partial-body: true` header added                 |
-
-### API Base Path Stripping
-
-APIM prepends a base path (e.g., `/api`) to all operations. SecurePath expects the original URI without this prefix. Set `rdwr-api-base-path` to your API's base path (e.g., `/api`) and the policy strips it from the sideband URI.
-
-### Static Bypass
-
-When `static-extensions-enabled` is `true`, requests are skipped if **all three** conditions are met:
-1. The HTTP method is in `static-list-of-methods-not-to-inspect` (e.g., `GET`, `HEAD`).
-2. The URI ends with an extension in `static-list-of-bypassed-extensions` (e.g., `.png`, `.css`).
-3. No query string is present (unless `static-inspect-if-query-string-exists` is `false`).
-
-### Bot Manager Cookie Handling
-
-When `rdwr-bot-manager-enabled` is `true`:
-- BM cookies from SecurePath responses (`__uzm*`, `uzmcr`) are propagated to the client via `Set-Cookie` headers.
-- `ShieldSquare-Response` is forwarded.
-- The `uzmcr` header overrides block verdicts to support mobile redirect handling.
-- BM cookies propagate on **all** verdict paths (allow, block, redirect).
-
-### Response Logging
-
-The response-phase log fires automatically whenever SecurePath returns:
-- `x-rdwr-oop-id` — correlation UUID
-- `x-rdwr-oop-log` — log mode (`2` = headers only, `3` = headers + body)
-- `x-rdwr-oop-log-body` — body capture limit (e.g., `2k`)
-
-The log is sent via `send-one-way-request` (fire-and-forget) in the outbound pipeline.
-
-**Captured response metadata includes:**
-- `x-rdwr-o2v-status` — origin response status code
-- `x-rdwr-o2v-bytes-sent` — total wire bytes (status line + headers + body, matching NGINX `$bytes_sent` semantics; v1.3.2 fix)
-- `x-rdwr-o2v-body-bytes-sent` — body bytes only (matching NGINX `$body_bytes_sent`)
-- `x-rdwr-o2h-content-type` — origin Content-Type header
-- `x-rdwr-o2h-rdwr-response` — connector disposition (`allowed` / `blocked`)
-- Base64-encoded response body sample (mode 3 only, configurable size)
-
----
-
-## Do's and Don'ts
-
-### Do
-- ✅ **Store `rdwr-api-key` as a secret Named Value** (`--secret true` in the CLI). Secret Named Values are masked in policy exports and traces.
-- ✅ **Upload both root and intermediate CA certificates** before enabling the policy. The intermediate alone will fail the TLS handshake.
-- ✅ **Test in a non-production API first.** Apply the policy to a staging API, validate allow/block flows, then promote to production.
-- ✅ **Set `rdwr-app-ep-timeout-seconds` to a value you can tolerate as worst-case latency.** The default of `10s` is safe; reduce it for latency-sensitive APIs.
-- ✅ **Set `rdwr-api-base-path`** to match your APIM API's base path so SecurePath sees the correct URI.
-- ✅ **Use APIM Tracing** for one-off troubleshooting. The trace shows the full sideband request and SecurePath response.
-- ✅ **Monitor APIM `BackendDuration` and policy execution time** in Application Insights or Azure Monitor — sideband adds inspection latency proportional to network distance to the SecurePath region.
-- ✅ **Update `plugin-version-info`** when you upgrade the policy XML so the SecurePath portal reports the correct connector version.
-
-### Don't
-- ❌ **Don't commit the API key to source control** — even in IaC files. Use Azure Key Vault references or pipeline secrets.
-- ❌ **Don't apply this policy at the global / All-APIs level** unless you intend every API to be inspected. Apply at the API or operation level for finer control.
-- ❌ **Don't combine this policy with another policy that modifies request bodies** before the sideband call. Body modifications upstream will be sent to SecurePath, which may produce unexpected verdicts.
-- ❌ **Don't disable `ignore-error`** on the sideband `send-request`. It guarantees fail-open behaviour. Disabling it makes SecurePath unavailability customer-impacting.
-- ❌ **Don't allow client-supplied `x-rdwr-*` headers** to reach this policy untouched from upstream proxies. The reserved-header check returns 403 by design — this is a security feature, not a bug.
-- ❌ **Don't reduce `rdwr-app-ep-timeout-seconds` below `2`** unless you have measured your typical SecurePath round-trip latency. Aggressive timeouts cause spurious fail-open traffic.
-- ❌ **Don't skip the CA certificate upload step.** TLS handshake failures will fail the sideband call and trigger fail-open on every request.
-- ❌ **Don't edit the `<choose>` verdict logic** in the XML unless you understand the SecurePath verdict semantics. Verdict misclassification can cause bypass of legitimate blocks.
-
----
-
-## Sideband Headers
-
-The policy sends the following headers in every sideband request to SecurePath:
-
-| Header                       | Description                                                                  |
-|------------------------------|------------------------------------------------------------------------------|
-| `x-rdwr-app-id`              | Application identifier                                                       |
-| `x-rdwr-api-key`             | API key for authentication                                                   |
-| `x-rdwr-connector-ip`        | Client IP, taken from `rdwr-true-client-ip-header` if present                |
-| `x-rdwr-connector-port`      | Always `443` (Azure APIM ingress)                                            |
-| `x-rdwr-connector-scheme`    | Always `https` (Azure forces HTTPS termination)                              |
-| `x-rdwr-host`                | Original `Host` header from the client request                               |
-| `x-rdwr-plugin-info`         | Connector platform and version (default `700-v1.3.2`)                        |
-| `x-rdwr-partial-body`        | `true` when the body was truncated due to size limits                        |
-| `x-rdwr-connector-proto`     | `2` in the response-phase log                                                |
-| `x-rdwr-connector-stage`     | `request` (sideband) or `log` (response-phase)                               |
-| `x-rdwr-o2h-rdwr-response`   | `allowed` or `blocked` — connector disposition (response-phase log only)     |
-
----
-
-## Security Notes
-
-### Reserved Header Stripping
-The policy returns `HTTP 403` for any incoming client request containing these headers (because they would otherwise allow a client to spoof inspection metadata):
-- `x-rdwr-app-id`, `x-rdwr-api-key`, `x-rdwr-connector-ip`, `x-rdwr-partial-body`, `x-rdwr-cdn-ip`, `x-rdwr-ip`
-
-### Fail-Open Behaviour
-If the sideband request to SecurePath times out or fails, the policy allows the request to proceed to the backend. Set a strict `rdwr-app-ep-timeout-seconds` to control worst-case latency exposure.
-
-### API Key Handling
-Always store `rdwr-api-key` as a **secret** Named Value. Secret Named Values are masked in policy exports, traces, and the Azure Portal UI.
-
----
-
-## Known Platform Constraints
-
-| Constraint                                              | Impact                                                            | Mitigation                                                                         |
-|---------------------------------------------------------|-------------------------------------------------------------------|------------------------------------------------------------------------------------|
-| No response body modification                           | JavaScript injection verdicts cannot be enforced                  | Minimal — APIM serves API traffic (JSON/XML), not browser-rendered HTML            |
-| `x-rdwr-connector-scheme` is always `https`             | Cosmetic only — Azure forces HTTPS                                | None needed                                                                        |
-| No dedicated path proxying within a single XML policy   | BM browser-fingerprinting paths cannot be served from the policy  | Configure `/18f5.../` and `/c99a.../` as separate API operations pointing to SP    |
-| `send-one-way-request` returns no response              | Response-phase log success cannot be checked from policy          | Monitor SecurePath portal for log ingestion correlation                            |
-| APIM expression sandbox limits .NET APIs                | Some advanced parsing (e.g., regex) is unavailable                | None — the policy is written within sandbox limits                                 |
-
----
-
-## Troubleshooting
-
-### Requests return 403 unexpectedly
-- Check whether the client (or an upstream proxy) is sending `x-rdwr-*` headers — the policy returns 403 by design when these are present.
-- Verify the `rdwr-app-id` and `rdwr-api-key` Named Values match the values shown in the Radware Cloud portal.
-- Enable APIM Tracing for one request and inspect the SecurePath sideband response body for the verdict reason.
-
-### Sideband requests fail with TLS errors
-- Confirm both `rdwr-root-ca.pem` and `rdwr-intermediate-ca.pem` are uploaded to the APIM CA store.
-- If your network uses a TLS-inspecting proxy (e.g., Zscaler), upload that proxy's root CA to the APIM CA store as well.
-- Verify outbound port 443 connectivity from the APIM VNet to `*.oop.radwarecloud.net`.
-
-### Sideband requests time out
-- Increase `rdwr-app-ep-timeout-seconds` (default `10`).
-- Verify there are no NSG, firewall, or routing rules blocking egress from APIM to SecurePath.
-- Check the SecurePath status page for service availability in your region.
-
-### Named Values not resolving
-- Named Values use double-brace syntax: `{{rdwr-app-id}}`.
-- Confirm each Named Value exists and is not disabled.
-- Secret Named Values are masked in the policy editor but resolve correctly at runtime.
-
-### Body not forwarded to SecurePath
-- Check `rdwr-body-max-size-bytes` — bodies larger than this are skipped (this is intentional).
-- For chunked requests, ensure the `Content-Type` is in `chunked-request-allowed-content-types`.
-- Set `rdwr-api-base-path` correctly so SecurePath sees the right URI path.
-
-### Response-phase log not arriving in SecurePath portal
-- Confirm `rdwr-bot-manager-enabled` and the response-logging Named Values are configured.
-- Verify SecurePath returned `x-rdwr-oop-id` in the sideband response — without it, the log is not emitted.
-- `send-one-way-request` is fire-and-forget; failures are not visible in APIM. Use SecurePath portal correlation as the source of truth.
-
----
-
-## Where to go next
-
-| You want to | Read |
-|-------------|------|
-| Get something running | The [Quickstart](#quickstart-15-minutes-end-to-end) at the top |
-| See every config knob | [Configuration Reference](#configuration-reference) |
-| Understand tier / VNet / Consumption / self-hosted differences | [Deployment shapes](#deployment-shapes--does-this-work-in-my-apim) |
-| Roll back or disable the connector | Step 5 — [Uninstall / rollback](#step-5--uninstall--rollback-when-needed) |
-| Debug something that's not working | [Troubleshooting](#troubleshooting) |
-| See what changed between versions | [release-notes.md](release-notes.md) |
-
-For SecurePath-account questions (provisioning, billing, application configuration on the SecurePath side) contact your Radware account team. For connector bugs and feature requests, file an issue on this GitHub repo.
-
----
-
-## Version History
-
-| Version    | Date       | Status      | Highlights                                                       |
-|------------|------------|-------------|------------------------------------------------------------------|
-| **v1.3.2** | 2026-05-03 | **Current** | `x-rdwr-o2v-bytes-sent` reports total wire bytes (status line + headers + body) |
-| v1.3.1     | 2026-03-31 | Superseded  | Disposition header, v2 log on block/redirect, body-truncation fix |
-| v1.3.0     | 2026-03-12 | Superseded  | GA release, full SecurePath feature coverage, response-phase logging |
-| v1.2.0     | 2025-11-30 | Superseded  | Bot Manager support, reserved header enforcement                 |
-| v1.1.0     | 2025-09-15 | Superseded  | Body handling, chunked request support                           |
-| v1.0.0     | 2025-05-01 | Superseded  | Initial release                                                  |
-
-For full release notes, see [`release-notes.md`](release-notes.md).
-
----
-
-## License
-
-Copyright © 2024–2026 Radware Ltd. All rights reserved.
-
-Proprietary and confidential. Unauthorized copying, distribution, or use of this software is strictly prohibited.
-
-
----
-
-## Certificate verification
-
-SecurePath endpoints present a certificate issued by **Radware's own certificate
-authority**, which is not one of the public authorities API Management trusts by default.
-The connector ships that authority as `certs/rdwr-ca-chain.pem`.
-
-If your API Management instance validates certificates on outbound calls, upload the
-authority so the inspection call is trusted:
-
-**Portal** — *APIs → your instance → Security → Certificates → CA certificates → + Add*,
-then upload `certs/rdwr-ca-chain.pem`.
+1. Portal → your API Management instance → **APIs → Backends → + Create new backend**.
+2. **Backend hosting type**: *Custom URL*.
+3. **Runtime URL**: `https://` followed by your `APP_EP` value.
+4. Under **Advanced**, disable certificate chain validation and certificate name validation.
+5. **Create.**
 
 **Azure CLI:**
 
 ```bash
-az apim api-version-set list --resource-group <rg> --service-name <apim>   # confirm access first
+RG="your-resource-group"
+APIM="your-apim-instance"
+APP_EP="your-application-id.oop.radwarecloud.net"
+
+SUB=$(az account show --query id -o tsv)
+printf '{"properties":{"url":"https://%s","protocol":"http","title":"SecurePath inspection endpoint","tls":{"validateCertificateChain":false,"validateCertificateName":false}}}' "$APP_EP" > rdwr-backend.json &&
 az rest --method PUT \
-  --uri "https://management.azure.com/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.ApiManagement/service/<apim>/certificates/rdwr-ca?api-version=2022-08-01" \
-  --body @rdwr-ca-body.json
+  --uri "https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/backends/securepath-sideband?api-version=2024-05-01" \
+  --headers "Content-Type=application/json" --body @rdwr-backend.json
 ```
 
-**Without it,** the inspection call fails the TLS handshake. Inspection failures fail
-open, so requests are served **uninspected** while everything appears healthy — check the
-policy trace after any change here.
+**Confirm it exists:**
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+SUB=$(az account show --query id -o tsv)
+az rest --method GET \
+  --uri "https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/backends/securepath-sideband?api-version=2024-05-01"
+```
+
+> **What this setting means.** On Developer, Basic, Standard and Premium tiers the Radware authority
+> is installed into the gateway trust store (Path A) and the certificate is fully validated. The v2
+> tiers provide no such trust store, so validation is disabled for this one endpoint instead.
+>
+> The call still uses TLS and remains encrypted in transit, and the setting applies **only** to the
+> URL named in this backend entity — no other traffic through your gateway is affected. If full
+> certificate validation is a requirement for your deployment, use a Developer, Basic, Standard or
+> Premium tier instance, where Path A validates the chain.
+
+---
+---
+
+# ▶ STEP 2 — Create the Named Values
+
+**What this does:** creates the 20 settings the policy reads. All 20 must exist before Step 3, or
+the policy upload is rejected.
+
+## 2a — Your three application values
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+APP_ID="your-application-id"
+API_KEY="your-api-key"
+APP_EP="your-application-id.oop.radwarecloud.net"
+
+az apim nv create -g "$RG" --service-name "$APIM" \
+  --named-value-id rdwr-app-id --display-name rdwr-app-id --value "$APP_ID" &&
+az apim nv create -g "$RG" --service-name "$APIM" \
+  --named-value-id rdwr-app-ep-addr --display-name rdwr-app-ep-addr --value "$APP_EP" &&
+az apim nv create -g "$RG" --service-name "$APIM" \
+  --named-value-id rdwr-api-key --display-name rdwr-api-key --secret true --value "$API_KEY"
+```
+
+## 2b — The 17 configuration values
+
+`RDWR_NV` below is a temporary **shell variable** used to build the list. It has nothing to do with
+API Management Named Values, and clearing it affects nothing in Azure.
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+unset RDWR_NV
+RDWR_NV=(
+  "rdwr-app-ep-port=443"
+  "rdwr-app-ep-ssl=true"
+  "rdwr-app-ep-timeout-seconds=10"
+  "rdwr-body-max-size-bytes=100000"
+  "rdwr-partial-body-size-bytes=10240"
+  "rdwr-multipart-max-size-bytes=100000"
+  "rdwr-true-client-ip-header=x-forwarded-for"
+  "rdwr-api-base-path=/"
+  "rdwr-bot-manager-enabled=false"
+  "plugin-version-info=700-v1.3.2"
+  "static-extensions-enabled=true"
+  "static-list-of-methods-not-to-inspect=GET,HEAD"
+  "static-list-of-bypassed-extensions=png,jpg,css,js,gif,ico,svg,woff,woff2"
+  "static-inspect-if-query-string-exists=true"
+  "chunked-request-allowed-content-types=application/json,application/x-www-form-urlencoded"
+  "rdwr-inline-trusted-sources=##DISABLED##"
+  "rdwr-inline-headers-enabled=false"
+)
+for kv in "${RDWR_NV[@]}"; do
+  name="${kv%%=*}"
+  value="${kv#*=}"
+  az apim nv create -g "$RG" --service-name "$APIM" \
+    --named-value-id "$name" --display-name "$name" --value "$value" ||
+    echo "FAILED: $name"
+done
+unset RDWR_NV
+```
+
+Set each to the value shown unless you have a specific reason to change it. These are values the
+policy uses literally, not fallbacks applied if you skip them.
+
+Set `rdwr-bot-manager-enabled` to `true` if Bot Manager is enabled on your SecurePath application.
+
+Two values look like they should be empty and cannot be. The Azure CLI rejects an empty `--value`,
+so both use a token the policy understands:
+
+- **`rdwr-api-base-path`** — `/` means strip nothing. If your API sits under a base path that should
+  not be sent for inspection, set it to that path instead.
+- **`rdwr-inline-trusted-sources`** — `##DISABLED##` turns off the inline-bypass allow-list.
+
+If a Named Value already exists from an earlier attempt, the create call reports that the id is in
+use. Switch that one to `az apim nv update` with the value you want.
+
+## 2c — Check before continuing
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+EXPECTED="rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled"
+HAVE=$(az apim nv list -g "$RG" --service-name "$APIM" --query "[].name" -o tsv)
+for n in $EXPECTED; do
+  echo "$HAVE" | grep -qx "$n" || echo "MISSING: $n"
+done
+ID=$(az apim nv show -g "$RG" --service-name "$APIM" --named-value-id rdwr-app-id --query value -o tsv)
+EP=$(az apim nv show -g "$RG" --service-name "$APIM" --named-value-id rdwr-app-ep-addr --query value -o tsv)
+case "$ID" in
+  *.*) echo "WRONG: rdwr-app-id contains a dot. Use the bare Application ID, not a hostname." ;;
+  *)   echo "OK: rdwr-app-id looks like an Application ID" ;;
+esac
+case "$EP" in
+  *.oop.radwarecloud.net) echo "OK: rdwr-app-ep-addr looks like an inspection endpoint" ;;
+  *) echo "WRONG: rdwr-app-ep-addr should end in .oop.radwarecloud.net" ;;
+esac
+```
+
+Only `OK:` lines means you are ready for Step 3. Any `MISSING:` line will cause the policy upload to
+be rejected.
+
+> **Your other Named Values are none of our business.** This check looks only for the 20 names above
+> and ignores everything else on your instance. If you see unrelated Named Values in the portal,
+> leave them alone — the connector neither reads nor modifies them.
+
+### Cleaning up after a partially completed paste
+
+If a paste stopped halfway, it can leave behind an entry with an obviously wrong name — something
+like `0`, `true` or `false`. Those are debris and can be removed.
+
+**Look at it first.** Never delete a Named Value you have not inspected, in case it belongs to
+another workload on the same instance:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+STRAY="0"
+
+az apim nv show -g "$RG" --service-name "$APIM" --named-value-id "$STRAY"
+```
+
+Only if the value it prints is clearly paste debris, and the name is not one of the 20 above,
+remove it:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+STRAY="0"
+
+az apim nv delete -g "$RG" --service-name "$APIM" --named-value-id "$STRAY" --yes
+```
+
+---
+---
+
+# ▶ STEP 3 — Apply the policy
+
+**What this does:** installs the connector. The policy is **one document** containing all four
+processing sections — inbound, backend, outbound and on-error. Installing it covers both the
+request path and the response path. There is no separate step for response-phase logging.
+
+Apply it at the **API level** so it covers every operation of that API.
+
+## Path A — Azure Portal
+
+1. Portal → your API Management instance → **APIs** → select your API.
+2. Select **All operations**.
+3. In the **Inbound processing** box, select the **`</>`** icon to open the policy code editor. This
+   editor shows the whole document, not only the inbound section.
+4. Select all existing content and replace it with the full contents of
+   `rdwr-azureapim-securepath-connector-v1.3.xml`.
+5. **Save.**
+
+If the save is rejected, the error names the missing Named Value or the offending line. Go back to
+Step 2c.
+
+## Path B — Azure CLI
+
+Run this from the directory containing the policy XML.
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+API_ID="your-api-resource-name"
+
+SUB=$(az account show --query id -o tsv)
+URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/$API_ID/policies/policy?api-version=2024-05-01"
+
+jq -Rs '{properties: {format: "rawxml", value: .}}' \
+   rdwr-azureapim-securepath-connector-v1.3.xml > rdwr-policy-body.json &&
+az rest --method PUT --uri "$URI" \
+        --headers "Content-Type=application/json" \
+        --body @rdwr-policy-body.json
+```
+
+`format` must be `rawxml`. The default rejects the Named Value references this policy uses inside
+XML attributes.
+
+A successful call returns the stored policy document. A failure returns a validation error with a
+line and position.
+
+## Path C — PowerShell
+
+```powershell
+$ctx = New-AzApiManagementContext -ResourceGroupName "your-resource-group" -ServiceName "your-apim-instance"
+Set-AzApiManagementPolicy -Context $ctx -ApiId "your-api-resource-name" `
+    -PolicyFilePath ".\rdwr-azureapim-securepath-connector-v1.3.xml" `
+    -Format "application/vnd.ms-azure-apim.policy.raw+xml"
+```
+
+---
+---
+
+# ▶ STEP 4 — Verify
+
+**What this does:** proves the connector is installed, executing, and actually inspecting — three
+different things.
+
+On Developer, Basic, Standard and Premium tiers, wait until Step 1 shows the certificates as
+provisioned before running these.
+
+## 4a — Confirm the policy is installed
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+API_ID="your-api-resource-name"
+
+SUB=$(az account show --query id -o tsv)
+az rest --method GET \
+  --uri "https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/$API_ID/policies/policy?api-version=2024-05-01&format=rawxml"
+```
+
+## 4b — Confirm the policy is executing
+
+This needs no connectivity to Radware. First list your operations to get a real path:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+API_ID="your-api-resource-name"
+
+az apim api operation list -g "$RG" --service-name "$APIM" --api-id "$API_ID" \
+  --query "[].{method:method,url:urlTemplate}" -o table
+```
+
+Then send a request carrying a reserved header, which the connector must reject:
+
+```bash
+APIM="your-apim-instance"
+
+curl -s -o /dev/null -w "%{http_code}\n" \
+  "https://$APIM.azure-api.net/your/real/operation/path" \
+  -H "x-rdwr-app-id: spoofed"
+```
+
+**Expect 403.** Anything else means the policy is not applied to the API or operation you tested.
+
+## 4c — Confirm inspection is actually happening
+
+A `200` on normal traffic does **not** prove inspection. The connector keeps serving traffic if it
+cannot reach the inspection service, so a healthy connector and an unreachable one look identical
+from the client.
+
+Three checks that do prove it:
+
+1. **Radware Cloud events view** — send a request through the gateway and confirm it appears in your
+   application's events. This is the definitive proof and works as an ongoing health signal.
+2. **If Bot Manager is enabled**, look for `__uzm` cookies in the response. Those originate from
+   SecurePath, so their presence confirms the inspection call completed:
+
+```bash
+APIM="your-apim-instance"
+
+curl -s -o /dev/null -D - "https://$APIM.azure-api.net/your/real/operation/path" | grep -i "set-cookie"
+```
+
+3. **`X-Rdwr-Diag` at your backend** — when inspection does not complete, the connector adds this
+   header to the request it forwards to your backend. Check your backend access log:
+
+| Value | Meaning |
+|---|---|
+| *(header absent)* | Inspection completed normally |
+| `sideband_error_or_timeout` | Could not reach or complete the inspection call — see Issue 1 |
+| `sideband_error_failopen_5xx` | The inspection service returned an error |
+| `wrong_api_key_redirect` | Credentials not recognised — see Issue 3 |
+
+## 4d — About testing with an attack pattern
+
+A common test sends an attack pattern and expects `403`. Treat a `200` carefully, because four
+situations produce it:
+
+- Your application is in **monitoring or report-only mode** — a `200` is correct, and the request
+  should still appear in the events view.
+- Your policy set did not flag that particular request.
+- The credentials are not being recognised.
+- The inspection call is not completing.
+
+Only 4c distinguishes them.
+
+---
+---
+
+# ▶ DEBUGGING
+
+## Start here: capture a trace
+
+Almost every question about this connector is answered by one API Management trace. The inspection
+call is made with errors suppressed, by design, so that a problem on the inspection path never
+breaks your traffic. That means failures do not surface anywhere except the trace.
+
+1. Portal → your API Management instance → **APIs** → select your API.
+2. Open the **Test** tab and select an operation.
+3. Enable tracing for the call, then **Send**.
+4. Open the **Trace** tab on the response and expand the **Inbound** section.
+5. Find the `send-request` entry. That is the inspection call.
+
+If the Trace tab is unavailable, tracing is not enabled for the subscription you are testing with.
+
+## The one string to search for
+
+In the trace, search for:
+
+```
+error ignored
+```
+
+Every suppressed failure appears in that shape:
+
+```
+... request to 'https://<your-endpoint>.oop.radwarecloud.net/...' resulted in error, error ignored: <reason>
+```
+
+**If that line is present, the request was not inspected.** It was forwarded to your backend anyway
+and the client received a normal response. If it is absent, the inspection call completed.
+
+## Issue 1 — Certificate rejected
+
+In the trace:
+
+```
+The remote certificate was rejected by the provided RemoteCertificateValidationCallback.
+```
+
+Trust is not established. You will see no error code, no failed-request metric and no alert — the
+API behaves normally while serving traffic uninspected.
+
+| Your tier | Fix |
+|---|---|
+| Developer / Basic / Standard / Premium | Complete Step 1 Path A. Upload **both** certificates — the root alone is not sufficient. |
+| Already uploaded both | Confirm provisioning finished. It shows *"CA certificate update in progress"* for 15+ minutes and the error persists until it completes. |
+| Uploaded and provisioned, still failing | Confirm they are under **CA certificates**, not the general **Certificates** tab. Different stores. |
+| Standard v2 / Premium v2 | Complete Step 1 Path B. The CA store does not exist on these tiers; the backend entity is the supported route. |
+
+## Issue 2 — The attack test returns 200
+
+See 4d, then check the trace for `error ignored`.
+
+## Issue 3 — Everything works, nothing appears in the Radware portal
+
+Usually the wrong `rdwr-app-id`. It is a bare identifier with no dots. Run the check in Step 2c.
+Then check the trace for a redirect toward `wrong-api-key`, which is returned when the credentials
+cannot be matched to an application.
+
+## Issue 4 — Every request returns 500
+
+A Named Value holds a value the policy cannot parse. These must be exact:
+
+- `rdwr-app-ep-port`, `rdwr-app-ep-timeout-seconds`, and the three size values — plain integers
+  only. Not `10s`, not `100kb`.
+- `rdwr-app-ep-ssl`, `static-extensions-enabled`, `static-inspect-if-query-string-exists` — exactly
+  `true` or `false`. Not `yes`, `on`, `1` or `0`.
+
+The policy saves successfully with a bad value and fails at request time, so this appears right
+after a Named Value edit rather than after a policy change.
+
+## Issue 5 — The policy upload is rejected
+
+*"Named Value not found"* means one of the 20 is missing. Run Step 2c, which names it.
+
+If the upload failed with a validation error instead, confirm the request used `format: rawxml`.
+
+## Issue 6 — 404 on your test request
+
+The URL matched no API Management operation, so the policy never ran. Use a path from
+`az apim api operation list`.
+
+## Issue 7 — Unexpected 403 on traffic that should pass
+
+The request carried a reserved header. The connector rejects any request presenting
+`x-rdwr-app-id`, `x-rdwr-api-key`, `x-rdwr-connector-ip`, `x-rdwr-partial-body`, `x-rdwr-cdn-ip`,
+`x-rdwr-ip`, or `x-rdwr-request-host-b60f5e78-5bc7-4441-aac8-20b1e7cddda5`, because a client sending
+them is attempting to impersonate the connector.
+
+If an upstream proxy or CDN adds any of these, strip them before the request reaches API Management.
+
+## Issue 8 — Requests are slow
+
+Each request waits for the inspection call, bounded by `rdwr-app-ep-timeout-seconds` (default `10`).
+If the endpoint is unreachable, every request waits out that timeout before being forwarded. Check
+the trace for `error ignored`.
+
+## Issue 9 — Nothing happened when you pasted a command block
+
+Your shell stopped partway through, most likely on a syntax error, and the remaining commands never
+ran. Re-run the block, then run Step 2c to see what was actually created. If you are pasting into a
+shell other than bash, paste one command at a time.
+
+---
+---
+
+# ▶ REMOVING THE CONNECTOR
+
+Replace the API policy with the default, which restores normal routing immediately:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+API_ID="your-api-resource-name"
+
+SUB=$(az account show --query id -o tsv)
+URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/$API_ID/policies/policy?api-version=2024-05-01"
+
+printf '{"properties":{"format":"rawxml","value":"<policies><inbound><base /></inbound><backend><base /></backend><outbound><base /></outbound><on-error><base /></on-error></policies>"}}' > rdwr-default-policy.json &&
+az rest --method PUT --uri "$URI" --headers "Content-Type=application/json" --body @rdwr-default-policy.json
+```
+
+The 20 Named Values and the backend entity are inert once the policy is removed. Remove them at your
+convenience — they are all prefixed `rdwr-`, `static-`, `chunked-` or named `plugin-version-info`,
+and the backend entity is named `securepath-sideband`.
+
+---
+---
+
+# ▶ SUPPORT
+
+When contacting Radware, include:
+
+1. The trace for one failing request, with the **Inbound** section expanded.
+2. The output of the Step 2c check.
+3. Your tier — `az apim show -g "$RG" -n "$APIM" --query sku.name -o tsv`
+4. Whether the request appears in the Radware Cloud events view.

@@ -12,7 +12,13 @@ The SecurePath endpoint (`*.oop.radwarecloud.net`) uses a private Radware CA cha
 
 ## Azure APIM Setup
 
-Both the root and intermediate CA certificates must be uploaded to Azure APIM's **CA certificates** store. **Available on Developer / Basic / Standard / Premium tiers only.** On the v2 tiers (Standard v2 / Premium v2) and the Consumption tier, the CA-certificates page is unavailable; trust is configured per-backend instead — see Microsoft's [Add a Custom CA Certificate](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-ca-certificates) doc.
+How trust is established depends on your API Management tier.
+
+**Developer / Basic / Standard / Premium.** Upload both the root and intermediate CA certificates to the **CA certificates** store, as described below. The certificate is then fully validated on every inspection call.
+
+**Standard v2 / Premium v2.** These tiers have no service-level CA certificate store, and the platform rejects any attempt to add one. **Do not upload these files there** — instead, create a backend entity for the SecurePath endpoint with certificate validation disabled, as described in **Step 1 Path B** of the main README. That is the supported route on v2, and it requires no policy change.
+
+**Consumption.** Not currently supported. Contact Radware before deploying.
 
 > **Important — `az apim` CLI does NOT support CA certificate management.** The `az apim` command tree has no `certificate` or `certificate-authority` subcommand (verify with `az apim --help`). Earlier revisions of these docs incorrectly suggested `az apim certificate create` and `az apim certificate-authority create` — neither command exists in `az apim`. The supported programmatic paths are PowerShell and ARM/Bicep; for one-time onboarding the Portal is the simplest.
 

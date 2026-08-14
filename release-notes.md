@@ -2,7 +2,48 @@
 
 ---
 
-## v1.3.2 (GA 2026-05-04) — Current
+## v1.3.3 (2026-08-14) — Current
+
+**Documentation and packaging release. The policy XML is unchanged from v1.3.2** — there is nothing
+to redeploy if the connector is already working. `x-rdwr-plugin-info` remains `700-v1.3.2`, because
+it identifies the policy and the policy did not change.
+
+### Deployment guidance for the v2 tiers
+
+Standard v2 and Premium v2 have no service-level CA certificate store, so the certificate upload in
+Step 1 cannot be performed on those tiers. Onboarding now documents a second path: create a
+**backend entity** for the SecurePath endpoint. API Management applies it automatically to the
+inspection call, so **no policy change is required**.
+
+Previous revisions described the v2 tiers as equivalent to Developer / Basic / Standard / Premium.
+They are not, and a deployment on a v2 tier without this step will serve traffic **uninspected**
+with no error surfaced. The tier table, Step 1 and the troubleshooting section now reflect this.
+
+### Onboarding guide rewritten
+
+- **Every command block is self-contained.** Each begins with its own settings block, so any step
+  can be run on its own, in any order, in a fresh shell — no reliance on variables set earlier.
+- **Order is stated with reasons.** Each step explains why it must come where it does, including why
+  Named Values must exist before the policy is applied.
+- **Verification distinguishes three different things** — the policy being installed, the policy
+  executing, and inspection actually happening. A `200` response proves none of them; the guide now
+  says so and gives checks that do.
+- **New debugging section** built around the API Management trace, including how to capture one and
+  the exact strings to search for.
+- **Application ID guidance.** The portal also shows a `.v1.radwarecloud.net` hostname that this
+  connector does not use. Supplying it produces no error and results in uninspected traffic. Step 2c
+  now checks for it.
+- Shell variables renamed to match the Named Values they populate.
+
+### Packaging
+
+- **`certs/rdwr-root-ca.pem` and `certs/rdwr-intermediate-ca.pem` are now included in the release
+  archive.** Both are required by Step 1 and were absent from the v1.3.0, v1.3.1 and v1.3.2
+  archives.
+
+---
+
+## v1.3.2 (GA 2026-05-04)
 
 ### Bug Fixes
 
