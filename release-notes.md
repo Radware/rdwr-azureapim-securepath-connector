@@ -2,7 +2,51 @@
 
 ---
 
-## v1.3.3 (2026-08-14) — Current
+## v1.3.4 (2026-08-16) — Current
+
+**Documentation and packaging release. The policy XML is unchanged from v1.3.2** — there is nothing
+to redeploy if the connector is already working. `x-rdwr-plugin-info` remains `700-v1.3.2`.
+
+### Three install forms, so the connector fits an instance that is already in use
+
+Previous versions offered one install: replace an API's policy document. On an API that already has
+a policy, that discards it.
+
+- **Form C — policy fragments (new, recommended).** Two reusable fragments,
+  `fragments/securepath-inbound.fragment.xml` and `fragments/securepath-outbound.fragment.xml`, are
+  registered once and referenced with two `include-fragment` lines from any scope. Existing policies
+  are left intact. Updating the connector means replacing the fragments; every scope that references
+  them picks up the change. A fragment cannot be deleted while it is still referenced.
+- **Form B — policy document at All APIs scope (new).** Covers every API in one action, using
+  `rdwr-azureapim-securepath-connector-v1.3-all-apis-scope.xml`. The standard file is rejected at
+  this scope, because `<base />` is not permitted in the global context.
+- **Form A — policy document at API scope.** Unchanged, and now carries an explicit warning that it
+  replaces the API's existing policy.
+
+All three forms, and the fragment form at API, product and All APIs scope, were verified on a
+Standard v2 instance.
+
+### Two pre-flight checks, added as a new Step 2
+
+- **Named Value collisions.** `az apim nv create` **overwrites an existing Named Value without any
+  error** — earlier revisions of this guide stated the opposite. Six of the twenty names the
+  connector uses carry no `rdwr-` prefix and can already exist on a shared instance. Step 2a lists
+  any collisions, with their current values, before anything is written.
+- **Policies missing `<base />`.** If an API's own policy omits `<base />` from its inbound section,
+  a policy installed at All APIs scope is **skipped for that API** — no error, no protection.
+  Step 2b audits every API.
+
+### Also
+
+- **Required permissions** are now stated: **API Management Service Contributor**. API Management
+  Service Operator is not sufficient — it grants only read access to the sub-resources involved.
+- **Do not install at two scopes at once.** Measured on Standard v2, a connector present at both All
+  APIs and API scope inspects every request twice: 2.58 s versus 0.90 s for the same request.
+- Removal instructions now cover all three forms separately.
+
+---
+
+## v1.3.3 (2026-08-14)
 
 **Documentation and packaging release. The policy XML is unchanged from v1.3.2** — there is nothing
 to redeploy if the connector is already working. `x-rdwr-plugin-info` remains `700-v1.3.2`, because

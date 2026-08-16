@@ -3,9 +3,13 @@
 This guide takes you from an existing API Management instance to SecurePath inspecting your API
 traffic.
 
-The connector is a single XML policy applied to an API Management API. On every request it makes
-a short inspection call to your SecurePath application and enforces the verdict it returns. On the
-response it sends an asynchronous log entry, which adds no client-visible latency.
+The connector is an API Management policy. On every request it makes a short inspection call to
+your SecurePath application and enforces the verdict it returns. On the response it sends an
+asynchronous log entry, which adds no client-visible latency.
+
+It can be installed as a whole policy document or as reusable policy fragments, at the scope of a
+single API, a product, or every API on the instance. If you already have policies in place, the
+fragment form leaves them untouched — see **Choosing an install form** below.
 
 ---
 
@@ -50,7 +54,7 @@ use:
 > ID** — the Application ID has no dots.
 >
 > A wrong Application ID produces no error at all. The connector keeps serving traffic, uninspected.
-> Step 2c catches it.
+> Step 3c catches it.
 
 ### The order, and why it matters
 
@@ -58,12 +62,42 @@ use:
 |---|------|---------------------|
 | 0 | Confirm your tier and find your API | The tier decides which path you take in Step 1. The two paths are not interchangeable. |
 | 1 | Establish TLS trust | Until this is in place, every inspection call fails and traffic is served **uninspected**. On some tiers it takes 15+ minutes to provision, so start it early. |
-| 2 | Create the Named Values | The policy resolves them when it is saved. If one is missing, Step 3 is rejected outright. This is the most common reason Step 3 fails. |
-| 3 | Apply the policy | Needs an existing API and all 20 Named Values already in place. |
-| 4 | Verify | Only meaningful once Step 1 has finished provisioning. Running it earlier reports a false failure. |
+| 2 | Pre-flight checks | Two things can silently damage an existing configuration or silently disable protection. Both are checked before anything is created. |
+| 3 | Create the Named Values | The policy resolves them when it is saved. If one is missing, Step 4 is rejected outright. |
+| 4 | Install the connector | Needs an existing API and all 20 Named Values already in place. Choose an install form — see below. |
+| 5 | Verify | Only meaningful once Step 1 has finished provisioning. Running it earlier reports a false failure. |
+
+### Permissions you need
+
+Installing the connector writes Named Values, a policy, and (on the v2 tiers) a backend entity.
+The built-in role that covers all of them is **API Management Service Contributor**, whose
+`Microsoft.ApiManagement/service/*` permission includes every sub-resource involved.
+
+| Role | Enough? |
+|---|---|
+| **API Management Service Contributor** | **Yes** |
+| API Management Service Operator | No — it grants `service/*/read` on sub-resources, so it can update the service itself but cannot write Named Values, policies or fragments |
+| API Management Service Reader | No — read only |
+
+### Choosing an install form
+
+The connector can be installed three ways. They differ in **what happens to policies you already
+have** and in **how many APIs are covered**.
+
+| Form | Covers | Existing policies | Use when |
+|---|---|---|---|
+| **A — policy document at API scope** | one API | **Replaced** | The API has no policy of its own, or you are happy to fold ours into it by hand |
+| **B — policy document at All APIs scope** | every API | Preserved | You want blanket coverage and your APIs have no conflicting global-scope needs |
+| **C — policy fragments** *(recommended)* | whatever scope you choose | **Preserved** | **You already have policies.** You add two lines rather than replacing a document |
+
+**If your API Management instance already has policies, use Form C.** Forms A and B install a
+whole policy document; at API scope that overwrites whatever was there.
+
+**Do not install at two scopes at once.** The connector will run twice — inspecting every request
+two times, roughly tripling the added latency and duplicating events. Pick one scope.
 
 **For the Azure CLI path** you need `jq`, and a shell opened in the directory containing the policy
-XML. If you would rather not install `jq`, the Azure Portal path in Step 3 needs no local tooling.
+XML. If you would rather not install `jq`, the Azure Portal paths need no local tooling.
 
 ---
 ---
@@ -183,12 +217,83 @@ az rest --method GET \
 ---
 ---
 
-# ▶ STEP 2 — Create the Named Values
+# ▶ STEP 2 — Pre-flight checks
 
-**What this does:** creates the 20 settings the policy reads. All 20 must exist before Step 3, or
-the policy upload is rejected.
+**What this does:** catches the two conditions that silently damage an existing configuration or
+silently disable protection. Run both before creating anything.
 
-## 2a — Your three application values
+## 2a — Named Value collisions
+
+Named Values share one namespace across the whole instance, and **`az apim nv create` overwrites an
+existing name without warning or error**. Six of the twenty names the connector uses carry no
+`rdwr-` prefix and are generic enough to already exist:
+
+`plugin-version-info`, `static-extensions-enabled`, `static-list-of-methods-not-to-inspect`,
+`static-list-of-bypassed-extensions`, `static-inspect-if-query-string-exists`,
+`chunked-request-allowed-content-types`
+
+This lists any that already exist, with their current values, **before** anything is written:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+RDWR_NAMES="rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled"
+EXISTING=$(az apim nv list -g "$RG" --service-name "$APIM" --query "[].name" -o tsv)
+FOUND=0
+for n in $RDWR_NAMES; do
+  if echo "$EXISTING" | grep -qx "$n"; then
+    V=$(az apim nv show -g "$RG" --service-name "$APIM" --named-value-id "$n" --query value -o tsv 2>/dev/null)
+    echo "COLLISION: $n currently holds: ${V:-secret}"
+    FOUND=$((FOUND+1))
+  fi
+done
+echo "collisions: $FOUND"
+```
+
+`collisions: 0` means Step 3 is safe to run. Anything else belongs to another workload or to a
+previous install — decide what that value is for before you overwrite it.
+
+## 2b — Policies missing `<base />`
+
+Only needed if you plan to install at **All APIs** scope (Form B or C-global).
+
+API Management chains policy scopes together with the `<base />` element. If an API's own policy
+omits `<base />` from its `<inbound>` section, **the All APIs policy is skipped for that API** —
+the connector never runs there, and nothing reports it.
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+SUB=$(az account show --query id -o tsv)
+MISSING=0
+for API in $(az apim api list -g "$RG" --service-name "$APIM" --query "[].name" -o tsv); do
+  POL=$(az rest --method GET --uri "https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/$API/policies/policy?api-version=2024-05-01&format=rawxml" 2>/dev/null)
+  if [ -z "$POL" ]; then
+    echo "OK       $API has no policy of its own, inherits All APIs"
+  elif echo "$POL" | tr -d ' \t\r\n' | grep -q '<inbound><base/>'; then
+    echo "OK       $API inbound starts with base"
+  else
+    echo "SKIPPED  $API inbound has no base, the connector will NOT run for this API"
+    MISSING=$((MISSING+1))
+  fi
+done
+echo "apis that would skip the connector: $MISSING"
+```
+
+Any `SKIPPED` line must be fixed by adding `<base />` as the first element of that API's
+`<inbound>` section, or that API stays unprotected.
+
+---
+---
+
+# ▶ STEP 3 — Create the Named Values
+
+**What this does:** creates the 20 settings the policy reads. All 20 must exist before Step 4, or
+the install is rejected.
+
+## 3a — Your three application values
 
 ```bash
 RG="your-resource-group"
@@ -205,7 +310,7 @@ az apim nv create -g "$RG" --service-name "$APIM" \
   --named-value-id rdwr-api-key --display-name rdwr-api-key --secret true --value "$API_KEY"
 ```
 
-## 2b — The 17 configuration values
+## 3b — The 17 configuration values
 
 `RDWR_NV` below is a temporary **shell variable** used to build the list. It has nothing to do with
 API Management Named Values, and clearing it affects nothing in Azure.
@@ -259,7 +364,7 @@ so both use a token the policy understands:
 If a Named Value already exists from an earlier attempt, the create call reports that the id is in
 use. Switch that one to `az apim nv update` with the value you want.
 
-## 2c — Check before continuing
+## 3c — Verify the Named Values
 
 ```bash
 RG="your-resource-group"
@@ -282,7 +387,7 @@ case "$EP" in
 esac
 ```
 
-Only `OK:` lines means you are ready for Step 3. Any `MISSING:` line will cause the policy upload to
+Only `OK:` lines means you are ready for Step 4. Any `MISSING:` line will cause the policy upload to
 be rejected.
 
 > **Your other Named Values are none of our business.** This check looks only for the 20 names above
@@ -319,30 +424,108 @@ az apim nv delete -g "$RG" --service-name "$APIM" --named-value-id "$STRAY" --ye
 ---
 ---
 
-# ▶ STEP 3 — Apply the policy
+# ▶ STEP 4 — Install the connector
 
-**What this does:** installs the connector. The policy is **one document** containing all four
-processing sections — inbound, backend, outbound and on-error. Installing it covers both the
-request path and the response path. There is no separate step for response-phase logging.
+**What this does:** installs the connector. Whichever form you choose, it covers both the request
+path and the response path — there is no separate step for response-phase logging.
 
-Apply it at the **API level** so it covers every operation of that API.
+Pick **one** form from the table in "Choosing an install form" above, and install at **one** scope.
 
-## Path A — Azure Portal
+---
+
+## Form C — Policy fragments *(recommended)*
+
+Two reusable fragments are registered once, then referenced from any scope with two lines. Your
+existing policies are left intact.
+
+**Register the fragments** — run from the directory containing the `fragments/` folder:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+SUB=$(az account show --query id -o tsv)
+BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
+
+jq -Rs '{properties:{format:"rawxml",description:"Radware SecurePath inbound",value:.}}' \
+   fragments/securepath-inbound.fragment.xml > rdwr-frag-in.json &&
+az rest --method PUT --uri "$BASE/policyFragments/securepath-inbound?api-version=2024-05-01" \
+        --headers "Content-Type=application/json" --body @rdwr-frag-in.json -o none &&
+jq -Rs '{properties:{format:"rawxml",description:"Radware SecurePath outbound",value:.}}' \
+   fragments/securepath-outbound.fragment.xml > rdwr-frag-out.json &&
+az rest --method PUT --uri "$BASE/policyFragments/securepath-outbound?api-version=2024-05-01" \
+        --headers "Content-Type=application/json" --body @rdwr-frag-out.json -o none &&
+echo "fragments registered"
+```
+
+**Reference them** from your existing policy, at whichever scope you chose. Open the policy editor
+for that scope and add the two `include-fragment` lines — leaving everything else as it is:
+
+```xml
+<policies>
+  <inbound>
+    <base />
+    <include-fragment fragment-id="securepath-inbound" />
+    <!-- your existing inbound policies stay here, untouched -->
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+    <include-fragment fragment-id="securepath-outbound" />
+    <!-- your existing outbound policies stay here, untouched -->
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>
+```
+
+At the **All APIs** scope only, omit `<base />` — it is not permitted there — and use
+`<forward-request />` in the backend section:
+
+```xml
+<policies>
+  <inbound>
+    <include-fragment fragment-id="securepath-inbound" />
+  </inbound>
+  <backend>
+    <forward-request />
+  </backend>
+  <outbound>
+    <include-fragment fragment-id="securepath-outbound" />
+  </outbound>
+  <on-error />
+</policies>
+```
+
+Updating the connector later means replacing the two fragments — every scope that references them
+picks up the change. A fragment cannot be deleted while any policy still references it; API
+Management refuses and names the referencing policy.
+
+---
+
+## Form A — Policy document at API scope
+
+Covers one API. **This replaces that API's entire policy document**, so only use it where the API
+has no policy of its own.
+
+**Azure Portal:**
 
 1. Portal → your API Management instance → **APIs** → select your API.
 2. Select **All operations**.
 3. In the **Inbound processing** box, select the **`</>`** icon to open the policy code editor. This
    editor shows the whole document, not only the inbound section.
-4. Select all existing content and replace it with the full contents of
+4. If the editor already contains policies of your own, **stop and use Form C instead** — continuing
+   will discard them. Otherwise replace the contents with
    `rdwr-azureapim-securepath-connector-v1.3.xml`.
 5. **Save.**
 
 If the save is rejected, the error names the missing Named Value or the offending line. Go back to
-Step 2c.
+Step 3c.
 
-## Path B — Azure CLI
-
-Run this from the directory containing the policy XML.
+**Azure CLI** — run from the directory containing the policy XML:
 
 ```bash
 RG="your-resource-group"
@@ -359,13 +542,7 @@ az rest --method PUT --uri "$URI" \
         --body @rdwr-policy-body.json
 ```
 
-`format` must be `rawxml`. The default rejects the Named Value references this policy uses inside
-XML attributes.
-
-A successful call returns the stored policy document. A failure returns a validation error with a
-line and position.
-
-## Path C — PowerShell
+**PowerShell:**
 
 ```powershell
 $ctx = New-AzApiManagementContext -ResourceGroupName "your-resource-group" -ServiceName "your-apim-instance"
@@ -374,10 +551,41 @@ Set-AzApiManagementPolicy -Context $ctx -ApiId "your-api-resource-name" `
     -Format "application/vnd.ms-azure-apim.policy.raw+xml"
 ```
 
+`format` must be `rawxml`. The default rejects the Named Value references this policy uses inside
+XML attributes.
+
+---
+
+## Form B — Policy document at All APIs scope
+
+Covers every API on the instance in one action. Use
+`rdwr-azureapim-securepath-connector-v1.3-all-apis-scope.xml`, which is the same policy with
+`<base />` removed and `<forward-request />` in the backend section — **the standard file is
+rejected at this scope** with *"Element `<base/>` is not allowed in global context"*.
+
+Run the Step 2b check first. Any API whose own policy lacks `<base />` will silently skip the
+connector.
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+SUB=$(az account show --query id -o tsv)
+URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/policies/policy?api-version=2024-05-01"
+
+jq -Rs '{properties: {format: "rawxml", value: .}}' \
+   rdwr-azureapim-securepath-connector-v1.3-all-apis-scope.xml > rdwr-global-body.json &&
+az rest --method PUT --uri "$URI" \
+        --headers "Content-Type=application/json" \
+        --body @rdwr-global-body.json
+```
+
+In the Portal this is **APIs → All APIs → Policies**.
+
 ---
 ---
 
-# ▶ STEP 4 — Verify
+# ▶ STEP 5 — Verify
 
 **What this does:** proves the connector is installed, executing, and actually inspecting — three
 different things.
@@ -524,7 +732,7 @@ See 4d, then check the trace for `error ignored`.
 
 ## Issue 3 — Everything works, nothing appears in the Radware portal
 
-Usually the wrong `rdwr-app-id`. It is a bare identifier with no dots. Run the check in Step 2c.
+Usually the wrong `rdwr-app-id`. It is a bare identifier with no dots. Run the check in Step 3c.
 Then check the trace for a redirect toward `wrong-api-key`, which is returned when the credentials
 cannot be matched to an application.
 
@@ -542,7 +750,7 @@ after a Named Value edit rather than after a policy change.
 
 ## Issue 5 — The policy upload is rejected
 
-*"Named Value not found"* means one of the 20 is missing. Run Step 2c, which names it.
+*"Named Value not found"* means one of the 20 is missing. Run Step 3c, which names it.
 
 If the upload failed with a validation error instead, confirm the request used `format: rawxml`.
 
@@ -569,7 +777,7 @@ the trace for `error ignored`.
 ## Issue 9 — Nothing happened when you pasted a command block
 
 Your shell stopped partway through, most likely on a syntax error, and the remaining commands never
-ran. Re-run the block, then run Step 2c to see what was actually created. If you are pasting into a
+ran. Re-run the block, then run Step 3c to see what was actually created. If you are pasting into a
 shell other than bash, paste one command at a time.
 
 ---
@@ -577,7 +785,32 @@ shell other than bash, paste one command at a time.
 
 # ▶ REMOVING THE CONNECTOR
 
-Replace the API policy with the default, which restores normal routing immediately:
+How you remove it depends on which form you installed.
+
+## If you installed Form C — fragments
+
+Delete the two `include-fragment` lines from the policy you added them to. Inspection stops
+immediately and the rest of that policy is unaffected.
+
+Then, optionally, remove the fragments themselves. API Management refuses to delete a fragment that
+is still referenced and names the referencing policy, so this cannot silently break a scope you
+forgot about:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+SUB=$(az account show --query id -o tsv)
+BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
+
+az rest --method DELETE --uri "$BASE/policyFragments/securepath-inbound?api-version=2024-05-01" --headers "If-Match=*"
+az rest --method DELETE --uri "$BASE/policyFragments/securepath-outbound?api-version=2024-05-01" --headers "If-Match=*"
+```
+
+## If you installed Form A — policy document at API scope
+
+Replace that API's policy with the default, which restores normal routing immediately. Note this
+restores the *default* policy, not any policy you had before installing:
 
 ```bash
 RG="your-resource-group"
@@ -591,9 +824,26 @@ printf '{"properties":{"format":"rawxml","value":"<policies><inbound><base /></i
 az rest --method PUT --uri "$URI" --headers "Content-Type=application/json" --body @rdwr-default-policy.json
 ```
 
-The 20 Named Values and the backend entity are inert once the policy is removed. Remove them at your
-convenience — they are all prefixed `rdwr-`, `static-`, `chunked-` or named `plugin-version-info`,
-and the backend entity is named `securepath-sideband`.
+## If you installed Form B — policy document at All APIs scope
+
+Same idea, against the global scope, using the global-scope shape:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+SUB=$(az account show --query id -o tsv)
+URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/policies/policy?api-version=2024-05-01"
+
+printf '{"properties":{"format":"rawxml","value":"<policies><inbound /><backend><forward-request /></backend><outbound /><on-error /></policies>"}}' > rdwr-default-global.json &&
+az rest --method PUT --uri "$URI" --headers "Content-Type=application/json" --body @rdwr-default-global.json
+```
+
+## In every case
+
+The 20 Named Values and the backend entity are inert once the connector is removed. Delete them at
+your convenience — but check first whether any of the six non-`rdwr-` names were already yours
+before installation (Step 2a lists them).
 
 ---
 ---
@@ -603,6 +853,6 @@ and the backend entity is named `securepath-sideband`.
 When contacting Radware, include:
 
 1. The trace for one failing request, with the **Inbound** section expanded.
-2. The output of the Step 2c check.
+2. The output of the Step 3c check.
 3. Your tier — `az apim show -g "$RG" -n "$APIM" --query sku.name -o tsv`
 4. Whether the request appears in the Radware Cloud events view.
