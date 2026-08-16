@@ -23,8 +23,34 @@ a policy, that discards it.
 - **Form A — policy document at API scope.** Unchanged, and now carries an explicit warning that it
   replaces the API's existing policy.
 
-All three forms, and the fragment form at API, product and All APIs scope, were verified on a
-Standard v2 instance.
+### Validation
+
+All three forms were exercised against a live SecurePath application on a Standard v2 instance,
+with Bot Manager enabled, and were confirmed to **inspect traffic** — not merely to install.
+
+| Check | Form A | Form B | Form C |
+|---|:--:|:--:|:--:|
+| Allow verdict returned to the client | ✓ | ✓ | ✓ |
+| Bot Manager cookies from SecurePath reach the client | ✓ | ✓ | ✓ |
+| Reserved header rejected with 403 | ✓ | ✓ | ✓ |
+
+Bot Manager cookie propagation is the meaningful signal: the cookies originate at SecurePath, so
+their arrival proves the inspection call completed; and they are captured during the request phase
+and applied during the response phase, so their arrival under Form C also proves that state carries
+across the two fragments. A baseline with no connector installed returned no such cookies, and all
+three forms agreed exactly.
+
+An API Management trace of the fragment form additionally confirms the response-phase log:
+
+```
+One way request was successfully send to https://<endpoint>.oop.radwarecloud.net/...
+x-rdwr-oop-request-status = allowed
+x-rdwr-oop-id             = 645d331c83b493192c22c9bf4b1ff6bf
+x-rdwr-oop-log            = 2
+```
+
+with no suppressed errors in the trace. The fragment form was also confirmed to install and execute
+at API, product and All APIs scope.
 
 ### Two pre-flight checks, added as a new Step 2
 
