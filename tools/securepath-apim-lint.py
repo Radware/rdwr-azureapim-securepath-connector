@@ -313,7 +313,8 @@ def fetch_cloud_apps(api_key: str, context: str, timeout: float = 15.0):
     import urllib.error
     import urllib.request
     req = urllib.request.Request(f"{CLOUD_API_BASE}/v1/gms/applications", method="GET",
-                                 headers={"x-api-key": api_key, "context": context, "Accept": "application/json"})
+                                 headers={"x-api-key": api_key, "context": context, "Accept": "application/json",
+                                          "User-Agent": "SecurePath-APIM-connector/1.4.0"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read() or b"null")

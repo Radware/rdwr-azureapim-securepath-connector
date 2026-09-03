@@ -113,6 +113,9 @@
                       <set-header name="Accept" exists-action="override">
                         <value>application/json</value>
                       </set-header>
+                      <set-header name="User-Agent" exists-action="override">
+                        <value>SecurePath-APIM-connector/1.4.0</value>
+                      </set-header>
                     </send-request>
                     <set-variable name="rdwrCloudProjected" value="@{
                       try {
@@ -233,7 +236,11 @@
         <choose>
           <when condition="@(!string.IsNullOrEmpty((string)context.Variables["rdwrConfigProblem"]))">
             <set-variable name="shouldBypassRadware" value="@(true)" />
-            <set-variable name="radwareDiag" value="@((string)context.Variables["rdwrConfigProblem"])" />
+            <set-variable name="radwareDiag" value="@{
+              string prior = (string)context.Variables.GetValueOrDefault("radwareDiag", "");
+              string problem = (string)context.Variables["rdwrConfigProblem"];
+              return string.IsNullOrEmpty(prior) ? problem : problem + ";" + prior;
+            }" />
             <trace source="securepath" severity="error">
               <message>@("SecurePath not applied (" + (string)context.Variables["rdwrConfigProblem"] + ") host=" + (string)context.Variables.GetValueOrDefault("rdwrTrueHost", "") + " api=" + ((context.Api != null && context.Api.Id != null) ? context.Api.Id : "") + "; request served uninspected")</message>
             </trace>
