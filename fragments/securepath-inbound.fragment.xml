@@ -985,7 +985,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.2"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.4.0"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -1091,7 +1091,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.2"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.4.0"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -1214,7 +1214,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.2"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.4.0"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -1317,7 +1317,7 @@
                         <value>log</value>
                       </set-header>
                       <set-header name="x-rdwr-plugin-info" exists-action="override">
-                        <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.2"))</value>
+                        <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.4.0"))</value>
                       </set-header>
                       <set-header name="x-rdwr-app-id" exists-action="override">
                         <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
