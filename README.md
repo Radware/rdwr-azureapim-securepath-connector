@@ -830,6 +830,43 @@ breaks your traffic. That means failures do not surface anywhere except the trac
 
 If the Trace tab is unavailable, tracing is not enabled for the subscription you are testing with.
 
+### Tracing without the Portal (private gateway, or traffic through Front Door)
+
+When the gateway has no public access, the Portal's Test tab cannot reach it. Tracing does not
+need the Portal: obtain a one-hour debug token for the API, send one real request with it (through
+Front Door or any path clients use), then fetch the trace by its id. Verified on Standard v2.
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+API_ID="your-api-resource-name"
+
+SUB=$(az account show --query id -o tsv)
+BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
+TOKEN=$(az rest --method POST --uri "$BASE/gateways/managed/listDebugCredentials?api-version=2024-05-01" --headers "Content-Type=application/json" --body "{\"credentialsExpireAfter\":\"PT1H\",\"apiId\":\"$BASE/apis/$API_ID\",\"purposes\":[\"tracing\"]}" --query token -o tsv)
+echo "$TOKEN"
+```
+
+Send one request the way your clients do, adding `Apim-Debug-Authorization: <token>`; the response
+carries an `Apim-Trace-Id` header. Then:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+TRACE_ID="the-apim-trace-id-from-the-response"
+
+SUB=$(az account show --query id -o tsv)
+BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
+az rest --method POST --uri "$BASE/gateways/managed/listTrace?api-version=2024-05-01" --headers "Content-Type=application/json" --body "{\"traceId\":\"$TRACE_ID\"}" -o json > trace.json
+```
+
+In `trace.json`: `Entering policy fragment 'securepath-inbound'` (or the connector's own
+`set-variable` lines in the whole-document form) shows the connector ran on this API; a
+`send-request` entry with `request to 'https://<application id>.oop.radwarecloud.net/...' has
+been sent` shows the inspection call went out; `error ignored` right after it means that call
+failed and says why; `One way request was successfully send to` shows the response-phase log.
+If your own `validate-jwt` appears before the connector lines, the order is wrong (Step 4).
+
 ## The one string to search for
 
 In the trace, search for:
