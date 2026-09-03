@@ -773,7 +773,6 @@
                   return h[0] ?? "";
                 }" />
                 <set-variable name="bmUzmcrHeader0" value="@{
-                  if (!(bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false)) { return ""; }
                   if (!context.Variables.ContainsKey("radwareResponse") || context.Variables["radwareResponse"] == null) { return ""; }
                   var headers = ((IResponse)context.Variables["radwareResponse"]).Headers;
                   var h = headers.GetValueOrDefault("uzmcr", default(string[]));
@@ -1193,119 +1192,14 @@
                     </choose>
                   </when>
 
-                  <!-- Any other status: enforce Radware action -->
+                  <!-- Any other status (401, 418, ...): not a verdict the connector knows. Like the
+                       reference connector, pass the request to the origin (fail open) and say so;
+                       the response phase is logged by the outbound fragment as usual. -->
                   <otherwise>
-                    <set-variable name="radwareDiag" value="@($"action_enforced_status_{(int)context.Variables["rwStatus"]}")" />
-                    <!-- v2: Fire response-phase log for enforced action -->
-                    <choose>
-                      <when condition="@{
-                        var oop_log = (string)context.Variables.GetValueOrDefault("rdwrOopLog", "");
-                        var oop_id = (string)context.Variables.GetValueOrDefault("rdwrOopId", "");
-                        return (oop_log == "2" || oop_log == "3") && !string.IsNullOrEmpty(oop_id);
-                      }">
-                        <send-one-way-request mode="new">
-                          <set-url>@{
-                            var ep_addr = (string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", "");
-                            var ep_port = (int)context.Variables.GetValueOrDefault("rdwrAppEpPort", 443);
-                            var ep_ssl = (bool)context.Variables.GetValueOrDefault("rdwrAppEpSsl", true);
-                            var scheme = ep_ssl ? "https" : "http";
-                            var path = context.Request.OriginalUrl.Path;
-                            return $"{scheme}://{ep_addr}:{ep_port}{path}";
-                          }</set-url>
-                          <set-method>POST</set-method>
-                          <set-header name="Host" exists-action="override">
-                            <value>@((string)context.Variables["rdwrTrueHost"])</value>
-                          </set-header>
-                          <set-header name="x-rdwr-connector-proto" exists-action="override">
-                            <value>2</value>
-                          </set-header>
-                          <set-header name="x-rdwr-connector-stage" exists-action="override">
-                            <value>log</value>
-                          </set-header>
-                          <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.4.0"))</value>
-                          </set-header>
-                          <set-header name="x-rdwr-app-id" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
-                          </set-header>
-                          <set-header name="x-rdwr-api-key" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("rdwrApiKey", ""))</value>
-                          </set-header>
-                          <set-header name="x-rdwr-oop-id" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("rdwrOopId", ""))</value>
-                          </set-header>
-                          <set-header name="x-rdwr-o2v-status" exists-action="override">
-                            <value>@(((int)context.Variables["rwStatus"]).ToString())</value>
-                          </set-header>
-                          <set-header name="x-rdwr-o2v-body-bytes-sent" exists-action="override">
-                            <value>0</value>
-                          </set-header>
-                          <set-header name="x-rdwr-o2v-bytes-sent" exists-action="override">
-                            <value>0</value>
-                          </set-header>
-                          <set-header name="x-rdwr-o2v-request-time" exists-action="override">
-                            <value>@{
-                              var start = (DateTime)context.Variables.GetValueOrDefault("requestStartTime", DateTime.UtcNow);
-                              return (DateTime.UtcNow - start).TotalSeconds.ToString("F3");
-                            }</value>
-                          </set-header>
-                          <set-header name="x-rdwr-o2h-rdwr-response" exists-action="override">
-                            <value>blocked</value>
-                          </set-header>
-                          <set-body />
-                        </send-one-way-request>
-                      </when>
-                    </choose>
-                    <return-response>
-                      <set-status code="@((int)context.Variables["rwStatus"])" reason="RadwareAction" />
-                      <set-header name="Content-Type" exists-action="override">
-                        <value>@{
-                          bool enabled = (bool)context.Variables.GetValueOrDefault("rdwrCustomBlockPageEnabled", false);
-                          string ct = (string)context.Variables.GetValueOrDefault("radwareCt", "text/html");
-                          bool isJson = ct.StartsWith("application/json");
-                          return (enabled && !isJson) ? "text/html; charset=UTF-8" : ct;
-                        }</value>
-                      </set-header>
-                      <set-header name="Set-Cookie" exists-action="append">
-                        <value>@{
-                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie0", "");
-                          return string.IsNullOrEmpty(v) ? null : v;
-                        }</value>
-                      </set-header>
-                      <set-header name="Set-Cookie" exists-action="append">
-                        <value>@{
-                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie1", "");
-                          return string.IsNullOrEmpty(v) ? null : v;
-                        }</value>
-                      </set-header>
-                      <set-header name="Set-Cookie" exists-action="append">
-                        <value>@{
-                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie2", "");
-                          return string.IsNullOrEmpty(v) ? null : v;
-                        }</value>
-                      </set-header>
-                      <set-header name="shieldsquare-response" exists-action="append">
-                        <value>@{
-                          var v = (string)context.Variables.GetValueOrDefault("bmShieldSquareHeader0", "");
-                          return string.IsNullOrEmpty(v) ? null : v;
-                        }</value>
-                      </set-header>
-                      <set-header name="uzmcr" exists-action="append">
-                        <value>@{
-                          var v = (string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", "");
-                          return string.IsNullOrEmpty(v) ? null : v;
-                        }</value>
-                      </set-header>
-                      <set-body>@{
-                        bool enabled = (bool)context.Variables.GetValueOrDefault("rdwrCustomBlockPageEnabled", false);
-                        string ct = (string)context.Variables.GetValueOrDefault("radwareCt", "text/html");
-                        bool isJson = ct.StartsWith("application/json");
-                        if (enabled && !isJson) {
-                          return (string)context.Variables.GetValueOrDefault("rdwrRenderedBlockPage", "");
-                        }
-                        return (string)context.Variables.GetValueOrDefault("radwareResponseBody", "");
-                      }</set-body>
-                    </return-response>
+                    <set-variable name="radwareDiag" value="@($"unexpected_status_{(int)context.Variables["rwStatus"]}")" />
+                    <trace source="securepath" severity="error">
+                      <message>@("SecurePath answered " + ((int)context.Variables["rwStatus"]).ToString() + ", which is not a verdict; request served without a verdict (fail open)")</message>
+                    </trace>
                   </otherwise>
                 </choose>
 
@@ -1366,13 +1260,15 @@
                 </set-header>
               </when>
             </choose>
-            <choose>
-              <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", "")))">
-                <set-header name="uzmcr" exists-action="append">
-                  <value>@((string)context.Variables["bmUzmcrHeader0"])</value>
-                </set-header>
-              </when>
-            </choose>
+          </when>
+        </choose>
+        <!-- The uzmcr header (Bot Manager mobile flow) is relayed to the client whenever
+             SecurePath sent it, independently of rdwr-bot-manager-enabled. -->
+        <choose>
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", "")))">
+            <set-header name="uzmcr" exists-action="append">
+              <value>@((string)context.Variables["bmUzmcrHeader0"])</value>
+            </set-header>
           </when>
         </choose>
         <!-- ====== v2 Response Phase Logging ====== -->

@@ -29,13 +29,15 @@
             </set-header>
           </when>
         </choose>
-        <choose>
-          <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", "")))">
-            <set-header name="uzmcr" exists-action="append">
-              <value>@((string)context.Variables["bmUzmcrHeader0"])</value>
-            </set-header>
-          </when>
-        </choose>
+      </when>
+    </choose>
+    <!-- The uzmcr header (Bot Manager mobile flow) is relayed to the client whenever
+         SecurePath sent it, independently of rdwr-bot-manager-enabled. -->
+    <choose>
+      <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", "")))">
+        <set-header name="uzmcr" exists-action="append">
+          <value>@((string)context.Variables["bmUzmcrHeader0"])</value>
+        </set-header>
       </when>
     </choose>
     <!-- ====== v2 Response Phase Logging ====== -->

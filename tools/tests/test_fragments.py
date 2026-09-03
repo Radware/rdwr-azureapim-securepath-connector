@@ -46,3 +46,16 @@ def test_no_cloud_fetch_on_the_request_path():
 def test_plugin_info_fallback_is_v140():
     for name in ("outbound", "onerror"):
         assert "700-v1.4.0" in frag(name) and "700-v1.3" not in frag(name)
+
+
+def test_unknown_securepath_status_fails_open_audibly():
+    t = frag("inbound")
+    assert "action_enforced_status" not in t
+    assert "unexpected_status_" in t
+
+
+def test_uzmcr_relay_is_not_gated_on_bot_manager_flag():
+    t = frag("outbound")
+    gate = t.index('GetValueOrDefault("rdwrBotManagerEnabled", false)')
+    gate_close = t.index("    </choose>", gate)
+    assert t.index('name="uzmcr"') > gate_close
