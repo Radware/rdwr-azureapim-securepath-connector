@@ -76,3 +76,20 @@ place and every scope that references them picks up the change.
 | `trueHostHeader` | `##DISABLED##` | header carrying the client-facing hostname when Front Door or a CDN fronts the gateway (`X-Forwarded-Host`) |
 
 `securepath-apim.parameters.example.json` shows the parameter-file form of the same values.
+
+For several SecurePath applications, let the sync tool produce the map from your account and
+pass it as a parameter file:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+APP_ID="your-application-id"
+API_KEY="your-api-key"
+APP_EP="your-application-id.oop.radwarecloud.net"
+CLOUD_API_KEY="your-radware-cloud-portal-api-key"
+CLOUD_CONTEXT="your-application-protection-id"
+
+python3 tools/securepath-apim-sync.py export --cloud-api-key "$CLOUD_API_KEY" --cloud-context "$CLOUD_CONTEXT" --out appmap.parameters.json &&
+az deployment group create -g "$RG" -n securepath-connector --template-file deploy/securepath-apim.bicep \
+  --parameters @appmap.parameters.json --parameters apimName="$APIM" appId="$APP_ID" apiKey="$API_KEY" endpoint="$APP_EP"
+```
