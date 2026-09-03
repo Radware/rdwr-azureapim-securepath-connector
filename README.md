@@ -581,19 +581,20 @@ for F in app-map inbound outbound onerror; do
   az rest --method PUT --uri "$BASE/policyFragments/securepath-$F?api-version=2024-05-01" \
           --headers "Content-Type=application/json" --body @rdwr-frag-$F.json -o none > /dev/null || exit 1
 done
-printf '{"properties":{"format":"rawxml","value":"<policies><inbound><include-fragment fragment-id=\\"securepath-inbound\\" /></inbound><backend><forward-request /></backend><outbound><include-fragment fragment-id=\\"securepath-outbound\\" /></outbound><on-error><include-fragment fragment-id=\\"securepath-onerror\\" /></on-error></policies>"}}' > rdwr-global-policy.json &&
+printf '{"properties":{"format":"rawxml","value":"<policies><inbound><include-fragment fragment-id=\\"securepath-app-map\\" /><include-fragment fragment-id=\\"securepath-inbound\\" /></inbound><backend><forward-request /></backend><outbound><include-fragment fragment-id=\\"securepath-outbound\\" /></outbound><on-error><include-fragment fragment-id=\\"securepath-onerror\\" /></on-error></policies>"}}' > rdwr-global-policy.json &&
 az rest --method PUT --uri "$BASE/policies/policy?api-version=2024-05-01" \
         --headers "Content-Type=application/json" --body @rdwr-global-policy.json -o none > /dev/null &&
 echo "installed at All APIs scope"
 ```
 
 **Azure Portal.** APIs → **Policy fragments** → **+ Create**, four times, pasting each file
-from `fragments/` (`securepath-app-map` first: the inbound fragment references it). Then APIs → **All APIs** → **Policies**, open the code editor and replace the
+from `fragments/`. Then APIs → **All APIs** → **Policies**, open the code editor and replace the
 document with:
 
 ```xml
 <policies>
   <inbound>
+    <include-fragment fragment-id="securepath-app-map" />
     <include-fragment fragment-id="securepath-inbound" />
   </inbound>
   <backend>
@@ -619,15 +620,15 @@ Management refuses and names the referencing policy.
 
 ## Form 2 — Fragments inside an existing API or product policy
 
-Register the fragments exactly as in Form 1 (the loop, or the Portal; `securepath-app-map` is
-referenced by the inbound fragment itself, so your policy names only three). Then open the
-policy for the API or product and add the three `include-fragment` lines **immediately after `<base />`,
+Register the fragments exactly as in Form 1 (the loop, or the Portal). Then open the policy for
+the API or product and add the four `include-fragment` lines **immediately after `<base />`,
 before any policy of your own**:
 
 ```xml
 <policies>
   <inbound>
     <base />
+    <include-fragment fragment-id="securepath-app-map" />
     <include-fragment fragment-id="securepath-inbound" />
     <!-- your existing inbound policies stay here, after the connector -->
   </inbound>
@@ -927,7 +928,7 @@ How you remove it depends on which form you installed.
 
 ## If you installed fragments (Form 1 or 2)
 
-Delete the three `include-fragment` lines from the policy you added them to. Inspection stops
+Delete the four `include-fragment` lines from the policy you added them to. Inspection stops
 immediately and the rest of that policy is unaffected.
 
 Then, optionally, remove the fragments themselves. API Management refuses to delete a fragment that

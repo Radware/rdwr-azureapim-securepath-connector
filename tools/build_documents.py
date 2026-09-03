@@ -36,13 +36,8 @@ def fragment_body(name):
     return "\n".join(("    " + ln) if ln.strip() else "" for ln in body.splitlines())
 
 
-APP_MAP_INLINE = ('        <!-- Form 3 keeps the whole document self-contained: the generated application map\n'
-                  '             (tools/securepath-apim-sync.py) is a fragment-install feature. Use rdwr-app-map. -->\n'
-                  '        <set-variable name="rdwrAppMapGenerated" value="##DISABLED##" />')
-
-
 def render():
-    inbound = fragment_body("inbound").replace('        <include-fragment fragment-id="securepath-app-map" />', APP_MAP_INLINE)
+    inbound = fragment_body("inbound")
     assert "include-fragment" not in inbound, "the whole document must not reference fragments"
     return (
         HEADER

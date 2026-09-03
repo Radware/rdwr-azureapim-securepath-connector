@@ -75,9 +75,10 @@
           }
           return host.ToLower();
         }" />
-        <!-- Form 3 keeps the whole document self-contained: the generated application map
-             (tools/securepath-apim-sync.py) is a fragment-install feature. Use rdwr-app-map. -->
-        <set-variable name="rdwrAppMapGenerated" value="##DISABLED##" />
+        <!-- The generated application map (fragment securepath-app-map, written by
+             tools/securepath-apim-sync.py) is included by the POLICY, ahead of this fragment:
+             API Management does not allow a fragment to include another fragment. It sets
+             rdwrAppMapGenerated; when the policy does not include it, the variable is simply absent. -->
         <set-variable name="rdwrAppMapRaw" value="{{rdwr-app-map}}" />
         <set-variable name="rdwrAppMapSource" value="@{
           string m = ((string)context.Variables.GetValueOrDefault("rdwrAppMapRaw", "") ?? "").Trim().ToLower();

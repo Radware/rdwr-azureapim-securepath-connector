@@ -1,6 +1,7 @@
 <policies>
     <inbound>
         <base />
+        <include-fragment fragment-id="securepath-app-map" />
         <include-fragment fragment-id="securepath-inbound" />
         <set-variable name="rdwrRenderedBlockPage" />
         <validate-jwt header-name="Authorization" failed-validation-httpcode="401">

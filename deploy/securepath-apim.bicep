@@ -149,7 +149,7 @@ resource globalPolicy 'Microsoft.ApiManagement/service/policies@2024-05-01' = {
   name: 'policy'
   properties: {
     format: 'rawxml'
-    value: '<policies><inbound><include-fragment fragment-id="securepath-inbound" /></inbound><backend><forward-request /></backend><outbound><include-fragment fragment-id="securepath-outbound" /></outbound><on-error><include-fragment fragment-id="securepath-onerror" /></on-error></policies>'
+    value: '<policies><inbound><include-fragment fragment-id="securepath-app-map" /><include-fragment fragment-id="securepath-inbound" /></inbound><backend><forward-request /></backend><outbound><include-fragment fragment-id="securepath-outbound" /></outbound><on-error><include-fragment fragment-id="securepath-onerror" /></on-error></policies>'
   }
   dependsOn: [fragIn, fragOut, fragErr]
 }

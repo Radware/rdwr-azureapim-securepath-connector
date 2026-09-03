@@ -181,3 +181,12 @@ def test_missing_app_map_fragment_is_l11_when_fragments_are_used():
     assert codes(lint.lint_instance(r)) == ["L11"]
     r2 = FakeReaderWithFragment(glob=fx("clean_global.xml"), fragment=open(os.path.join(HERE, "..", "..", "fragments", "securepath-app-map.fragment.xml")).read())
     assert lint.lint_instance(r2) == []
+
+
+def test_l11_when_inbound_is_referenced_without_the_app_map_before_it():
+    glob = fx("clean_global.xml").replace('        <include-fragment fragment-id="securepath-app-map" />\n', '')
+    assert codes(lint.lint_instance(FakeReader(glob=glob))) == ["L11"]
+    swapped = fx("clean_global.xml").replace(
+        '        <include-fragment fragment-id="securepath-app-map" />\n        <include-fragment fragment-id="securepath-inbound" />',
+        '        <include-fragment fragment-id="securepath-inbound" />\n        <include-fragment fragment-id="securepath-app-map" />')
+    assert codes(lint.lint_instance(FakeReader(glob=swapped))) == ["L11"]

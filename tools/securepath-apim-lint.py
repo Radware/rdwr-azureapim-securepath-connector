@@ -345,6 +345,15 @@ def lint_instance(reader: Reader) -> List[Finding]:
 
     # generated application map (tools/securepath-apim-sync.py) in the securepath-app-map fragment
     uses_fragments = any(text and 'fragment-id="securepath-inbound"' in text for _, _, text in docs)
+    for scope, label, text in docs:
+        if not text or 'fragment-id="securepath-inbound"' not in text:
+            continue
+        i_in = text.index('fragment-id="securepath-inbound"')
+        i_map = text.find('fragment-id="securepath-app-map"')
+        if i_map < 0 or i_map > i_in:
+            findings.append(Finding("L11", label, None,
+                                    "securepath-inbound is referenced without securepath-app-map before it (fragments cannot include fragments, so the policy must)",
+                                    'add <include-fragment fragment-id="securepath-app-map" /> immediately before the securepath-inbound line'))
     gen_text = reader.fragment("securepath-app-map")
     if uses_fragments and gen_text is None:
         findings.append(Finding("L11", "fragments", None, "the securepath-app-map fragment is not registered; the inbound fragment references it",

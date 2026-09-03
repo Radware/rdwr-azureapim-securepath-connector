@@ -66,10 +66,9 @@ def test_403_block_enforcement_branch_is_present():
     assert t.index('== 403)">') < t.index("unexpected_status_")
 
 
-def test_inbound_includes_the_generated_map_before_reading_the_hand_map():
+def test_inbound_reads_the_generated_map_but_never_includes_a_fragment():
     t = frag("inbound")
-    i = t.index('<include-fragment fragment-id="securepath-app-map" />')
-    assert i < t.index('name="rdwrAppMapRaw"')
+    assert "include-fragment" not in t  # API Management rejects a fragment that includes a fragment
     assert "rdwrAppMapGenerated" in t and "merged[p.Name] = p.Value" in t
 
 

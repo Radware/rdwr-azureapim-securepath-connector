@@ -70,7 +70,10 @@
       }
       return host.ToLower();
     }" />
-    <include-fragment fragment-id="securepath-app-map" />
+    <!-- The generated application map (fragment securepath-app-map, written by
+         tools/securepath-apim-sync.py) is included by the POLICY, ahead of this fragment:
+         API Management does not allow a fragment to include another fragment. It sets
+         rdwrAppMapGenerated; when the policy does not include it, the variable is simply absent. -->
     <set-variable name="rdwrAppMapRaw" value="{{rdwr-app-map}}" />
     <set-variable name="rdwrAppMapSource" value="@{
       string m = ((string)context.Variables.GetValueOrDefault("rdwrAppMapRaw", "") ?? "").Trim().ToLower();

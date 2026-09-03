@@ -19,7 +19,7 @@ def codes(findings):
 def test_split_sections_reports_opening_lines():
     s = lint.split_sections(fx("clean_api.xml"))
     assert set(s) == {"inbound", "backend", "outbound", "on-error"}
-    assert s["inbound"][0] == 2 and s["outbound"][0] == 13
+    assert s["inbound"][0] == 2 and s["outbound"][0] == 14
 
 
 def test_clean_api_has_no_findings():
