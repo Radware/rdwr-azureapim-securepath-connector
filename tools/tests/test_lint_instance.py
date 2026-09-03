@@ -16,9 +16,7 @@ NV_OK = {n: "x" for n in lint.REQUIRED_NAMED_VALUES}
 NV_OK.update({"rdwr-app-id": "afa37f7d53ce4e76a4988c4955c2d7e5",
               "rdwr-app-ep-addr": "afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net",
               "rdwr-app-ep-ssl": "true",
-              "rdwr-app-map": "##DISABLED##", "rdwr-true-host-header": "##DISABLED##",
-              "rdwr-cloud-api-key": "##DISABLED##", "rdwr-cloud-context": "##DISABLED##",
-              "rdwr-cloud-sync-ttl-seconds": "300", "rdwr-cloud-sync-timeout-seconds": "5"})
+              "rdwr-app-map": "##DISABLED##", "rdwr-true-host-header": "##DISABLED##"})
 
 
 class FakeReader(lint.Reader):
@@ -147,39 +145,3 @@ def test_map_endpoint_without_backend_is_l09():
     r = FakeReader(glob=fx("clean_global.xml"), nvs=nvs)
     f = lint.lint_instance(r)
     assert codes(f) == ["L09"] and "y.oop.radwarecloud.net" in f[0].message
-
-
-CLOUD_APPS = [
-    {"id": "11111111-1111-1111-1111-111111111111", "oopApiKey": "key-1", "applicationAssetType": "OUT_OF_PATH",
-     "deploymentStatus": "PROTECTING",
-     "featuresData": {"wafFeatureData": {"mainDomain": {"mainDomain": "Shop.Example.Test"},
-                                         "oopDns": {"dnsRecords": [{"type": "A", "value": "1.2.3.4"},
-                                                                   {"type": "CNAME", "value": "11111111111111111111111111111111.oop.radwarecloud.net"}]}}},
-     "apiProtection": {"hostname": {"useDefault": False, "hostname": "api.example.test"}}},
-    {"id": "2", "oopApiKey": "key-2", "applicationAssetType": "OUT_OF_PATH", "deploymentStatus": "PROVISIONING",
-     "featuresData": {"wafFeatureData": {"mainDomain": {"mainDomain": "new.example.test"}}}},
-    {"id": "3", "oopApiKey": "key-3", "applicationAssetType": "CDN", "deploymentStatus": "PROTECTING"},
-]
-
-
-def test_cloud_projection_matches_policy_rules():
-    m = lint.project_cloud_apps(CLOUD_APPS)
-    assert set(m) == {"shop.example.test", "api.example.test"}
-    assert m["shop.example.test"]["endpoint"] == "11111111111111111111111111111111.oop.radwarecloud.net"
-    assert m["shop.example.test"]["port"] == 443 and m["shop.example.test"]["ssl"] is True
-    assert m["api.example.test"] is m["shop.example.test"]
-    assert lint.project_cloud_apps({"content": CLOUD_APPS}) == m
-
-
-def test_cloud_mode_checks_backends_for_discovered_endpoints_and_reports_fetch_failures():
-    nvs = dict(NV_OK)
-    nvs["rdwr-cloud-api-key"] = "k"
-    nvs["rdwr-cloud-context"] = "c"
-    r = FakeReader(glob=fx("clean_global.xml"), nvs=nvs)
-    f = lint.lint_instance(r, cloud_fetch=lambda k, c: CLOUD_APPS)
-    assert codes(f) == ["L09"] and "11111111111111111111111111111111.oop" in f[0].message
-
-    def boom(k, c):
-        raise RuntimeError("HTTP 401")
-    f = lint.lint_instance(FakeReader(glob=fx("clean_global.xml"), nvs=nvs), cloud_fetch=boom)
-    assert codes(f) == ["L12"] and "401" in f[0].message

@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 """Radware SecurePath connector for Azure API Management: application sync.
 
-Reads the SecurePath applications of your Radware Cloud account and writes them
-into the connector's application map (Named Value rdwr-app-map), keyed by each
-application's domain, and on Standard v2 / Premium v2 creates the backend entity
-that establishes trust for each inspection endpoint. Idempotent: run it again
-whenever an application is added or changed.
+Keeps the connector's application map (Named Value rdwr-app-map) and, on
+Standard v2 / Premium v2, the backend entities for the inspection endpoints in
+step with the SecurePath applications of your Radware Cloud account.
 
-    python3 tools/securepath-apim-sync.py -g RG -n APIM --cloud-api-key KEY --cloud-context CTX [--dry-run] [--print-map]
+    plan    read the account, compare with the instance, print what would change
+    apply   write the changes (map entries added or updated, backends created);
+            --prune also removes map entries whose application is gone
+    check   exit 1 when the instance differs from the account (for a scheduler)
+    export  write the map as a Bicep parameter file for deploy/securepath-apim.bicep
 
-The same projection runs inside the policy when cloud sync is enabled there
-(README "Protecting APIs that belong to different SecurePath applications").
-This tool is for operators who prefer an explicit map, and it is the only way
-to create the per-endpoint backend entities on v2 tiers automatically.
+    python3 tools/securepath-apim-sync.py plan  -g RG -n APIM --cloud-api-key KEY --cloud-context CTX
+    python3 tools/securepath-apim-sync.py apply -g RG -n APIM --cloud-api-key KEY --cloud-context CTX [--prune]
+    python3 tools/securepath-apim-sync.py check -g RG -n APIM --cloud-api-key KEY --cloud-context CTX
+    python3 tools/securepath-apim-sync.py export --cloud-api-key KEY --cloud-context CTX --out appmap.parameters.json
 
-Exit codes: 0 done, 1 nothing to write (no protecting application), 2 failure.
+Applications are keyed by their domain (and by the API Protection hostname when one is set).
+Entries in the map that were written by hand (keyed by an API id, or any key the account does
+not know) are left alone. Run it from any machine or scheduler with the Azure CLI logged in; the
+same command run again only changes what differs.
+
+Exit codes: 0 done / in sync, 1 drift (check) or nothing to write, 2 failure.
 """
 import argparse
 import importlib.util
@@ -22,6 +29,8 @@ import json
 import os
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _spec = importlib.util.spec_from_file_location("securepath_apim_lint", os.path.join(HERE, "securepath-apim-lint.py"))
@@ -29,9 +38,67 @@ lint = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(lint)
 
 API_VERSION = lint.API_VERSION
-project_cloud_apps = lint.project_cloud_apps
-fetch_cloud_apps = lint.fetch_cloud_apps
+CLOUD_API_BASE = "https://api.radwarecloud.app"
+USER_AGENT = "SecurePath-APIM-connector/1.4.0"
+FIELDS = ("app_id", "api_key", "endpoint", "port", "ssl")
 
+
+# ---------------------------------------------------------------- Radware Cloud
+
+def fetch_cloud_apps(api_key: str, context: str, timeout: float = 20.0):
+    """GET /v1/gms/applications (every page). Raises RuntimeError on failure."""
+    apps, page = [], 0
+    while True:
+        req = urllib.request.Request(f"{CLOUD_API_BASE}/v1/gms/applications?page={page}&size=200", method="GET",
+                                     headers={"x-api-key": api_key, "context": context,
+                                              "Accept": "application/json", "User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read() or b"null")
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"Radware Cloud API answered HTTP {e.code} (check the API key and the context)") from e
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"Radware Cloud API unreachable: {e}") from e
+        if isinstance(data, list):
+            return data
+        if not isinstance(data, dict):
+            raise RuntimeError("unexpected response shape from the Radware Cloud API")
+        apps += data.get("content") or data.get("applications") or []
+        total_pages = int(data.get("totalPages") or 1)
+        page += 1
+        if page >= total_pages:
+            return apps
+
+
+def project_cloud_apps(apps) -> dict:
+    """Account applications -> {host: entry} for OUT_OF_PATH applications in PROTECTING state."""
+    if isinstance(apps, dict):
+        apps = apps.get("content") or apps.get("applications") or []
+    out = {}
+    for a in apps or []:
+        if not isinstance(a, dict):
+            continue
+        if a.get("applicationAssetType") != "OUT_OF_PATH" or a.get("deploymentStatus") != "PROTECTING":
+            continue
+        waf = ((a.get("featuresData") or {}).get("wafFeatureData")) or {}
+        domain = (((waf.get("mainDomain") or {}).get("mainDomain")) or "").strip().lower()
+        cname = ""
+        for rec in ((waf.get("oopDns") or {}).get("dnsRecords")) or []:
+            if rec.get("type") == "CNAME" and rec.get("value"):
+                cname = str(rec["value"]).strip().lower()
+                break
+        app_id, key = a.get("id") or "", a.get("oopApiKey") or ""
+        if not (app_id and key and domain and cname):
+            continue
+        entry = {"app_id": app_id, "api_key": key, "endpoint": cname, "port": 443, "ssl": True}
+        out[domain] = entry
+        hn = ((a.get("apiProtection") or {}).get("hostname")) or {}
+        if hn and not hn.get("useDefault", True) and hn.get("hostname"):
+            out[str(hn["hostname"]).strip().lower()] = dict(entry)
+    return out
+
+
+# ---------------------------------------------------------------- map rendering and diff
 
 def render_map(app_map: dict) -> str:
     """Single-quoted JSON, the only form a Named Value can carry."""
@@ -42,12 +109,48 @@ def render_map(app_map: dict) -> str:
     return text.replace('"', "'")
 
 
+def diff_maps(current: dict, desired: dict):
+    """Compare the instance's map with the account. Returns (added, changed, removed, unchanged)
+    as dicts of key -> entry (changed: key -> (old, new)). Keys unknown to the account that do
+    not look like hostnames (API ids, '*') are never reported as removed."""
+    added, changed, removed, unchanged = {}, {}, {}, {}
+    for k, e in desired.items():
+        cur = current.get(k)
+        if cur is None:
+            added[k] = e
+        elif any(str(cur.get(f, "")) != str(e.get(f, "")) for f in ("app_id", "api_key", "endpoint")):
+            changed[k] = (cur, e)
+        else:
+            unchanged[k] = cur
+    for k, e in current.items():
+        if k not in desired and "." in k:
+            removed[k] = e
+    return added, changed, removed, unchanged
+
+
+def merge(current: dict, desired: dict, prune: bool) -> dict:
+    out = {k: dict(v) for k, v in current.items()}
+    for k, e in desired.items():
+        merged = dict(out.get(k, {}))
+        merged.update({f: e[f] for f in FIELDS if f in e})
+        out[k] = merged
+    if prune:
+        for k in list(out):
+            if k not in desired and "." in k:
+                del out[k]
+    return out
+
+
+# ---------------------------------------------------------------- Azure
+
 class AzWriter:
     """az rest wrapper; injectable in tests."""
 
     def __init__(self, rg: str, apim: str, run=None):
         self.run = run or self._run
         sub = self.run(["account", "show", "--query", "id", "-o", "tsv"]).strip()
+        if not sub:
+            raise RuntimeError("az account show returned nothing; run az login")
         self.base = (f"https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}"
                      f"/providers/Microsoft.ApiManagement/service/{apim}")
 
@@ -55,11 +158,17 @@ class AzWriter:
     def _run(args):
         p = subprocess.run(["az"] + args, capture_output=True, text=True)
         if p.returncode != 0:
+            if "404" in p.stderr or "NotFound" in p.stderr:
+                return ""
             raise RuntimeError(p.stderr.strip() or f"az {' '.join(args)} failed")
         return p.stdout
 
     def get(self, path):
         raw = self.run(["rest", "--method", "GET", "--uri", f"{self.base}{path}?api-version={API_VERSION}", "-o", "json"])
+        return json.loads(raw.lstrip("﻿")) if raw.strip() else {}
+
+    def post(self, path):
+        raw = self.run(["rest", "--method", "POST", "--uri", f"{self.base}{path}?api-version={API_VERSION}", "-o", "json"])
         return json.loads(raw.lstrip("﻿")) if raw.strip() else {}
 
     def put(self, path, body):
@@ -68,6 +177,21 @@ class AzWriter:
 
     def sku(self):
         return (self.get("").get("sku") or {}).get("name", "")
+
+    def current_map(self) -> dict:
+        nv = self.get("/namedValues/rdwr-app-map")
+        if not nv:
+            return {}
+        props = nv.get("properties") or {}
+        raw = self.post("/namedValues/rdwr-app-map/listValue").get("value") if props.get("secret") else props.get("value")
+        raw = (raw or "").strip()
+        if raw.lower() in lint.DISABLE_TOKENS:
+            return {}
+        try:
+            m = lint.parse_app_map(raw)
+            return m if isinstance(m, dict) else {}
+        except ValueError:
+            raise RuntimeError("the rdwr-app-map on the instance is not valid JSON; fix it or set it to ##DISABLED## first")
 
     def backend_hosts(self):
         out = {}
@@ -84,60 +208,103 @@ class AzWriter:
             "tls": {"validateCertificateChain": False, "validateCertificateName": False}}})
 
 
-def sync(writer, apps_raw, dry_run=False, log=print):
-    app_map = project_cloud_apps(apps_raw)
-    if not app_map:
-        log("no SecurePath application in PROTECTING state was returned for this key and context")
-        return 1, app_map
-    rendered = render_map(app_map)
-    seen = set()
-    log(f"{'host':<40}{'application id':<40}endpoint")
-    for host, e in sorted(app_map.items()):
-        log(f"{host:<40}{e['app_id']:<40}{e['endpoint']}")
-    if dry_run:
-        log("dry run: nothing written")
-        return 0, app_map
-    writer.write_map(rendered)
-    log("rdwr-app-map written (secret)")
+# ---------------------------------------------------------------- commands
+
+def plan(writer, desired, log=print):
+    current = writer.current_map()
+    added, changed, removed, unchanged = diff_maps(current, desired)
+    log(f"{'action':<10}{'host':<36}{'application id':<40}endpoint")
+    for k, e in sorted(added.items()):
+        log(f"{'add':<10}{k:<36}{e['app_id']:<40}{e['endpoint']}")
+    for k, (old, new) in sorted(changed.items()):
+        log(f"{'update':<10}{k:<36}{new['app_id']:<40}{new['endpoint']}")
+    for k, e in sorted(removed.items()):
+        log(f"{'gone':<10}{k:<36}{e.get('app_id', ''):<40}{e.get('endpoint', '')}  (kept unless --prune)")
+    for k, e in sorted(unchanged.items()):
+        log(f"{'unchanged':<10}{k:<36}{e.get('app_id', ''):<40}{e.get('endpoint', '')}")
+    missing_backends = []
     if writer.sku().lower().endswith("v2"):
         existing = writer.backend_hosts()
-        n = 0
-        for e in app_map.values():
-            host = e["endpoint"]
-            if host in seen:
-                continue
-            seen.add(host)
-            if host in existing:
-                log(f"backend for {host}: exists ({existing[host]})")
-                continue
+        for e in desired.values():
+            if e["endpoint"] not in existing and e["endpoint"] not in missing_backends:
+                missing_backends.append(e["endpoint"])
+        for h in missing_backends:
+            log(f"{'backend':<10}{h}  (will be created)")
+    return current, added, changed, removed, missing_backends
+
+
+def apply(writer, desired, prune=False, log=print):
+    current, added, changed, removed, missing_backends = plan(writer, desired, log)
+    if not (added or changed or missing_backends or (prune and removed)):
+        log("in sync: nothing to write")
+        return 0
+    merged = merge(current, desired, prune)
+    if added or changed or (prune and removed):
+        writer.write_map(render_map(merged))
+        log(f"rdwr-app-map written: {len(added)} added, {len(changed)} updated, {len(removed) if prune else 0} removed, {len(merged)} entries")
+    if missing_backends:
+        existing = writer.backend_hosts()
+        n = len(existing)
+        for h in missing_backends:
             n += 1
-            name = f"securepath-sideband-{len(existing) + n}"
-            writer.create_backend(name, host)
-            log(f"backend for {host}: created ({name})")
-    else:
-        log("v1 tier: no backend entities needed (the Radware CA is validated from the certificate store)")
-    return 0, app_map
+            name = f"securepath-sideband-{n}"
+            writer.create_backend(name, h)
+            log(f"backend created: {name} -> https://{h}")
+    return 0
+
+
+def check(writer, desired, log=print):
+    current, added, changed, removed, missing_backends = plan(writer, desired, log)
+    drift = bool(added or changed or removed or missing_backends)
+    log("drift: yes" if drift else "in sync")
+    return 1 if drift else 0
+
+
+def export_parameters(desired, out_path, log=print):
+    body = {"$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+            "contentVersion": "1.0.0.0",
+            "parameters": {"appMap": {"value": desired}}}
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(body, f, indent=2)
+    log(f"wrote {out_path} ({len(desired)} entries); pass it with --parameters @{os.path.basename(out_path)} together with apimName, appId, apiKey and endpoint")
+    return 0
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Write the SecurePath application map and backend entities from the Radware Cloud API")
-    ap.add_argument("-g", "--resource-group", required=True)
-    ap.add_argument("-n", "--apim", required=True)
+    ap = argparse.ArgumentParser(description="Keep the SecurePath application map in step with your Radware Cloud account")
+    ap.add_argument("command", choices=["plan", "apply", "check", "export"])
+    ap.add_argument("-g", "--resource-group")
+    ap.add_argument("-n", "--apim")
     ap.add_argument("--cloud-api-key", required=True, help="Radware Cloud portal API key")
     ap.add_argument("--cloud-context", required=True, help="Application Protection ID (context header)")
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--print-map", action="store_true", help="also print the single-quoted map value")
+    ap.add_argument("--prune", action="store_true", help="apply: remove map entries whose application is gone from the account")
+    ap.add_argument("--include-provisioning", action="store_true", help="also include applications still provisioning")
+    ap.add_argument("--out", default="securepath-appmap.parameters.json", help="export: parameter file to write")
     a = ap.parse_args(argv)
     try:
-        apps = fetch_cloud_apps(a.cloud_api_key, a.cloud_context)
+        raw = fetch_cloud_apps(a.cloud_api_key, a.cloud_context)
+        if a.include_provisioning:
+            for app in raw:
+                if isinstance(app, dict) and app.get("deploymentStatus") == "PROVISIONING":
+                    app["deploymentStatus"] = "PROTECTING"
+        desired = project_cloud_apps(raw)
+        if not desired:
+            print("no SecurePath application in PROTECTING state was returned for this key and context", file=sys.stderr)
+            return 1
+        if a.command == "export":
+            return export_parameters(desired, a.out)
+        if not (a.resource_group and a.apim):
+            ap.error(f"{a.command} needs -g RESOURCE_GROUP and -n APIM")
         writer = AzWriter(a.resource_group, a.apim)
-        rc, app_map = sync(writer, apps, a.dry_run)
-    except (RuntimeError, ValueError) as e:
+        if a.command == "plan":
+            plan(writer, desired)
+            return 0
+        if a.command == "apply":
+            return apply(writer, desired, a.prune)
+        return check(writer, desired)
+    except (RuntimeError, ValueError, OSError) as e:
         print(f"failed: {e}", file=sys.stderr)
         return 2
-    if a.print_map and app_map:
-        print(render_map(app_map))
-    return rc
 
 
 if __name__ == "__main__":

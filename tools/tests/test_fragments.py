@@ -21,8 +21,7 @@ def test_true_host_replaces_every_originalurl_host_use():
 
 def test_inbound_declares_new_named_values():
     t = frag("inbound")
-    for nv in ("rdwr-app-map", "rdwr-true-host-header", "rdwr-cloud-api-key", "rdwr-cloud-context",
-               "rdwr-cloud-sync-ttl-seconds", "rdwr-cloud-sync-timeout-seconds"):
+    for nv in ("rdwr-app-map", "rdwr-true-host-header"):
         assert "{{" + nv + "}}" in t, nv
 
 
@@ -37,6 +36,11 @@ def test_diag_header_is_emitted_outside_the_inspection_branch():
     i_diag = t.rindex('name="X-Rdwr-Diag"')
     i_tier1_close = t.rindex("<!-- ====== End tier-1 path ====== -->")
     assert i_diag > i_tier1_close
+
+
+def test_no_cloud_fetch_on_the_request_path():
+    t = frag("inbound")
+    assert "api.radwarecloud.app" not in t and "cache-lookup-value" not in t and "rdwr-cloud" not in t
 
 
 def test_plugin_info_fallback_is_v140():

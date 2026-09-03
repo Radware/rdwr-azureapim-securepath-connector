@@ -64,7 +64,7 @@ use:
 | 1 | Establish TLS trust | Until this is in place, every inspection call fails and traffic is served **uninspected**. On some tiers it takes 15+ minutes to provision, so start it early. |
 | 2 | Pre-flight checks | Two things can silently damage an existing configuration or silently disable protection. Both are checked before anything is created. |
 | 3 | Create the Named Values | The policy resolves them when it is saved. If one is missing, Step 4 is rejected outright. |
-| 4 | Install the connector | Needs an existing API and all 20 Named Values already in place. Choose an install form — see below. |
+| 4 | Install the connector | Needs an existing API and all 22 Named Values already in place. Choose an install form — see below. |
 | 5 | Verify | Only meaningful once Step 1 has finished provisioning. Running it earlier reports a false failure. |
 
 ### Permissions you need
@@ -234,7 +234,7 @@ silently disable protection. Run both before creating anything.
 ## 2a — Named Value collisions
 
 Named Values share one namespace across the whole instance, and **`az apim nv create` overwrites an
-existing name without warning or error**. Six of the twenty names the connector uses carry no
+existing name without warning or error**. Six of the 22 names the connector uses carry no
 `rdwr-` prefix and are generic enough to already exist:
 
 `plugin-version-info`, `static-extensions-enabled`, `static-list-of-methods-not-to-inspect`,
@@ -247,7 +247,7 @@ This lists any that already exist, with their current values, **before** anythin
 RG="your-resource-group"
 APIM="your-apim-instance"
 
-RDWR_NAMES="rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled"
+RDWR_NAMES="rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled rdwr-app-map rdwr-true-host-header"
 EXISTING=$(az apim nv list -g "$RG" --service-name "$APIM" --query "[].name" -o tsv)
 FOUND=0
 for n in $RDWR_NAMES; do
@@ -299,7 +299,7 @@ Any `SKIPPED` line must be fixed by adding `<base />` as the first element of th
 
 # ▶ STEP 3 — Create the Named Values
 
-**What this does:** creates the 20 settings the policy reads. All 20 must exist before Step 4, or
+**What this does:** creates the 22 settings the policy reads. All 22 must exist before Step 4, or
 the install is rejected.
 
 ## 3a — Your three application values
@@ -319,7 +319,7 @@ az apim nv create -g "$RG" --service-name "$APIM" \
   --named-value-id rdwr-api-key --display-name rdwr-api-key --secret true --value "$API_KEY"
 ```
 
-## 3b — The 17 configuration values
+## 3b — The 19 configuration values
 
 `RDWR_NV` below is a temporary **shell variable** used to build the list. It has nothing to do with
 API Management Named Values, and clearing it affects nothing in Azure.
@@ -339,7 +339,7 @@ RDWR_NV=(
   "rdwr-true-client-ip-header=x-forwarded-for"
   "rdwr-api-base-path=/"
   "rdwr-bot-manager-enabled=false"
-  "plugin-version-info=700-v1.3.2"
+  "plugin-version-info=700-v1.4.0"
   "static-extensions-enabled=true"
   "static-list-of-methods-not-to-inspect=GET,HEAD"
   "static-list-of-bypassed-extensions=png,jpg,css,js,gif,ico,svg,woff,woff2"
@@ -347,6 +347,8 @@ RDWR_NV=(
   "chunked-request-allowed-content-types=application/json,application/x-www-form-urlencoded"
   "rdwr-inline-trusted-sources=##DISABLED##"
   "rdwr-inline-headers-enabled=false"
+  "rdwr-app-map=##DISABLED##"
+  "rdwr-true-host-header=##DISABLED##"
 )
 for kv in "${RDWR_NV[@]}"; do
   name="${kv%%=*}"
@@ -379,7 +381,7 @@ use. Switch that one to `az apim nv update` with the value you want.
 RG="your-resource-group"
 APIM="your-apim-instance"
 
-EXPECTED="rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled"
+EXPECTED="rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled rdwr-app-map rdwr-true-host-header"
 HAVE=$(az apim nv list -g "$RG" --service-name "$APIM" --query "[].name" -o tsv)
 for n in $EXPECTED; do
   echo "$HAVE" | grep -qx "$n" || echo "MISSING: $n"
@@ -399,7 +401,7 @@ esac
 Only `OK:` lines means you are ready for Step 4. Any `MISSING:` line will cause the policy upload to
 be rejected.
 
-> **Your other Named Values are none of our business.** This check looks only for the 20 names above
+> **Your other Named Values are none of our business.** This check looks only for the 22 names above
 > and ignores everything else on your instance. If you see unrelated Named Values in the portal,
 > leave them alone — the connector neither reads nor modifies them.
 
@@ -419,7 +421,7 @@ STRAY="0"
 az apim nv show -g "$RG" --service-name "$APIM" --named-value-id "$STRAY"
 ```
 
-Only if the value it prints is clearly paste debris, and the name is not one of the 20 above,
+Only if the value it prints is clearly paste debris, and the name is not one of the 22 above,
 remove it:
 
 ```bash
@@ -429,6 +431,106 @@ STRAY="0"
 
 az apim nv delete -g "$RG" --service-name "$APIM" --named-value-id "$STRAY" --yes
 ```
+
+## 3d — Protecting APIs that belong to different SecurePath applications
+
+The three values in 3a are the **default application**: every request the connector inspects
+uses them unless something below says otherwise. One instance that fronts several SecurePath
+applications adds one more Named Value, the **application map**. It is optional and costs
+nothing when absent; `tools/securepath-apim-sync.py` keeps it in step with your account.
+
+### Which application a request belongs to
+
+For each request the connector looks up, in this order:
+
+1. the API's resource name (`API_ID`, the `name` column of Step 0);
+2. the **client-facing hostname**;
+3. the entry named `*`.
+
+The first match wins. No match means the default application from 3a. If you set `rdwr-app-id`
+to `##DISABLED##` there is no default: an unmatched request is **served without inspection**,
+and the connector says so — it adds `X-Rdwr-Diag: no_app_mapping` to the request it forwards to
+your backend and writes a trace line — so an unprotected API is visible, never silent.
+
+**The client-facing hostname.** By default this is the host the gateway received. When Azure
+Front Door, a CDN or any proxy sits in front of the gateway, the gateway receives *its own*
+hostname and the hostname the client used arrives in a header — `X-Forwarded-Host` for Front
+Door. Set `rdwr-true-host-header` to that header name. The connector then uses it both to select
+the application and as the `Host` it reports to SecurePath, so events show the domain your users
+see (the same idea as `rdwr-true-client-ip-header`). Leave it `##DISABLED##` when clients reach
+the gateway directly.
+
+### The application map
+
+`rdwr-app-map` holds one JSON object. **Use single quotes** — a Named Value is inserted into
+the policy text, where a double quote is not allowed — and no `&` or `<`:
+
+```
+{'orders-api': {'app_id': 'afa37f7d53ce4e76a4988c4955c2d7e5', 'api_key': 'f4b1c2d3-1111-2222-3333-abcdefabcdef', 'endpoint': 'afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net', 'base_path': '/orders'},
+ 'shop.example.com': {'app_id': '0b1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f', 'api_key': 'aaaa1111-2222-3333-4444-555566667777', 'endpoint': '0b1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f.oop.radwarecloud.net'},
+ '*': {'app_id': '9f8e7d6c5b4a39281706f5e4d3c2b1a0', 'api_key': 'bbbb1111-2222-3333-4444-555566667777', 'endpoint': '9f8e7d6c5b4a39281706f5e4d3c2b1a0.oop.radwarecloud.net'}}
+```
+
+Each entry needs `app_id`, `api_key` and `endpoint`. Optional per entry: `base_path` (the path
+prefix to strip before inspection, for an API that lives under a prefix SecurePath does not
+know; overrides `rdwr-api-base-path`), `port`, `ssl` and `bot_manager` (override the instance
+values). Mark the Named Value **secret**.
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+MAP="{'orders-api': {'app_id': 'first-application-id', 'api_key': 'first-api-key', 'endpoint': 'first-application-id.oop.radwarecloud.net'}, 'shop.example.com': {'app_id': 'second-application-id', 'api_key': 'second-api-key', 'endpoint': 'second-application-id.oop.radwarecloud.net'}}"
+
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-app-map --secret true --value "$MAP"
+```
+
+On Standard v2 and Premium v2 every distinct `endpoint` needs its own backend entity (Step 1,
+Path B, one per endpoint; `deploy/securepath-apim.bicep` creates them from the `appMap`
+parameter). `tools/securepath-apim-lint.py --live` reports an endpoint without one as L09.
+
+### Keeping the map in step with your Radware Cloud account
+
+`tools/securepath-apim-sync.py` reads the SecurePath applications of your account through the
+Radware Cloud API (a portal API key and your Application Protection ID), compares them with the
+map on the instance, and writes only what differs. On Standard v2 / Premium v2 it also creates
+the backend entity each inspection endpoint needs. Entries you wrote by hand (an API id key, a
+`*` default, a `base_path`) are left as they are.
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+CLOUD_API_KEY="your-radware-cloud-portal-api-key"
+CLOUD_CONTEXT="your-application-protection-id"
+
+python3 tools/securepath-apim-sync.py plan -g "$RG" -n "$APIM" --cloud-api-key "$CLOUD_API_KEY" --cloud-context "$CLOUD_CONTEXT"
+```
+
+`plan` prints one line per application: `add`, `update`, `unchanged`, or `gone` (an entry whose
+application no longer exists in the account; kept unless you ask otherwise), plus the backend
+entities it would create. Nothing is written. Then:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+CLOUD_API_KEY="your-radware-cloud-portal-api-key"
+CLOUD_CONTEXT="your-application-protection-id"
+
+python3 tools/securepath-apim-sync.py apply -g "$RG" -n "$APIM" --cloud-api-key "$CLOUD_API_KEY" --cloud-context "$CLOUD_CONTEXT"
+```
+
+Run `apply` again after onboarding an application; it changes only the difference. Add
+`--prune` to also drop entries whose application is gone. `check` exits 1 when the instance
+differs from the account, so a scheduler can alert; `export --out appmap.parameters.json`
+writes the map as a parameter file for `deploy/securepath-apim.bicep`, when you would rather
+push everything through one deployment.
+
+**Automation.** Run `check` or `apply` from any scheduler you already have: a pipeline in
+GitHub Actions or Azure DevOps, a cron host, a Logic App calling a runbook. Nothing in the
+gateway itself polls the Radware Cloud; application selection happens on the request path,
+reading the map, and stays deterministic whatever the state of the Radware Cloud API. If the
+synchronisation has to live inside Azure without a pipeline, a timer-triggered Azure Function
+or a Container Apps job running the same command is the shape to use; talk to Radware before
+setting one up.
 
 ---
 ---
@@ -551,7 +653,7 @@ has no policy of its own. If the API already has a policy, use Form 2 instead.
    editor shows the whole document, not only the inbound section.
 4. If the editor already contains policies of your own, **stop and use Form 2 instead** — continuing
    will discard them. Otherwise replace the contents with
-   `rdwr-azureapim-securepath-connector-v1.3.xml`.
+   `rdwr-azureapim-securepath-connector-v1.4.xml`.
 5. **Save.**
 
 If the save is rejected, the error names the missing Named Value or the offending line. Go back to
@@ -568,7 +670,7 @@ SUB=$(az account show --query id -o tsv)
 URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/$API_ID/policies/policy?api-version=2024-05-01"
 
 jq -Rs '{properties: {format: "rawxml", value: .}}' \
-   rdwr-azureapim-securepath-connector-v1.3.xml > rdwr-policy-body.json &&
+   rdwr-azureapim-securepath-connector-v1.4.xml > rdwr-policy-body.json &&
 az rest --method PUT --uri "$URI" \
         --headers "Content-Type=application/json" \
         --body @rdwr-policy-body.json
@@ -579,7 +681,7 @@ az rest --method PUT --uri "$URI" \
 ```powershell
 $ctx = New-AzApiManagementContext -ResourceGroupName "your-resource-group" -ServiceName "your-apim-instance"
 Set-AzApiManagementPolicy -Context $ctx -ApiId "your-api-resource-name" `
-    -PolicyFilePath ".\rdwr-azureapim-securepath-connector-v1.3.xml" `
+    -PolicyFilePath ".\rdwr-azureapim-securepath-connector-v1.4.xml" `
     -Format "application/vnd.ms-azure-apim.policy.raw+xml"
 ```
 
@@ -768,7 +870,7 @@ after a Named Value edit rather than after a policy change.
 
 ## Issue 5 — The policy upload is rejected
 
-*"Named Value not found"* means one of the 20 is missing. Run Step 3c, which names it.
+*"Named Value not found"* means one of the 22 is missing. Run Step 3c, which names it.
 
 If the upload failed with a validation error instead, confirm the request used `format: rawxml`.
 
@@ -860,7 +962,7 @@ az rest --method PUT --uri "$URI" --headers "Content-Type=application/json" --bo
 
 ## In every case
 
-The 20 Named Values and the backend entity are inert once the connector is removed. Delete them at
+The 22 Named Values and the backend entities are inert once the connector is removed. Delete them at
 your convenience — but check first whether any of the six non-`rdwr-` names were already yours
 before installation (Step 2a lists them).
 

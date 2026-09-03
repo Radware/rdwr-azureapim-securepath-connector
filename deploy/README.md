@@ -1,6 +1,6 @@
 # One-shot install with Bicep
 
-Installs the connector at **All APIs** scope on an existing API Management instance: the 20
+Installs the connector at **All APIs** scope on an existing API Management instance: the 22
 Named Values, the three policy fragments, the All APIs policy that references them, and the
 backend entity that establishes trust for the inspection endpoint on Standard v2 / Premium v2.
 Policies you already have on APIs and products are not touched; they inherit the connector
@@ -72,6 +72,7 @@ place and every scope that references them picks up the change.
 | `trueClientIpHeader` | `x-forwarded-for` | header carrying the real client IP when a proxy or CDN fronts the gateway |
 | `apiBasePath` | `/` | path prefix to strip before inspection |
 | `createBackend` | `true` | backend entity for endpoint trust (Path B); set `false` on tiers where the CA is installed |
-| `appMap` | `{}` | several SecurePath applications on one instance; see the main README |
+| `appMap` | `{}` | several SecurePath applications on one instance: `{ "orders-api": { "app_id": "...", "api_key": "...", "endpoint": "...oop.radwarecloud.net" } }`, keyed by API id, hostname or `*`; a backend entity is created per distinct endpoint. See the main README, "Protecting APIs that belong to different SecurePath applications" |
+| `trueHostHeader` | `##DISABLED##` | header carrying the client-facing hostname when Front Door or a CDN fronts the gateway (`X-Forwarded-Host`) |
 
 `securepath-apim.parameters.example.json` shows the parameter-file form of the same values.

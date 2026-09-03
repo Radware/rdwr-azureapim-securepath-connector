@@ -46,19 +46,6 @@ param appMap object = {}
 @description('Request header carrying the client-facing hostname when a CDN or Front Door fronts the gateway (for example X-Forwarded-Host). ##DISABLED## uses the host the gateway received.')
 param trueHostHeader string = '##DISABLED##'
 
-@secure()
-@description('Radware Cloud portal API key. With cloudContext, enables cloud sync: the policy reads the account\'s SecurePath applications itself and caches them. Leave empty to turn cloud sync off.')
-param cloudApiKey string = ''
-
-@description('Application Protection ID for cloud sync (the context header of the Radware Cloud API).')
-param cloudContext string = '##DISABLED##'
-
-@description('Seconds a fetched application list is used before cloud sync refreshes it.')
-param cloudSyncTtlSeconds int = 300
-
-@description('Bound, in seconds, on the cloud sync refresh call.')
-param cloudSyncTimeoutSeconds int = 5
-
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
   name: apimName
 }
@@ -85,10 +72,6 @@ var namedValues = [
   { name: 'rdwr-inline-trusted-sources', value: '##DISABLED##', secret: false }
   { name: 'rdwr-inline-headers-enabled', value: 'false', secret: false }
   { name: 'rdwr-true-host-header', value: trueHostHeader, secret: false }
-  { name: 'rdwr-cloud-api-key', value: empty(cloudApiKey) ? '##DISABLED##' : cloudApiKey, secret: true }
-  { name: 'rdwr-cloud-context', value: cloudContext, secret: false }
-  { name: 'rdwr-cloud-sync-ttl-seconds', value: string(cloudSyncTtlSeconds), secret: false }
-  { name: 'rdwr-cloud-sync-timeout-seconds', value: string(cloudSyncTimeoutSeconds), secret: false }
 ]
 
 // A Named Value is substituted inside an XML attribute at policy save time, so the map is

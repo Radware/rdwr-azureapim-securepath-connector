@@ -5,8 +5,8 @@ Checks a policy document (--file) or a live instance (--live) for the ways an
 install can be silently ineffective: the connector missing or installed twice,
 an API policy without <base /> skipping a global connector, a request-ending
 policy placed ahead of the connector, an empty set-variable left by a manual
-merge, an incomplete fragment set, missing or malformed Named Values, and a
-missing backend entity on v2 tiers.
+merge, an incomplete fragment set, missing or malformed Named Values, an invalid
+application map, and a missing backend entity on v2 tiers.
 
 Text-based on purpose: API Management policy documents are not well-formed
 XML (Named Value references and C# expressions sit inside attribute values).
@@ -39,11 +39,8 @@ REQUIRED_NAMED_VALUES = (
     "static-inspect-if-query-string-exists", "chunked-request-allowed-content-types",
     "rdwr-inline-trusted-sources", "rdwr-inline-headers-enabled",
     # v1.4.0
-    "rdwr-app-map", "rdwr-true-host-header", "rdwr-cloud-api-key", "rdwr-cloud-context",
-    "rdwr-cloud-sync-ttl-seconds", "rdwr-cloud-sync-timeout-seconds")
-NEW_IN_140 = {"rdwr-app-map", "rdwr-true-host-header", "rdwr-cloud-api-key", "rdwr-cloud-context",
-              "rdwr-cloud-sync-ttl-seconds", "rdwr-cloud-sync-timeout-seconds"}
-CLOUD_API_BASE = "https://api.radwarecloud.app"
+    "rdwr-app-map", "rdwr-true-host-header")
+NEW_IN_140 = {"rdwr-app-map", "rdwr-true-host-header"}
 DISABLE_TOKENS = {"", "-", "disabled", "off", "false", "none", "~", "##disabled##"}
 
 _BASE_RE = re.compile(r"<base\s*/>")
@@ -280,55 +277,11 @@ def parse_app_map(raw: str) -> dict:
         return json.loads(raw.replace("'", '"'))
 
 
-def project_cloud_apps(apps) -> dict:
-    """Same projection the policy performs on /v1/gms/applications: host -> entry."""
-    if isinstance(apps, dict):
-        apps = apps.get("content") or apps.get("applications") or []
-    out = {}
-    for a in apps or []:
-        if not isinstance(a, dict):
-            continue
-        if a.get("applicationAssetType") != "OUT_OF_PATH" or a.get("deploymentStatus") != "PROTECTING":
-            continue
-        waf = ((a.get("featuresData") or {}).get("wafFeatureData")) or {}
-        domain = (((waf.get("mainDomain") or {}).get("mainDomain")) or "").strip().lower()
-        cname = ""
-        for rec in ((waf.get("oopDns") or {}).get("dnsRecords")) or []:
-            if rec.get("type") == "CNAME" and rec.get("value"):
-                cname = str(rec["value"]).strip().lower()
-                break
-        app_id, key = a.get("id") or "", a.get("oopApiKey") or ""
-        if not (app_id and key and domain and cname):
-            continue
-        entry = {"app_id": app_id, "api_key": key, "endpoint": cname, "port": 443, "ssl": True}
-        out[domain] = entry
-        hn = ((a.get("apiProtection") or {}).get("hostname")) or {}
-        if hn and not hn.get("useDefault", True) and hn.get("hostname"):
-            out[str(hn["hostname"]).strip().lower()] = entry
-    return out
-
-
-def fetch_cloud_apps(api_key: str, context: str, timeout: float = 15.0):
-    """GET /v1/gms/applications. Raises RuntimeError on any failure."""
-    import urllib.error
-    import urllib.request
-    req = urllib.request.Request(f"{CLOUD_API_BASE}/v1/gms/applications", method="GET",
-                                 headers={"x-api-key": api_key, "context": context, "Accept": "application/json",
-                                          "User-Agent": "SecurePath-APIM-connector/1.4.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read() or b"null")
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code}") from e
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(str(e)) from e
-
-
 def _host_of(url: str) -> str:
     return re.sub(r"^https?://", "", url or "").split("/")[0].split(":")[0].lower()
 
 
-def lint_instance(reader: Reader, cloud_fetch=fetch_cloud_apps) -> List[Finding]:
+def lint_instance(reader: Reader) -> List[Finding]:
     findings: List[Finding] = []
     docs: List[Tuple[str, str, Optional[str]]] = [("global", "global", reader.global_policy())]
     docs += [("product", f"product:{p}", reader.product_policy(p)) for p in reader.products()]
@@ -400,20 +353,6 @@ def lint_instance(reader: Reader, cloud_fetch=fetch_cloud_apps) -> List[Finding]
         except ValueError as e:
             findings.append(Finding("L10", "named-values", None, f"rdwr-app-map is not valid JSON ({e})",
                                     "fix the JSON (single quotes, no double quotes) or set the Named Value to ##DISABLED##"))
-    else:
-        cloud_key = (nvs.get("rdwr-cloud-api-key") or "").strip()
-        cloud_ctx = (nvs.get("rdwr-cloud-context") or "").strip()
-        if cloud_key.lower() not in DISABLE_TOKENS and cloud_ctx.lower() not in DISABLE_TOKENS:
-            try:
-                cloud_map = project_cloud_apps(cloud_fetch(cloud_key, cloud_ctx))
-                if not cloud_map:
-                    findings.append(Finding("L12", "cloud", None, "the Radware Cloud API returned no protecting SecurePath application for this key and context",
-                                            "check rdwr-cloud-context is the Application Protection ID and that applications are in PROTECTING state"))
-                for entry in cloud_map.values():
-                    endpoints.add(entry["endpoint"])
-            except RuntimeError as e:
-                findings.append(Finding("L12", "cloud", None, f"cannot read the Radware Cloud API with rdwr-cloud-api-key / rdwr-cloud-context: {e}",
-                                        "cloud sync will serve traffic uninspected until this works (a cached list, if any, is used for 24 h)"))
     if reader.sku().lower().endswith("v2") and endpoints:
         backend_hosts = {_host_of(u) for u in reader.backends()}
         for host in sorted(endpoints):

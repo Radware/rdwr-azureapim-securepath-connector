@@ -4,6 +4,35 @@
 
 ## v1.4.0 — in progress, not yet released
 
+### Several SecurePath applications on one instance
+
+A request now selects its application by the API's resource name, by the client-facing
+hostname, or by a default entry — from the new **application map** Named Value
+(`rdwr-app-map`) — with per-entry base path, port, TLS and Bot Manager overrides. Without a
+map, the three application values behave exactly as before.
+
+### Keeping the map in step with the Radware Cloud account
+
+`tools/securepath-apim-sync.py` reads the SecurePath applications of an account through the
+Radware Cloud API and compares them with the map on the instance: `plan` shows what differs,
+`apply` writes only that difference (and creates the backend entities Standard v2 / Premium v2
+need per endpoint), `check` exits non-zero on drift for a scheduler, `export` writes a Bicep
+parameter file. Hand-written entries are preserved. The gateway itself never polls the Radware
+Cloud; selection stays on the request path, reading the map.
+
+### The client-facing hostname
+
+`rdwr-true-host-header` names the request header that carries the hostname the client used when
+Azure Front Door, a CDN or a proxy sits in front of the gateway (for example `X-Forwarded-Host`).
+That hostname selects the application and is the `Host` reported to SecurePath.
+
+### A configuration problem no longer fails requests
+
+An incomplete configuration, an unmatched request with no default application, or an invalid
+map used to be able to end a request with a 500. Such requests are now served without
+inspection and marked with `X-Rdwr-Diag` (`config_incomplete`, `no_app_mapping`,
+`app_map_invalid`) and a trace line, so the condition is visible without affecting traffic.
+
 ### Requests rejected by your own policies now get a response-phase record
 
 A third fragment, `fragments/securepath-onerror.fragment.xml`, sends the response-phase log from
@@ -16,18 +45,19 @@ referenced together; the install forms and the Bicep template do this for you.
 
 The connector installed at the All APIs scope runs before every API's own policy, so nothing has
 to be ordered by hand and no existing policy is edited. `deploy/securepath-apim.bicep` installs
-everything in one deployment. The whole-document All-APIs file
-(`rdwr-azureapim-securepath-connector-v1.3-all-apis-scope.xml`) is retired and will be removed in
-the next release.
+everything in one deployment. The whole-document form is now generated from the fragments
+(`rdwr-azureapim-securepath-connector-v1.4.xml`); the v1.3 documents remain for one release.
 
 ### `tools/securepath-apim-lint.py`
 
 Reads a policy document or a live instance and reports the conditions under which the connector
 is installed but ineffective: missing or duplicated install, an API policy without `<base />`, a
 request-ending policy placed ahead of the connector, an empty `set-variable` left by a manual
-merge, missing or malformed Named Values, and a missing backend entity on v2 tiers.
+merge, missing or malformed Named Values, an invalid application map, and a missing backend
+entity on v2 tiers.
 
-`x-rdwr-plugin-info` becomes `700-v1.4.0` with this release.
+Two new Named Values (22 in total): `rdwr-app-map` and `rdwr-true-host-header`.
+`x-rdwr-plugin-info` becomes `700-v1.4.0`.
 
 ---
 
