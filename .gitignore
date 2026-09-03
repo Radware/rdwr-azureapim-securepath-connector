@@ -34,3 +34,6 @@ SHA256SUMS
 !certs/rdwr-root-ca.pem
 !certs/rdwr-intermediate-ca.pem
 !rdwr_ca_chain.pem
+
+# Engineering-only assistant notes (never customer-facing)
+CLAUDE.md
