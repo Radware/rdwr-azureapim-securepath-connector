@@ -50,11 +50,14 @@ use:
 
 > **The mistake almost everyone makes once.** The Radware Cloud portal also shows a hostname ending
 > `.v1.radwarecloud.net`. That is your application's front-end address and this connector does not
-> use it. **If the value you are about to put in `APP_ID` contains a dot, it is not the Application
-> ID** — the Application ID has no dots.
+> use it — not as `APP_ID`, and not as `APP_EP`. **If the value you are about to put in `APP_ID`
+> contains a dot, it is not the Application ID** — the Application ID has no dots. **If the value
+> you are about to put in `APP_EP` ends in `.v1.radwarecloud.net`, it is the wrong host** — the
+> inspection endpoint always ends in `.oop.radwarecloud.net`.
 >
-> A wrong Application ID produces no error at all. The connector keeps serving traffic, uninspected.
-> Step 3c catches it.
+> Neither mistake produces an error. The connector keeps serving traffic, uninspected, and the trace
+> shows the inspection call rejected on its certificate. Step 3c and the lint tool (Step 4e) catch
+> both.
 
 ### The order, and why it matters
 
@@ -898,6 +901,7 @@ API behaves normally while serving traffic uninspected.
 
 | Your tier | Fix |
 |---|---|
+| Any — check this first | Look at the host in the `send-request` line just above the error. If it ends in `.v1.radwarecloud.net`, the `rdwr-app-ep-addr` Named Value holds the application's front-end address. Set it to the inspection endpoint (`<APP_ID>.oop.radwarecloud.net`), then continue with the row for your tier. |
 | Developer / Basic / Standard / Premium | Complete Step 1 Path A. Upload **both** certificates — the root alone is not sufficient. |
 | Already uploaded both | Confirm provisioning finished. It shows *"CA certificate update in progress"* for 15+ minutes and the error persists until it completes. |
 | Uploaded and provisioned, still failing | Confirm they are under **CA certificates**, not the general **Certificates** tab. Different stores. |
