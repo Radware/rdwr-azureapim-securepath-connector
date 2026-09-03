@@ -37,7 +37,13 @@ REQUIRED_NAMED_VALUES = (
     "rdwr-bot-manager-enabled", "plugin-version-info", "static-extensions-enabled",
     "static-list-of-methods-not-to-inspect", "static-list-of-bypassed-extensions",
     "static-inspect-if-query-string-exists", "chunked-request-allowed-content-types",
-    "rdwr-inline-trusted-sources", "rdwr-inline-headers-enabled")
+    "rdwr-inline-trusted-sources", "rdwr-inline-headers-enabled",
+    # v1.4.0
+    "rdwr-app-map", "rdwr-true-host-header", "rdwr-cloud-api-key", "rdwr-cloud-context",
+    "rdwr-cloud-sync-ttl-seconds", "rdwr-cloud-sync-timeout-seconds")
+NEW_IN_140 = {"rdwr-app-map", "rdwr-true-host-header", "rdwr-cloud-api-key", "rdwr-cloud-context",
+              "rdwr-cloud-sync-ttl-seconds", "rdwr-cloud-sync-timeout-seconds"}
+CLOUD_API_BASE = "https://api.radwarecloud.app"
 DISABLE_TOKENS = {"", "-", "disabled", "off", "false", "none", "~", "##disabled##"}
 
 _BASE_RE = re.compile(r"<base\s*/>")
@@ -262,11 +268,66 @@ class AzReader(Reader):
                 for b in self._get("/backends").get("value", [])]
 
 
+def parse_app_map(raw: str) -> dict:
+    """The application map is single-quoted JSON (a Named Value is substituted inside
+    an XML attribute, so it cannot carry double quotes). Accept both forms."""
+    raw = (raw or "").strip()
+    try:
+        return json.loads(raw)
+    except ValueError:
+        if '"' in raw:
+            raise
+        return json.loads(raw.replace("'", '"'))
+
+
+def project_cloud_apps(apps) -> dict:
+    """Same projection the policy performs on /v1/gms/applications: host -> entry."""
+    if isinstance(apps, dict):
+        apps = apps.get("content") or apps.get("applications") or []
+    out = {}
+    for a in apps or []:
+        if not isinstance(a, dict):
+            continue
+        if a.get("applicationAssetType") != "OUT_OF_PATH" or a.get("deploymentStatus") != "PROTECTING":
+            continue
+        waf = ((a.get("featuresData") or {}).get("wafFeatureData")) or {}
+        domain = (((waf.get("mainDomain") or {}).get("mainDomain")) or "").strip().lower()
+        cname = ""
+        for rec in ((waf.get("oopDns") or {}).get("dnsRecords")) or []:
+            if rec.get("type") == "CNAME" and rec.get("value"):
+                cname = str(rec["value"]).strip().lower()
+                break
+        app_id, key = a.get("id") or "", a.get("oopApiKey") or ""
+        if not (app_id and key and domain and cname):
+            continue
+        entry = {"app_id": app_id, "api_key": key, "endpoint": cname, "port": 443, "ssl": True}
+        out[domain] = entry
+        hn = ((a.get("apiProtection") or {}).get("hostname")) or {}
+        if hn and not hn.get("useDefault", True) and hn.get("hostname"):
+            out[str(hn["hostname"]).strip().lower()] = entry
+    return out
+
+
+def fetch_cloud_apps(api_key: str, context: str, timeout: float = 15.0):
+    """GET /v1/gms/applications. Raises RuntimeError on any failure."""
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(f"{CLOUD_API_BASE}/v1/gms/applications", method="GET",
+                                 headers={"x-api-key": api_key, "context": context, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code}") from e
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(str(e)) from e
+
+
 def _host_of(url: str) -> str:
     return re.sub(r"^https?://", "", url or "").split("/")[0].split(":")[0].lower()
 
 
-def lint_instance(reader: Reader) -> List[Finding]:
+def lint_instance(reader: Reader, cloud_fetch=fetch_cloud_apps) -> List[Finding]:
     findings: List[Finding] = []
     docs: List[Tuple[str, str, Optional[str]]] = [("global", "global", reader.global_policy())]
     docs += [("product", f"product:{p}", reader.product_policy(p)) for p in reader.products()]
@@ -298,8 +359,9 @@ def lint_instance(reader: Reader) -> List[Finding]:
     nvs = reader.named_values()
     for name in REQUIRED_NAMED_VALUES:
         if name not in nvs:
+            new = " (new in v1.4.0)" if name in NEW_IN_140 else ""
             findings.append(Finding(
-                "L07", "named-values", None, f"required Named Value {name} is missing",
+                "L07", "named-values", None, f"required Named Value {name} is missing{new}",
                 "create it (README Step 3); the policy upload is rejected without it"))
     app_id = (nvs.get("rdwr-app-id") or "").strip()
     ep = (nvs.get("rdwr-app-ep-addr") or "").strip()
@@ -319,22 +381,38 @@ def lint_instance(reader: Reader) -> List[Finding]:
     app_map_raw = nvs.get("rdwr-app-map")
     if app_map_raw is not None and app_map_raw.strip().lower() not in DISABLE_TOKENS:
         try:
-            app_map = json.loads(app_map_raw)
+            app_map = parse_app_map(app_map_raw)
             if not isinstance(app_map, dict):
                 raise ValueError("top level must be an object")
             for key, entry in app_map.items():
                 for field in ("app_id", "api_key", "endpoint"):
                     if not isinstance(entry, dict) or not entry.get(field):
-                        findings.append(Finding(
-                            "L10", "named-values", None, f"rdwr-app-map entry '{key}' lacks '{field}'",
-                            "each entry needs app_id, api_key and endpoint"))
-                if isinstance(entry, dict) and entry.get("endpoint") and entry.get("ssl", True) is not False:
-                    endpoints.add(str(entry["endpoint"]).lower())
+                        findings.append(Finding("L10", "named-values", None, f"rdwr-app-map entry '{key}' lacks '{field}'",
+                                                "each entry needs app_id, api_key and endpoint"))
+                if isinstance(entry, dict):
+                    bp = entry.get("base_path")
+                    if bp is not None and not str(bp).startswith("/"):
+                        findings.append(Finding("L10", "named-values", None, f"rdwr-app-map entry '{key}' base_path '{bp}' must start with /",
+                                                "use the API's path prefix, for example /orders"))
+                    if entry.get("endpoint") and entry.get("ssl", True) is not False:
+                        endpoints.add(str(entry["endpoint"]).lower())
         except ValueError as e:
-            findings.append(Finding(
-                "L10", "named-values", None, f"rdwr-app-map is not valid JSON ({e})",
-                "fix the JSON or set the Named Value to ##DISABLED##"))
-
+            findings.append(Finding("L10", "named-values", None, f"rdwr-app-map is not valid JSON ({e})",
+                                    "fix the JSON (single quotes, no double quotes) or set the Named Value to ##DISABLED##"))
+    else:
+        cloud_key = (nvs.get("rdwr-cloud-api-key") or "").strip()
+        cloud_ctx = (nvs.get("rdwr-cloud-context") or "").strip()
+        if cloud_key.lower() not in DISABLE_TOKENS and cloud_ctx.lower() not in DISABLE_TOKENS:
+            try:
+                cloud_map = project_cloud_apps(cloud_fetch(cloud_key, cloud_ctx))
+                if not cloud_map:
+                    findings.append(Finding("L12", "cloud", None, "the Radware Cloud API returned no protecting SecurePath application for this key and context",
+                                            "check rdwr-cloud-context is the Application Protection ID and that applications are in PROTECTING state"))
+                for entry in cloud_map.values():
+                    endpoints.add(entry["endpoint"])
+            except RuntimeError as e:
+                findings.append(Finding("L12", "cloud", None, f"cannot read the Radware Cloud API with rdwr-cloud-api-key / rdwr-cloud-context: {e}",
+                                        "cloud sync will serve traffic uninspected until this works (a cached list, if any, is used for 24 h)"))
     if reader.sku().lower().endswith("v2") and endpoints:
         backend_hosts = {_host_of(u) for u in reader.backends()}
         for host in sorted(endpoints):

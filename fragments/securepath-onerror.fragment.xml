@@ -24,7 +24,7 @@
           }</set-url>
           <set-method>POST</set-method>
           <set-header name="Host" exists-action="override">
-            <value>@(context.Request.OriginalUrl.Host)</value>
+            <value>@((string)context.Variables.GetValueOrDefault("rdwrTrueHost", ""))</value>
           </set-header>
           <set-header name="x-rdwr-connector-proto" exists-action="override">
             <value>2</value>
@@ -33,7 +33,7 @@
             <value>log</value>
           </set-header>
           <set-header name="x-rdwr-plugin-info" exists-action="override">
-            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.4"))</value>
+            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.4.0"))</value>
           </set-header>
           <set-header name="x-rdwr-app-id" exists-action="override">
             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>

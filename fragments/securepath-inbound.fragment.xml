@@ -42,21 +42,198 @@
     <!-- Capture request start time for v2 response-phase request-time calculation -->
     <set-variable name="requestStartTime" value="@(DateTime.UtcNow)" />
 
-    <!-- sanity: required NV present -->
-    <choose>
-      <when condition="@(string.IsNullOrEmpty((string)context.Variables["rdwrAppId"]) || string.IsNullOrEmpty((string)context.Variables["rdwrApiKey"]) || string.IsNullOrEmpty((string)context.Variables["rdwrAppEpAddr"]))">
-        <return-response>
-          <set-status code="500" reason="Configuration Error" />
-          <set-header name="Content-Type" exists-action="override">
-            <value>application/json</value>
-          </set-header>
-          <set-body>{ "error": "InternalConfigurationError", "message": "Security provider configuration is incomplete." }</set-body>
-        </return-response>
-      </when>
-    </choose>
-
     <!-- ====== Initialize bypass flag ====== -->
     <set-variable name="shouldBypassRadware" value="@(false)" />
+
+    <!-- ====== Application selection ======
+         The client-facing host, then the application whose credentials this request uses:
+         from the application map (Named Value rdwr-app-map), from the Radware Cloud API
+         (cloud sync, cached in this gateway), or the default application (the three
+         rdwr-app-* Named Values). No application means the request is served uninspected
+         and says so (X-Rdwr-Diag, trace); it is never failed. -->
+    <set-variable name="rdwrTrueHostHeaderName" value="{{rdwr-true-host-header}}" />
+    <set-variable name="rdwrTrueHost" value="@{
+      string configured = ((string)context.Variables.GetValueOrDefault("rdwrTrueHostHeaderName", "") ?? "").Trim();
+      string lc = configured.ToLower();
+      string host = context.Request.OriginalUrl.Host ?? "";
+      bool off = string.IsNullOrEmpty(configured) || lc == "-" || lc == "disabled" || lc == "off" || lc == "false" || lc == "none" || lc == "~" || lc == "##disabled##";
+      if (!off)
+      {
+        string[] vals = context.Request.Headers.GetValueOrDefault(configured, default(string[]));
+        if (vals != null && vals.Length > 0 && !string.IsNullOrWhiteSpace(vals[0]))
+        {
+          string v = vals[0].Split(',')[0].Trim();
+          int colon = v.IndexOf(':');
+          if (colon > 0) { v = v.Substring(0, colon); }
+          if (v.Length > 0) { host = v; }
+        }
+      }
+      return host.ToLower();
+    }" />
+    <set-variable name="rdwrAppMapRaw" value="{{rdwr-app-map}}" />
+    <set-variable name="rdwrCloudApiKey" value="{{rdwr-cloud-api-key}}" />
+    <set-variable name="rdwrCloudContext" value="{{rdwr-cloud-context}}" />
+    <set-variable name="rdwrCloudSyncTtl" value="@(int.Parse("{{rdwr-cloud-sync-ttl-seconds}}"))" />
+    <set-variable name="rdwrCloudSyncTimeout" value="@(int.Parse("{{rdwr-cloud-sync-timeout-seconds}}"))" />
+    <set-variable name="rdwrAppMapSource" value="@{
+      string m = ((string)context.Variables.GetValueOrDefault("rdwrAppMapRaw", "") ?? "").Trim().ToLower();
+      bool mapOff = m == "" || m == "-" || m == "disabled" || m == "off" || m == "false" || m == "none" || m == "~" || m == "##disabled##";
+      if (!mapOff) { return "map"; }
+      string k = ((string)context.Variables.GetValueOrDefault("rdwrCloudApiKey", "") ?? "").Trim().ToLower();
+      string c = ((string)context.Variables.GetValueOrDefault("rdwrCloudContext", "") ?? "").Trim().ToLower();
+      bool keyOff = k == "" || k == "-" || k == "disabled" || k == "off" || k == "false" || k == "none" || k == "~" || k == "##disabled##";
+      bool ctxOff = c == "" || c == "-" || c == "disabled" || c == "off" || c == "false" || c == "none" || c == "~" || c == "##disabled##";
+      if (!keyOff && !ctxOff) { return "cloud"; }
+      return "none";
+    }" />
+    <choose>
+      <when condition="@((string)context.Variables["rdwrAppMapSource"] == "cloud")">
+        <cache-lookup-value key="rdwr-app-map-cloud" variable-name="rdwrCloudMap" default-value="" />
+        <choose>
+          <when condition="@(string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("rdwrCloudMap", "")))">
+            <cache-lookup-value key="rdwr-app-map-cloud-stale" variable-name="rdwrCloudMapStale" default-value="" />
+            <cache-lookup-value key="rdwr-app-map-cloud-lock" variable-name="rdwrCloudLock" default-value="" />
+            <choose>
+              <when condition="@(string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("rdwrCloudLock", "")) || string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("rdwrCloudMapStale", "")))">
+                <cache-store-value key="rdwr-app-map-cloud-lock" value="1" duration="30" />
+                <send-request mode="new" response-variable-name="rdwrCloudResp" timeout="@((int)context.Variables["rdwrCloudSyncTimeout"])" ignore-error="true">
+                  <set-url>https://api.radwarecloud.app/v1/gms/applications</set-url>
+                  <set-method>GET</set-method>
+                  <set-header name="x-api-key" exists-action="override">
+                    <value>@((string)context.Variables["rdwrCloudApiKey"])</value>
+                  </set-header>
+                  <set-header name="context" exists-action="override">
+                    <value>@((string)context.Variables["rdwrCloudContext"])</value>
+                  </set-header>
+                  <set-header name="Accept" exists-action="override">
+                    <value>application/json</value>
+                  </set-header>
+                </send-request>
+                <set-variable name="rdwrCloudProjected" value="@{
+                  try {
+                    if (!context.Variables.ContainsKey("rdwrCloudResp") || context.Variables["rdwrCloudResp"] == null) { return ""; }
+                    var resp = (IResponse)context.Variables["rdwrCloudResp"];
+                    if (resp.StatusCode != 200) { return ""; }
+                    JToken root = resp.Body.As<JToken>();
+                    JArray apps = root as JArray;
+                    if (apps == null && root is JObject) { apps = (root["content"] as JArray) ?? (root["applications"] as JArray); }
+                    if (apps == null) { return ""; }
+                    var map = new JObject();
+                    foreach (JToken a in apps) {
+                      if ((string)a["applicationAssetType"] != "OUT_OF_PATH") { continue; }
+                      if ((string)a["deploymentStatus"] != "PROTECTING") { continue; }
+                      string id = (string)a["id"];
+                      string key = (string)a["oopApiKey"];
+                      JToken waf = a["featuresData"] == null ? null : a["featuresData"]["wafFeatureData"];
+                      if (waf == null) { continue; }
+                      string domain = waf["mainDomain"] == null ? null : (string)waf["mainDomain"]["mainDomain"];
+                      string cname = null;
+                      JArray recs = waf["oopDns"] == null ? null : waf["oopDns"]["dnsRecords"] as JArray;
+                      if (recs != null) {
+                        foreach (JToken r in recs) {
+                          if ((string)r["type"] == "CNAME" && !string.IsNullOrEmpty((string)r["value"])) { cname = ((string)r["value"]).Trim().ToLower(); break; }
+                        }
+                      }
+                      if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(key) || string.IsNullOrEmpty(domain) || string.IsNullOrEmpty(cname)) { continue; }
+                      var entry = new JObject();
+                      entry["app_id"] = id;
+                      entry["api_key"] = key;
+                      entry["endpoint"] = cname;
+                      entry["port"] = 443;
+                      entry["ssl"] = true;
+                      map[domain.Trim().ToLower()] = entry;
+                      JToken apiHost = (a["apiProtection"] == null) ? null : a["apiProtection"]["hostname"];
+                      if (apiHost != null && apiHost["useDefault"] != null && !(bool)apiHost["useDefault"] && !string.IsNullOrEmpty((string)apiHost["hostname"])) {
+                        map[((string)apiHost["hostname"]).Trim().ToLower()] = entry;
+                      }
+                    }
+                    return map.Count == 0 ? "" : map.ToString(Newtonsoft.Json.Formatting.None);
+                  } catch { return ""; }
+                }" />
+                <choose>
+                  <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("rdwrCloudProjected", "")))">
+                    <cache-store-value key="rdwr-app-map-cloud" value="@((string)context.Variables["rdwrCloudProjected"])" duration="@((int)context.Variables["rdwrCloudSyncTtl"])" />
+                    <cache-store-value key="rdwr-app-map-cloud-stale" value="@((string)context.Variables["rdwrCloudProjected"])" duration="86400" />
+                    <set-variable name="rdwrCloudMap" value="@((string)context.Variables["rdwrCloudProjected"])" />
+                  </when>
+                  <otherwise>
+                    <set-variable name="radwareDiag" value="@{
+                      string st = "unreachable";
+                      if (context.Variables.ContainsKey("rdwrCloudResp") && context.Variables["rdwrCloudResp"] != null) { st = ((IResponse)context.Variables["rdwrCloudResp"]).StatusCode.ToString(); }
+                      return "cloud_sync_failed_" + st;
+                    }" />
+                    <set-variable name="rdwrCloudMap" value="@((string)context.Variables.GetValueOrDefault("rdwrCloudMapStale", ""))" />
+                    <trace source="securepath" severity="error">
+                      <message>@("SecurePath cloud sync failed (" + (string)context.Variables["radwareDiag"] + "); " + (string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("rdwrCloudMapStale", "")) ? "no cached application list, requests are served uninspected" : "using the cached application list"))</message>
+                    </trace>
+                  </otherwise>
+                </choose>
+              </when>
+              <otherwise>
+                <set-variable name="rdwrCloudMap" value="@((string)context.Variables.GetValueOrDefault("rdwrCloudMapStale", ""))" />
+              </otherwise>
+            </choose>
+          </when>
+        </choose>
+      </when>
+    </choose>
+    <set-variable name="rdwrAppMapJson" value="@{
+      string src = (string)context.Variables.GetValueOrDefault("rdwrAppMapSource", "none");
+      if (src == "map") { return (string)context.Variables.GetValueOrDefault("rdwrAppMapRaw", ""); }
+      if (src == "cloud") { return (string)context.Variables.GetValueOrDefault("rdwrCloudMap", ""); }
+      return "";
+    }" />
+    <set-variable name="rdwrAppSelection" value="@{
+      string raw = (string)context.Variables.GetValueOrDefault("rdwrAppMapJson", "");
+      if (string.IsNullOrWhiteSpace(raw)) { return ""; }
+      try {
+        JObject map = JObject.Parse(raw);
+        string apiId = (context.Api != null && context.Api.Id != null) ? context.Api.Id.Trim().ToLower() : "";
+        string host = (string)context.Variables.GetValueOrDefault("rdwrTrueHost", "");
+        JToken hit = null;
+        if (apiId != "") { foreach (JProperty p in map.Properties()) { if ((p.Name ?? "").Trim().ToLower() == apiId) { hit = p.Value; break; } } }
+        if (hit == null && host != "") { foreach (JProperty p in map.Properties()) { if ((p.Name ?? "").Trim().ToLower() == host) { hit = p.Value; break; } } }
+        if (hit == null && map["*"] != null) { hit = map["*"]; }
+        return hit == null ? "" : hit.ToString(Newtonsoft.Json.Formatting.None);
+      } catch { return "##INVALID##"; }
+    }" />
+    <choose>
+      <when condition="@{
+        string s = (string)context.Variables.GetValueOrDefault("rdwrAppSelection", "");
+        return !string.IsNullOrEmpty(s) && s != "##INVALID##";
+      }">
+        <set-variable name="rdwrAppId" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); return ((string)e["app_id"] ?? "").Trim(); }" />
+        <set-variable name="rdwrApiKey" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); return ((string)e["api_key"] ?? "").Trim(); }" />
+        <set-variable name="rdwrAppEpAddr" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); return ((string)e["endpoint"] ?? "").Trim().ToLower(); }" />
+        <set-variable name="rdwrAppEpPort" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); return e["port"] != null ? (int)e["port"] : (int)context.Variables["rdwrAppEpPort"]; }" />
+        <set-variable name="rdwrAppEpSsl" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); return e["ssl"] != null ? (bool)e["ssl"] : (bool)context.Variables["rdwrAppEpSsl"]; }" />
+        <set-variable name="rdwrBotManagerEnabled" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); return e["bot_manager"] != null ? (bool)e["bot_manager"] : (bool)context.Variables["rdwrBotManagerEnabled"]; }" />
+        <set-variable name="rdwrApiBasePath" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); string bp = (string)e["base_path"]; return string.IsNullOrEmpty(bp) ? (string)context.Variables["rdwrApiBasePath"] : bp.TrimEnd('/'); }" />
+      </when>
+    </choose>
+    <set-variable name="rdwrConfigProblem" value="@{
+      string sel = (string)context.Variables.GetValueOrDefault("rdwrAppSelection", "");
+      string src = (string)context.Variables.GetValueOrDefault("rdwrAppMapSource", "none");
+      if (sel == "##INVALID##") { return "app_map_invalid"; }
+      string id = ((string)context.Variables.GetValueOrDefault("rdwrAppId", "") ?? "").Trim().ToLower();
+      string key = ((string)context.Variables.GetValueOrDefault("rdwrApiKey", "") ?? "").Trim().ToLower();
+      string ep = ((string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", "") ?? "").Trim().ToLower();
+      bool idOff = id == "" || id == "-" || id == "disabled" || id == "off" || id == "false" || id == "none" || id == "~" || id == "##disabled##";
+      bool keyOff = key == "" || key == "-" || key == "disabled" || key == "off" || key == "false" || key == "none" || key == "~" || key == "##disabled##";
+      bool epOff = ep == "" || ep == "-" || ep == "disabled" || ep == "off" || ep == "false" || ep == "none" || ep == "~" || ep == "##disabled##";
+      if (sel == "" && src != "none" && (idOff || keyOff || epOff)) { return "no_app_mapping"; }
+      if (idOff || keyOff || epOff) { return "config_incomplete"; }
+      return "";
+    }" />
+    <choose>
+      <when condition="@(!string.IsNullOrEmpty((string)context.Variables["rdwrConfigProblem"]))">
+        <set-variable name="shouldBypassRadware" value="@(true)" />
+        <set-variable name="radwareDiag" value="@((string)context.Variables["rdwrConfigProblem"])" />
+        <trace source="securepath" severity="error">
+          <message>@("SecurePath not applied (" + (string)context.Variables["rdwrConfigProblem"] + ") host=" + (string)context.Variables.GetValueOrDefault("rdwrTrueHost", "") + " api=" + ((context.Api != null && context.Api.Id != null) ? context.Api.Id : "") + "; request served uninspected")</message>
+        </trace>
+      </when>
+    </choose>
 
     <!-- ====== Parse 'inline headers enabled' safely ====== -->
     <set-variable name="inlineHeadersEnabled" value="@{
@@ -525,10 +702,10 @@
             <send-request mode="copy" response-variable-name="radwareResponse" timeout="@((int)context.Variables["rdwrAppEpTimeout"])" ignore-error="true">
               <set-url>@($"{((string)context.Variables["urlScheme"])}://{((string)context.Variables["urlHost"])}:{((int)context.Variables["urlPortValue"])}{((string)context.Variables["urlPathAndQueryToUse"])}")</set-url>
               <set-header name="Host" exists-action="override">
-                <value>@(context.Request.OriginalUrl.Host)</value>
+                <value>@((string)context.Variables["rdwrTrueHost"])</value>
               </set-header>
               <set-header name="X-Rdwr-Host" exists-action="override">
-                <value>@(context.Request.OriginalUrl.Host)</value>
+                <value>@((string)context.Variables["rdwrTrueHost"])</value>
               </set-header>
               <set-header name="Expect" exists-action="delete" />
               <set-header name="X-Rdwr-App-Id" exists-action="override">
@@ -568,10 +745,10 @@
             <send-request mode="copy" response-variable-name="radwareResponse" timeout="@((int)context.Variables["rdwrAppEpTimeout"])" ignore-error="true">
               <set-url>@($"{((string)context.Variables["urlScheme"])}://{((string)context.Variables["urlHost"])}:{((int)context.Variables["urlPortValue"])}{((string)context.Variables["urlPathAndQueryToUse"])}")</set-url>
               <set-header name="Host" exists-action="override">
-                <value>@(context.Request.OriginalUrl.Host)</value>
+                <value>@((string)context.Variables["rdwrTrueHost"])</value>
               </set-header>
               <set-header name="X-Rdwr-Host" exists-action="override">
-                <value>@(context.Request.OriginalUrl.Host)</value>
+                <value>@((string)context.Variables["rdwrTrueHost"])</value>
               </set-header>
               <set-header name="Expect" exists-action="delete" />
               <set-header name="X-Rdwr-App-Id" exists-action="override">
@@ -799,7 +976,7 @@
                           }</set-url>
                           <set-method>POST</set-method>
                           <set-header name="Host" exists-action="override">
-                            <value>@(context.Request.OriginalUrl.Host)</value>
+                            <value>@((string)context.Variables["rdwrTrueHost"])</value>
                           </set-header>
                           <set-header name="x-rdwr-connector-proto" exists-action="override">
                             <value>2</value>
@@ -905,7 +1082,7 @@
                           }</set-url>
                           <set-method>POST</set-method>
                           <set-header name="Host" exists-action="override">
-                            <value>@(context.Request.OriginalUrl.Host)</value>
+                            <value>@((string)context.Variables["rdwrTrueHost"])</value>
                           </set-header>
                           <set-header name="x-rdwr-connector-proto" exists-action="override">
                             <value>2</value>
@@ -1028,7 +1205,7 @@
                           }</set-url>
                           <set-method>POST</set-method>
                           <set-header name="Host" exists-action="override">
-                            <value>@(context.Request.OriginalUrl.Host)</value>
+                            <value>@((string)context.Variables["rdwrTrueHost"])</value>
                           </set-header>
                           <set-header name="x-rdwr-connector-proto" exists-action="override">
                             <value>2</value>
@@ -1131,7 +1308,7 @@
                       }</set-url>
                       <set-method>POST</set-method>
                       <set-header name="Host" exists-action="override">
-                        <value>@(context.Request.OriginalUrl.Host)</value>
+                        <value>@((string)context.Variables["rdwrTrueHost"])</value>
                       </set-header>
                       <set-header name="x-rdwr-connector-proto" exists-action="override">
                         <value>2</value>
@@ -1233,15 +1410,18 @@
           </otherwise>
         </choose>
 
-        <!-- Propagate diagnostics to backend for observability -->
-        <choose>
-          <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("radwareDiag", "")))">
-            <set-header name="X-Rdwr-Diag" exists-action="override">
-              <value>@((string)context.Variables["radwareDiag"])</value>
-            </set-header>
-          </when>
-        </choose>
 
+      </when>
+    </choose>
+
+    <!-- ====== End tier-1 path ====== -->
+
+    <!-- Propagate diagnostics to backend for observability -->
+    <choose>
+      <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("radwareDiag", "")))">
+        <set-header name="X-Rdwr-Diag" exists-action="override">
+          <value>@((string)context.Variables["radwareDiag"])</value>
+        </set-header>
       </when>
     </choose>
 </fragment>
