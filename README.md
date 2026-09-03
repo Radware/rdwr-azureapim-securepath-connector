@@ -842,8 +842,9 @@ APIM="your-apim-instance"
 API_ID="your-api-resource-name"
 
 SUB=$(az account show --query id -o tsv)
-BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
-TOKEN=$(az rest --method POST --uri "$BASE/gateways/managed/listDebugCredentials?api-version=2024-05-01" --headers "Content-Type=application/json" --body "{\"credentialsExpireAfter\":\"PT1H\",\"apiId\":\"$BASE/apis/$API_ID\",\"purposes\":[\"tracing\"]}" --query token -o tsv)
+RES="/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
+BASE="https://management.azure.com$RES"
+TOKEN=$(az rest --method POST --uri "$BASE/gateways/managed/listDebugCredentials?api-version=2024-05-01" --headers "Content-Type=application/json" --body "{\"credentialsExpireAfter\":\"PT1H\",\"apiId\":\"$RES/apis/$API_ID\",\"purposes\":[\"tracing\"]}" --query token -o tsv)
 echo "$TOKEN"
 ```
 
