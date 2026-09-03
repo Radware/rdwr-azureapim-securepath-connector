@@ -108,6 +108,21 @@ def test_l10_app_map_validation_when_present():
     assert lint.lint_instance(FakeReader(glob=fx("clean_global.xml"), nvs=nvs)) == []
 
 
+def test_az_reader_strips_byte_order_mark_and_reports_garbage():
+    import pytest
+    r = lint.AzReader.__new__(lint.AzReader)
+    r.base = "https://example.invalid"
+    r._az = lambda args: '﻿{"properties": {"value": "﻿<policies />"}}'
+    assert r._policy("") == "<policies />"
+    r._az = lambda args: "﻿<policies>\n\t<inbound />\n</policies>\n"
+    assert r._policy("") == "<policies>\n\t<inbound />\n</policies>"
+    r._az = lambda args: ""
+    assert r._policy("") is None
+    r._az = lambda args: "not json"
+    with pytest.raises(RuntimeError):
+        r._get("/apis")
+
+
 def test_l04_flows_through_from_api_documents():
     r = FakeReader(glob=None, apis={"orders": fx("jwt_before_fragment.xml")})
     assert "L04" in codes(lint.lint_instance(r))

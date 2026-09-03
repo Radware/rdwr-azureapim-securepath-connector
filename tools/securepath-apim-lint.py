@@ -187,6 +187,8 @@ class AzReader(Reader):
 
     @staticmethod
     def _az(args: List[str]) -> str:
+        if args and args[0] == "rest" and "-o" not in args and "--output" not in args:
+            args = list(args) + ["-o", "json"]  # never depend on the user's default output format
         p = subprocess.run(["az"] + args, capture_output=True, text=True)
         if p.returncode != 0:
             err = p.stderr or ""
@@ -198,11 +200,31 @@ class AzReader(Reader):
     def _get(self, path: str, query: str = "") -> dict:
         raw = self._az(["rest", "--method", "GET",
                         "--uri", f"{self.base}{path}?api-version={API_VERSION}{query}"])
-        return json.loads(raw) if raw.strip() else {}
+        return self._parse(raw)
+
+    @staticmethod
+    def _parse(raw: str) -> dict:
+        # Policy responses carry a UTF-8 byte-order mark; az rest passes it through.
+        raw = (raw or "").lstrip("﻿").strip()
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except ValueError as e:
+            raise RuntimeError(f"unexpected response from az rest: {e}: {raw[:120]!r}") from e
 
     def _policy(self, path: str) -> Optional[str]:
-        d = self._get(f"{path}/policies/policy", "&format=rawxml")
-        v = (d.get("properties") or {}).get("value")
+        # API Management answers a rawxml policy GET with the document itself
+        # (content type application/vnd.ms-azure-apim.policy.raw+xml), which az rest
+        # prints verbatim. Accept that, and the JSON envelope, and 404 (no policy).
+        raw = (self._az(["rest", "--method", "GET",
+                         "--uri", f"{self.base}{path}/policies/policy?api-version={API_VERSION}&format=rawxml"])
+               or "").lstrip("﻿").strip()
+        if not raw:
+            return None
+        if raw.startswith("<"):
+            return raw
+        v = (self._parse(raw).get("properties") or {}).get("value")
         return v.lstrip("﻿") if v else None
 
     def sku(self) -> str:
@@ -230,7 +252,7 @@ class AzReader(Reader):
             if props.get("secret"):
                 raw = self._az(["rest", "--method", "POST", "--uri",
                                 f"{self.base}/namedValues/{name}/listValue?api-version={API_VERSION}"])
-                out[name] = json.loads(raw).get("value") if raw.strip() else None
+                out[name] = self._parse(raw).get("value")
             else:
                 out[name] = props.get("value")
         return out
