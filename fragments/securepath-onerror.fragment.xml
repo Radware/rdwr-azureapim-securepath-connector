@@ -1,0 +1,93 @@
+<fragment>
+    <!-- ====== SecurePath response-phase log from the on-error section ======
+         Reached when the request passed SecurePath inspection and a later
+         policy in this gateway rejected it (for example validate-jwt or
+         rate-limit). API Management skips the outbound section in that case,
+         so without this fragment SecurePath would record the request with no
+         response status. A request SecurePath itself blocked or redirected
+         never reaches this section: those verdicts end the pipeline with
+         return-response, so no log can be sent twice. -->
+    <choose>
+      <when condition="@{
+        var oop_log = (string)context.Variables.GetValueOrDefault("rdwrOopLog", "");
+        var oop_id = (string)context.Variables.GetValueOrDefault("rdwrOopId", "");
+        return (oop_log == "2" || oop_log == "3") && !string.IsNullOrEmpty(oop_id);
+      }">
+        <send-one-way-request mode="new">
+          <set-url>@{
+            var ep_addr = (string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", "");
+            var ep_port = (int)context.Variables.GetValueOrDefault("rdwrAppEpPort", 443);
+            var ep_ssl = (bool)context.Variables.GetValueOrDefault("rdwrAppEpSsl", true);
+            var scheme = ep_ssl ? "https" : "http";
+            var path = context.Request.OriginalUrl.Path;
+            return $"{scheme}://{ep_addr}:{ep_port}{path}";
+          }</set-url>
+          <set-method>POST</set-method>
+          <set-header name="Host" exists-action="override">
+            <value>@(context.Request.OriginalUrl.Host)</value>
+          </set-header>
+          <set-header name="x-rdwr-connector-proto" exists-action="override">
+            <value>2</value>
+          </set-header>
+          <set-header name="x-rdwr-connector-stage" exists-action="override">
+            <value>log</value>
+          </set-header>
+          <set-header name="x-rdwr-plugin-info" exists-action="override">
+            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.3.4"))</value>
+          </set-header>
+          <set-header name="x-rdwr-app-id" exists-action="override">
+            <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
+          </set-header>
+          <set-header name="x-rdwr-api-key" exists-action="override">
+            <value>@((string)context.Variables.GetValueOrDefault("rdwrApiKey", ""))</value>
+          </set-header>
+          <set-header name="x-rdwr-oop-id" exists-action="override">
+            <value>@((string)context.Variables.GetValueOrDefault("rdwrOopId", ""))</value>
+          </set-header>
+          <set-header name="x-rdwr-o2v-status" exists-action="override">
+            <value>@(context.Response != null ? context.Response.StatusCode.ToString() : "500")</value>
+          </set-header>
+          <set-header name="x-rdwr-o2v-body-bytes-sent" exists-action="override">
+            <value>@{
+              try {
+                var body = context.Response.Body.As<byte[]>(preserveContent: true);
+                return (body != null ? body.Length : 0).ToString();
+              } catch { return "0"; }
+            }</value>
+          </set-header>
+          <set-header name="x-rdwr-o2v-bytes-sent" exists-action="override">
+            <value>@{
+              try {
+                var body = context.Response.Body.As<byte[]>(preserveContent: true);
+                int bodyLen = body != null ? body.Length : 0;
+                int headerBytes = 0;
+                if (context.Response.Headers != null) {
+                  foreach (var h in context.Response.Headers) {
+                    string name = h.Key ?? "";
+                    string val = string.Join(", ", h.Value ?? new string[0]);
+                    headerBytes += name.Length + 2 + val.Length + 2;
+                  }
+                }
+                return (20 + headerBytes + 2 + bodyLen).ToString();
+              } catch { return "0"; }
+            }</value>
+          </set-header>
+          <set-header name="x-rdwr-o2v-request-time" exists-action="override">
+            <value>@{
+              var start = (DateTime)context.Variables.GetValueOrDefault("requestStartTime", DateTime.UtcNow);
+              return (DateTime.UtcNow - start).TotalSeconds.ToString("F3");
+            }</value>
+          </set-header>
+          <set-header name="x-rdwr-o2h-content-type" exists-action="override">
+            <value>@(context.Response != null ? context.Response.Headers.GetValueOrDefault("Content-Type", "") : "")</value>
+          </set-header>
+          <set-header name="x-rdwr-o2h-rdwr-response" exists-action="override">
+            <value>allowed</value>
+          </set-header>
+          <set-header name="x-rdwr-o2h-gateway-error" exists-action="override">
+            <value>@(context.LastError != null ? (context.LastError.Source ?? "") + ":" + (context.LastError.Reason ?? "") : "")</value>
+          </set-header>
+        </send-one-way-request>
+      </when>
+    </choose>
+</fragment>
