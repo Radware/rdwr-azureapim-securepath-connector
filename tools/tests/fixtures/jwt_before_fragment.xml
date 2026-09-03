@@ -1,0 +1,21 @@
+<policies>
+    <inbound>
+        <base />
+        <validate-jwt header-name="Authorization" failed-validation-httpcode="401">
+            <openid-config url="https://login.example.com/.well-known/openid-configuration" />
+        </validate-jwt>
+        <include-fragment fragment-id="securepath-inbound" />
+        <set-backend-service backend-id="orders-pool" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+        <include-fragment fragment-id="securepath-outbound" />
+    </outbound>
+    <on-error>
+        <base />
+        <include-fragment fragment-id="securepath-onerror" />
+    </on-error>
+</policies>
