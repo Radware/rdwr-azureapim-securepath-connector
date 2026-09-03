@@ -13,12 +13,19 @@ map, the three application values behave exactly as before.
 
 ### Keeping the map in step with the Radware Cloud account
 
-`tools/securepath-apim-sync.py` reads the SecurePath applications of an account through the
-Radware Cloud API and compares them with the map on the instance: `plan` shows what differs,
-`apply` writes only that difference (and creates the backend entities Standard v2 / Premium v2
-need per endpoint), `check` exits non-zero on drift for a scheduler, `export` writes a Bicep
-parameter file. Hand-written entries are preserved. The gateway itself never polls the Radware
-Cloud; selection stays on the request path, reading the map.
+A Named Value holds about 4,000 characters, roughly seventeen map entries. Larger estates use the
+**generated map**: `tools/securepath-apim-sync.py apply` writes the policy fragment
+`securepath-app-map` (hostname, application id, endpoint per application; hundreds fit) and one
+secret Named Value per application key (`rdwr-app-key-<application id>`) that the fragment
+references, so no key appears in policy text. The install registers an empty default fragment;
+`rdwr-app-map` stays available for hand-written entries and overrides.
+
+The tool reads the SecurePath applications of an account through the Radware Cloud API (or a
+saved copy, `--from-file`) and compares them with the instance: `plan` shows what differs,
+`apply` writes only that difference (keys before the fragment, then backends), `check` exits
+non-zero on drift for a scheduler, `--prune` removes applications that are gone, `export` writes
+a Bicep parameter file. The gateway itself never polls the Radware Cloud; selection stays on the
+request path, reading the map.
 
 ### The client-facing hostname
 

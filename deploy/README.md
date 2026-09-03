@@ -1,7 +1,8 @@
 # One-shot install with Bicep
 
 Installs the connector at **All APIs** scope on an existing API Management instance: the 22
-Named Values, the three policy fragments, the All APIs policy that references them, and the
+Named Values, the four policy fragments (including the empty default of the generated
+application map), the All APIs policy that references them, and the
 backend entity that establishes trust for the inspection endpoint on Standard v2 / Premium v2.
 Policies you already have on APIs and products are not touched; they inherit the connector
 through `<base />`.
