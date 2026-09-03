@@ -81,23 +81,32 @@ The built-in role that covers all of them is **API Management Service Contributo
 
 ### Choosing an install form
 
-The connector can be installed three ways. They differ in **what happens to policies you already
-have** and in **how many APIs are covered**.
+**Default: policy fragments at All APIs scope.** The connector is three reusable policy
+fragments. Referenced from the All APIs scope, they run before every API's own policy: API
+Management evaluates the All APIs policy first and hands over to the API's policy at its
+`<base />` element. So the connector sees every request, including the ones your own
+`validate-jwt`, `ip-filter` or `rate-limit` policies go on to reject. Nothing in your existing
+policies is edited. `deploy/` installs this form in one command; Step 4 shows the CLI and
+Portal equivalents.
+
+Two things follow from that, and both are checked for you by `tools/securepath-apim-lint.py`:
+
+- every API and product policy must keep `<base />` as the first element of its `inbound`,
+  `outbound` and `on-error` sections. An API policy without it silently skips the connector;
+- install at one scope only. The connector at two scopes inspects every request twice.
 
 | Form | Covers | Existing policies | Use when |
 |---|---|---|---|
-| **A — policy document at API scope** | one API | **Replaced** | The API has no policy of its own, or you are happy to fold ours into it by hand |
-| **B — policy document at All APIs scope** | every API | Preserved | You want blanket coverage and your APIs have no conflicting global-scope needs |
-| **C — policy fragments** *(recommended)* | whatever scope you choose | **Preserved** | **You already have policies.** You add two lines rather than replacing a document |
+| **1 — Fragments at All APIs scope** *(default)* | every API | untouched | almost always |
+| **2 — Fragments inside one API or product policy** | that API or product | untouched; you add three lines | you must limit the connector to some APIs and cannot use a product |
+| **3 — Policy document at API scope** | one API | **replaced** | the API has no policy of its own and never will |
 
-**If your API Management instance already has policies, use Form C.** Forms A and B install a
-whole policy document; at API scope that overwrites whatever was there.
-
-**Do not install at two scopes at once.** The connector will run twice — inspecting every request
-two times, roughly tripling the added latency and duplicating events. Pick one scope.
+If the instance serves several SecurePath applications, see "Protecting APIs that belong to
+different SecurePath applications" in Step 3.
 
 **For the Azure CLI path** you need `jq`, and a shell opened in the directory containing the policy
 XML. If you would rather not install `jq`, the Azure Portal paths need no local tooling.
+
 
 ---
 ---
@@ -256,7 +265,7 @@ previous install — decide what that value is for before you overwrite it.
 
 ## 2b — Policies missing `<base />`
 
-Only needed if you plan to install at **All APIs** scope (Form B or C-global).
+Needed for the default install (fragments at All APIs scope). `tools/securepath-apim-lint.py --live` performs this check as finding L03; the block below is the same check in plain shell.
 
 API Management chains policy scopes together with the `<base />` element. If an API's own policy
 omits `<base />` from its `<inbound>` section, **the All APIs policy is skipped for that API** —
@@ -426,19 +435,20 @@ az apim nv delete -g "$RG" --service-name "$APIM" --named-value-id "$STRAY" --ye
 
 # ▶ STEP 4 — Install the connector
 
-**What this does:** installs the connector. Whichever form you choose, it covers both the request
-path and the response path — there is no separate step for response-phase logging.
+**What this does:** installs the connector. Whichever form you choose, it covers the request
+path, the response path and requests rejected by your own policies. There is no separate step
+for response-phase logging.
 
-Pick **one** form from the table in "Choosing an install form" above, and install at **one** scope.
+Pick **one** form and install at **one** scope.
 
 ---
 
-## Form C — Policy fragments *(recommended)*
+## Form 1 — Fragments at All APIs scope *(default)*
 
-Two reusable fragments are registered once, then referenced from any scope with two lines. Your
-existing policies are left intact.
+**Bicep, one command.** See `deploy/README.md`. It creates the Named Values too, so Step 3 can
+be skipped when you use it.
 
-**Register the fragments** — run from the directory containing the `fragments/` folder:
+**Azure CLI.** Run from the directory containing the `fragments/` folder, after Step 3:
 
 ```bash
 RG="your-resource-group"
@@ -447,43 +457,21 @@ APIM="your-apim-instance"
 SUB=$(az account show --query id -o tsv)
 BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
 
-jq -Rs '{properties:{format:"rawxml",description:"Radware SecurePath inbound",value:.}}' \
-   fragments/securepath-inbound.fragment.xml > rdwr-frag-in.json &&
-az rest --method PUT --uri "$BASE/policyFragments/securepath-inbound?api-version=2024-05-01" \
-        --headers "Content-Type=application/json" --body @rdwr-frag-in.json -o none &&
-jq -Rs '{properties:{format:"rawxml",description:"Radware SecurePath outbound",value:.}}' \
-   fragments/securepath-outbound.fragment.xml > rdwr-frag-out.json &&
-az rest --method PUT --uri "$BASE/policyFragments/securepath-outbound?api-version=2024-05-01" \
-        --headers "Content-Type=application/json" --body @rdwr-frag-out.json -o none &&
-echo "fragments registered"
+for F in inbound outbound onerror; do
+  jq -Rs "{properties:{format:\"rawxml\",description:\"Radware SecurePath $F\",value:.}}" \
+     fragments/securepath-$F.fragment.xml > rdwr-frag-$F.json &&
+  az rest --method PUT --uri "$BASE/policyFragments/securepath-$F?api-version=2024-05-01" \
+          --headers "Content-Type=application/json" --body @rdwr-frag-$F.json -o none > /dev/null || exit 1
+done
+printf '{"properties":{"format":"rawxml","value":"<policies><inbound><include-fragment fragment-id=\\"securepath-inbound\\" /></inbound><backend><forward-request /></backend><outbound><include-fragment fragment-id=\\"securepath-outbound\\" /></outbound><on-error><include-fragment fragment-id=\\"securepath-onerror\\" /></on-error></policies>"}}' > rdwr-global-policy.json &&
+az rest --method PUT --uri "$BASE/policies/policy?api-version=2024-05-01" \
+        --headers "Content-Type=application/json" --body @rdwr-global-policy.json -o none > /dev/null &&
+echo "installed at All APIs scope"
 ```
 
-**Reference them** from your existing policy, at whichever scope you chose. Open the policy editor
-for that scope and add the two `include-fragment` lines — leaving everything else as it is:
-
-```xml
-<policies>
-  <inbound>
-    <base />
-    <include-fragment fragment-id="securepath-inbound" />
-    <!-- your existing inbound policies stay here, untouched -->
-  </inbound>
-  <backend>
-    <base />
-  </backend>
-  <outbound>
-    <base />
-    <include-fragment fragment-id="securepath-outbound" />
-    <!-- your existing outbound policies stay here, untouched -->
-  </outbound>
-  <on-error>
-    <base />
-  </on-error>
-</policies>
-```
-
-At the **All APIs** scope only, omit `<base />` — it is not permitted there — and use
-`<forward-request />` in the backend section:
+**Azure Portal.** APIs → **Policy fragments** → **+ Create**, three times, pasting each file
+from `fragments/`. Then APIs → **All APIs** → **Policies**, open the code editor and replace the
+document with:
 
 ```xml
 <policies>
@@ -496,20 +484,64 @@ At the **All APIs** scope only, omit `<base />` — it is not permitted there �
   <outbound>
     <include-fragment fragment-id="securepath-outbound" />
   </outbound>
-  <on-error />
+  <on-error>
+    <include-fragment fragment-id="securepath-onerror" />
+  </on-error>
 </policies>
 ```
 
-Updating the connector later means replacing the two fragments — every scope that references them
-picks up the change. A fragment cannot be deleted while any policy still references it; API
+There is no `<base />` at this scope: the All APIs policy has no parent to inherit from.
+
+Updating the connector later means replacing the three fragments; every scope that references
+them picks up the change. A fragment cannot be deleted while a policy still references it; API
 Management refuses and names the referencing policy.
 
 ---
 
-## Form A — Policy document at API scope
+## Form 2 — Fragments inside an existing API or product policy
+
+Register the fragments exactly as in Form 1 (the loop, or the Portal). Then open the policy for
+the API or product and add the three `include-fragment` lines **immediately after `<base />`,
+before any policy of your own**:
+
+```xml
+<policies>
+  <inbound>
+    <base />
+    <include-fragment fragment-id="securepath-inbound" />
+    <!-- your existing inbound policies stay here, after the connector -->
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+    <include-fragment fragment-id="securepath-outbound" />
+    <!-- your existing outbound policies -->
+  </outbound>
+  <on-error>
+    <base />
+    <include-fragment fragment-id="securepath-onerror" />
+    <!-- your existing on-error policies -->
+  </on-error>
+</policies>
+```
+
+**The position matters.** A `validate-jwt`, `check-header`, `ip-filter`, `rate-limit`, `quota`
+or `return-response` placed above the connector ends the request before the connector runs, and
+SecurePath never sees the requests those policies reject, which are usually the ones you most
+want it to see. `tools/securepath-apim-lint.py --file your-policy.xml` reports this as L04
+before you upload.
+
+Upload with `format` set to `rawxml`. The CLI block under Form 3 shows the exact command; point
+it at your edited file instead of the shipped document.
+
+---
+
+## Form 3 — Policy document at API scope
 
 Covers one API. **This replaces that API's entire policy document**, so only use it where the API
-has no policy of its own.
+has no policy of its own. If the API already has a policy, use Form 2 instead.
 
 **Azure Portal:**
 
@@ -517,7 +549,7 @@ has no policy of its own.
 2. Select **All operations**.
 3. In the **Inbound processing** box, select the **`</>`** icon to open the policy code editor. This
    editor shows the whole document, not only the inbound section.
-4. If the editor already contains policies of your own, **stop and use Form C instead** — continuing
+4. If the editor already contains policies of your own, **stop and use Form 2 instead** — continuing
    will discard them. Otherwise replace the contents with
    `rdwr-azureapim-securepath-connector-v1.3.xml`.
 5. **Save.**
@@ -553,34 +585,6 @@ Set-AzApiManagementPolicy -Context $ctx -ApiId "your-api-resource-name" `
 
 `format` must be `rawxml`. The default rejects the Named Value references this policy uses inside
 XML attributes.
-
----
-
-## Form B — Policy document at All APIs scope
-
-Covers every API on the instance in one action. Use
-`rdwr-azureapim-securepath-connector-v1.3-all-apis-scope.xml`, which is the same policy with
-`<base />` removed and `<forward-request />` in the backend section — **the standard file is
-rejected at this scope** with *"Element `<base/>` is not allowed in global context"*.
-
-Run the Step 2b check first. Any API whose own policy lacks `<base />` will silently skip the
-connector.
-
-```bash
-RG="your-resource-group"
-APIM="your-apim-instance"
-
-SUB=$(az account show --query id -o tsv)
-URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/policies/policy?api-version=2024-05-01"
-
-jq -Rs '{properties: {format: "rawxml", value: .}}' \
-   rdwr-azureapim-securepath-connector-v1.3-all-apis-scope.xml > rdwr-global-body.json &&
-az rest --method PUT --uri "$URI" \
-        --headers "Content-Type=application/json" \
-        --body @rdwr-global-body.json
-```
-
-In the Portal this is **APIs → All APIs → Policies**.
 
 ---
 ---
@@ -671,6 +675,20 @@ situations produce it:
 - The inspection call is not completing.
 
 Only 4c distinguishes them.
+
+## 4e — Run the install check
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+python3 tools/securepath-apim-lint.py --live -g "$RG" -n "$APIM"
+```
+
+`clean` means the connector is installed at exactly one scope, every API and product policy
+inherits it, nothing of yours runs ahead of it, and the Named Values and (on v2 tiers) the backend
+entity are in place. Anything else is printed with the line to change and the fix. The codes are
+explained in `tools/README.md`.
 
 ---
 ---
@@ -787,9 +805,9 @@ shell other than bash, paste one command at a time.
 
 How you remove it depends on which form you installed.
 
-## If you installed Form C — fragments
+## If you installed fragments (Form 1 or 2)
 
-Delete the two `include-fragment` lines from the policy you added them to. Inspection stops
+Delete the three `include-fragment` lines from the policy you added them to. Inspection stops
 immediately and the rest of that policy is unaffected.
 
 Then, optionally, remove the fragments themselves. API Management refuses to delete a fragment that
@@ -805,9 +823,10 @@ BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/provide
 
 az rest --method DELETE --uri "$BASE/policyFragments/securepath-inbound?api-version=2024-05-01" --headers "If-Match=*"
 az rest --method DELETE --uri "$BASE/policyFragments/securepath-outbound?api-version=2024-05-01" --headers "If-Match=*"
+az rest --method DELETE --uri "$BASE/policyFragments/securepath-onerror?api-version=2024-05-01" --headers "If-Match=*"
 ```
 
-## If you installed Form A — policy document at API scope
+## If you installed Form 3 — policy document at API scope
 
 Replace that API's policy with the default, which restores normal routing immediately. Note this
 restores the *default* policy, not any policy you had before installing:
@@ -824,7 +843,7 @@ printf '{"properties":{"format":"rawxml","value":"<policies><inbound><base /></i
 az rest --method PUT --uri "$URI" --headers "Content-Type=application/json" --body @rdwr-default-policy.json
 ```
 
-## If you installed Form B — policy document at All APIs scope
+## If you installed the retired All-APIs policy document (v1.3.4 Form B)
 
 Same idea, against the global scope, using the global-scope shape:
 
