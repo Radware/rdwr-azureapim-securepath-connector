@@ -33,6 +33,15 @@ map used to be able to end a request with a 500. Such requests are now served wi
 inspection and marked with `X-Rdwr-Diag` (`config_incomplete`, `no_app_mapping`,
 `app_map_invalid`) and a trace line, so the condition is visible without affecting traffic.
 
+### Two behaviours aligned with the reference connector
+
+- A SecurePath response with a status the connector does not know (for example 401 or 418) is no
+  longer relayed to the client. The request is served without a verdict, marked with
+  `X-Rdwr-Diag: unexpected_status_<code>` and a trace line, which is what the reference connector
+  does.
+- The `uzmcr` header (the Bot Manager mobile flow) is relayed to the client whenever SecurePath
+  sends it, no longer only when `rdwr-bot-manager-enabled` is true.
+
 ### Requests rejected by your own policies now get a response-phase record
 
 A third fragment, `fragments/securepath-onerror.fragment.xml`, sends the response-phase log from
