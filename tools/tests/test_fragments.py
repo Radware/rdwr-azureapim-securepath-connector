@@ -50,8 +50,7 @@ def test_plugin_info_fallback_is_v140():
 
 def test_unknown_securepath_status_fails_open_audibly():
     t = frag("inbound")
-    assert "action_enforced_status" not in t
-    assert "unexpected_status_" in t
+    assert "unexpected_status_" in t  # fail-open marker for statuses outside the verdict tree
 
 
 def test_uzmcr_relay_is_not_gated_on_bot_manager_flag():
@@ -59,3 +58,9 @@ def test_uzmcr_relay_is_not_gated_on_bot_manager_flag():
     gate = t.index('GetValueOrDefault("rdwrBotManagerEnabled", false)')
     gate_close = t.index("    </choose>", gate)
     assert t.index('name="uzmcr"') > gate_close
+
+
+def test_403_block_enforcement_branch_is_present():
+    t = frag("inbound")
+    assert 'reason="RadwareAction"' in t
+    assert t.index('== 403)">') < t.index("unexpected_status_")
