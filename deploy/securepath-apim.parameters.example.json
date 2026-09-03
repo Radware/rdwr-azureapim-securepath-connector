@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "apimName": { "value": "your-apim-instance" },
+    "appId": { "value": "afa37f7d53ce4e76a4988c4955c2d7e5" },
+    "apiKey": { "value": "f4b1c2d3-1111-2222-3333-abcdefabcdef" },
+    "endpoint": { "value": "afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net" }
+  }
+}

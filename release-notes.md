@@ -2,7 +2,36 @@
 
 ---
 
-## v1.3.4 (2026-08-16) — Current
+## v1.4.0 — in progress, not yet released
+
+### Requests rejected by your own policies now get a response-phase record
+
+A third fragment, `fragments/securepath-onerror.fragment.xml`, sends the response-phase log from
+the `on-error` section. Previously, when the connector allowed a request and a later policy in
+the gateway rejected it (an expired token, a rate limit), API Management skipped the outbound
+section and the record for that request had no response status. All three fragments are
+referenced together; the install forms and the Bicep template do this for you.
+
+### Fragments at All APIs scope are the default install
+
+The connector installed at the All APIs scope runs before every API's own policy, so nothing has
+to be ordered by hand and no existing policy is edited. `deploy/securepath-apim.bicep` installs
+everything in one deployment. The whole-document All-APIs file
+(`rdwr-azureapim-securepath-connector-v1.3-all-apis-scope.xml`) is retired and will be removed in
+the next release.
+
+### `tools/securepath-apim-lint.py`
+
+Reads a policy document or a live instance and reports the conditions under which the connector
+is installed but ineffective: missing or duplicated install, an API policy without `<base />`, a
+request-ending policy placed ahead of the connector, an empty `set-variable` left by a manual
+merge, missing or malformed Named Values, and a missing backend entity on v2 tiers.
+
+`x-rdwr-plugin-info` becomes `700-v1.4.0` with this release.
+
+---
+
+## v1.3.4 (2026-08-16)
 
 **Documentation and packaging release. The policy XML is unchanged from v1.3.2** — there is nothing
 to redeploy if the connector is already working. `x-rdwr-plugin-info` remains `700-v1.3.2`.
