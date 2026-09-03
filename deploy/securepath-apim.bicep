@@ -40,8 +40,24 @@ param apiBasePath string = '/'
 param createBackend bool = true
 
 @secure()
-@description('Optional map of API id or hostname to {app_id, api_key, endpoint} for instances serving several SecurePath applications. Empty means the three values above apply to every API.')
+@description('Optional map of API id or hostname (or "*") to {app_id, api_key, endpoint[, port, ssl, bot_manager, base_path]} for instances serving several SecurePath applications. Empty means the three values above apply to every API. See README "Protecting APIs that belong to different SecurePath applications".')
 param appMap object = {}
+
+@description('Request header carrying the client-facing hostname when a CDN or Front Door fronts the gateway (for example X-Forwarded-Host). ##DISABLED## uses the host the gateway received.')
+param trueHostHeader string = '##DISABLED##'
+
+@secure()
+@description('Radware Cloud portal API key. With cloudContext, enables cloud sync: the policy reads the account\'s SecurePath applications itself and caches them. Leave empty to turn cloud sync off.')
+param cloudApiKey string = ''
+
+@description('Application Protection ID for cloud sync (the context header of the Radware Cloud API).')
+param cloudContext string = '##DISABLED##'
+
+@description('Seconds a fetched application list is used before cloud sync refreshes it.')
+param cloudSyncTtlSeconds int = 300
+
+@description('Bound, in seconds, on the cloud sync refresh call.')
+param cloudSyncTimeoutSeconds int = 5
 
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
   name: apimName
@@ -68,7 +84,18 @@ var namedValues = [
   { name: 'chunked-request-allowed-content-types', value: 'application/json,application/x-www-form-urlencoded', secret: false }
   { name: 'rdwr-inline-trusted-sources', value: '##DISABLED##', secret: false }
   { name: 'rdwr-inline-headers-enabled', value: 'false', secret: false }
+  { name: 'rdwr-true-host-header', value: trueHostHeader, secret: false }
+  { name: 'rdwr-cloud-api-key', value: empty(cloudApiKey) ? '##DISABLED##' : cloudApiKey, secret: true }
+  { name: 'rdwr-cloud-context', value: cloudContext, secret: false }
+  { name: 'rdwr-cloud-sync-ttl-seconds', value: string(cloudSyncTtlSeconds), secret: false }
+  { name: 'rdwr-cloud-sync-timeout-seconds', value: string(cloudSyncTimeoutSeconds), secret: false }
 ]
+
+// A Named Value is substituted inside an XML attribute at policy save time, so the map is
+// stored as single-quoted JSON (the policy's parser accepts it).
+var appMapValue = empty(appMap) ? '##DISABLED##' : replace(string(appMap), '"', '\'')
+var mapEndpoints = [for e in items(appMap): toLower(string(e.value.endpoint))]
+var distinctMapEndpoints = union(mapEndpoints, [])
 
 resource nv 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = [for item in namedValues: {
   parent: apim
@@ -80,12 +107,12 @@ resource nv 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = [for item
   }
 }]
 
-resource nvAppMap 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = if (!empty(appMap)) {
+resource nvAppMap 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
   parent: apim
   name: 'rdwr-app-map'
   properties: {
     displayName: 'rdwr-app-map'
-    value: string(appMap)
+    value: appMapValue
     secret: true
   }
 }
@@ -98,7 +125,7 @@ resource fragIn 'Microsoft.ApiManagement/service/policyFragments@2024-05-01' = {
     format: 'rawxml'
     value: loadTextContent('../fragments/securepath-inbound.fragment.xml')
   }
-  dependsOn: [nv]
+  dependsOn: [nv, nvAppMap]
 }
 
 resource fragOut 'Microsoft.ApiManagement/service/policyFragments@2024-05-01' = {
@@ -149,6 +176,20 @@ resource backend 'Microsoft.ApiManagement/service/backends@2024-05-01' = if (cre
     }
   }
 }
+
+resource mapBackends 'Microsoft.ApiManagement/service/backends@2024-05-01' = [for (ep, i) in distinctMapEndpoints: if (createBackend && ep != toLower(endpoint)) {
+  parent: apim
+  name: 'securepath-sideband-${i + 1}'
+  properties: {
+    title: 'SecurePath inspection endpoint (application map)'
+    protocol: 'http'
+    url: 'https://${ep}'
+    tls: {
+      validateCertificateChain: false
+      validateCertificateName: false
+    }
+  }
+}]
 
 output gatewayUrl string = apim.properties.gatewayUrl
 output installedScope string = 'All APIs'
