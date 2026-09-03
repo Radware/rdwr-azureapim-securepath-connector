@@ -1,0 +1,10 @@
+<fragment>
+    <!-- ====== Generated application map ======
+         Written by tools/securepath-apim-sync.py apply from the SecurePath applications of
+         your Radware Cloud account: one entry per application (hostname, application id,
+         inspection endpoint) with each API key held in its own secret Named Value
+         (rdwr-app-key-<application id>) and referenced from here. This default is the empty
+         map. Do not edit by hand; the next apply replaces it. Hand-written entries belong in
+         the rdwr-app-map Named Value, which takes precedence over this map. -->
+    <set-variable name="rdwrAppMapGenerated" value="##DISABLED##" />
+</fragment>

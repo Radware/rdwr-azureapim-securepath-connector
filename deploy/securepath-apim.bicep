@@ -100,6 +100,17 @@ resource nvAppMap 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
   }
 }
 
+resource fragMap 'Microsoft.ApiManagement/service/policyFragments@2024-05-01' = {
+  parent: apim
+  name: 'securepath-app-map'
+  properties: {
+    description: 'Radware SecurePath generated application map (written by tools/securepath-apim-sync.py)'
+    format: 'rawxml'
+    value: loadTextContent('../fragments/securepath-app-map.fragment.xml')
+  }
+  dependsOn: [nv]
+}
+
 resource fragIn 'Microsoft.ApiManagement/service/policyFragments@2024-05-01' = {
   parent: apim
   name: 'securepath-inbound'
@@ -108,7 +119,7 @@ resource fragIn 'Microsoft.ApiManagement/service/policyFragments@2024-05-01' = {
     format: 'rawxml'
     value: loadTextContent('../fragments/securepath-inbound.fragment.xml')
   }
-  dependsOn: [nv, nvAppMap]
+  dependsOn: [nv, nvAppMap, fragMap]
 }
 
 resource fragOut 'Microsoft.ApiManagement/service/policyFragments@2024-05-01' = {

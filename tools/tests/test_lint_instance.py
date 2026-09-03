@@ -36,6 +36,11 @@ class FakeReader(lint.Reader):
     def named_values(self): return dict(self._nvs)
     def backends(self): return list(self._backends)
 
+    def fragment(self, fragment_id):
+        # the shipped default app-map fragment is registered on a healthy instance
+        with open(os.path.join(HERE, "..", "..", "fragments", "securepath-app-map.fragment.xml"), encoding="utf-8") as f:
+            return f.read()
+
 
 def codes(f):
     return sorted(x.code for x in f)
@@ -145,3 +150,34 @@ def test_map_endpoint_without_backend_is_l09():
     r = FakeReader(glob=fx("clean_global.xml"), nvs=nvs)
     f = lint.lint_instance(r)
     assert codes(f) == ["L09"] and "y.oop.radwarecloud.net" in f[0].message
+
+
+class FakeReaderWithFragment(FakeReader):
+    def __init__(self, *a, fragment=None, **kw):
+        super().__init__(*a, **kw)
+        self._fragment = fragment
+
+    def fragment(self, fragment_id):
+        return self._fragment
+
+
+GEN = ('<fragment>\n    <set-variable name="rdwrAppMapGenerated" value="{\'shop.example.test\': {\'app_id\': \'a1\', '
+       '\'api_key\': \'{{rdwr-app-key-a1}}\', \'endpoint\': \'gen1.oop.radwarecloud.net\', \'port\': 443, \'ssl\': true}}" />\n</fragment>\n')
+
+
+def test_generated_map_endpoints_and_key_named_values_are_checked():
+    nvs = dict(NV_OK)
+    r = FakeReaderWithFragment(glob=fx("clean_global.xml"), nvs=nvs, fragment=GEN,
+                               backends=["https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net"])
+    assert codes(lint.lint_instance(r)) == ["L09", "L13"]
+    nvs["rdwr-app-key-a1"] = "k"
+    r = FakeReaderWithFragment(glob=fx("clean_global.xml"), nvs=nvs, fragment=GEN,
+                               backends=["https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net", "https://gen1.oop.radwarecloud.net"])
+    assert lint.lint_instance(r) == []
+
+
+def test_missing_app_map_fragment_is_l11_when_fragments_are_used():
+    r = FakeReaderWithFragment(glob=fx("clean_global.xml"), fragment=None)
+    assert codes(lint.lint_instance(r)) == ["L11"]
+    r2 = FakeReaderWithFragment(glob=fx("clean_global.xml"), fragment=open(os.path.join(HERE, "..", "..", "fragments", "securepath-app-map.fragment.xml")).read())
+    assert lint.lint_instance(r2) == []

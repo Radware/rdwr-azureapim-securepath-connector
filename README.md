@@ -488,13 +488,22 @@ On Standard v2 and Premium v2 every distinct `endpoint` needs its own backend en
 Path B, one per endpoint; `deploy/securepath-apim.bicep` creates them from the `appMap`
 parameter). `tools/securepath-apim-lint.py --live` reports an endpoint without one as L09.
 
-### Keeping the map in step with your Radware Cloud account
+### Keeping up with your Radware Cloud account: the generated map
 
-`tools/securepath-apim-sync.py` reads the SecurePath applications of your account through the
-Radware Cloud API (a portal API key and your Application Protection ID), compares them with the
-map on the instance, and writes only what differs. On Standard v2 / Premium v2 it also creates
-the backend entity each inspection endpoint needs. Entries you wrote by hand (an API id key, a
-`*` default, a `base_path`) are left as they are.
+Hand-editing `rdwr-app-map` is fine for a handful of applications; a Named Value holds about
+4,000 characters, roughly seventeen entries. For anything larger, or to stop maintaining it by
+hand at all, let `tools/securepath-apim-sync.py` write the **generated map**. It reads the
+SecurePath applications of your account through the Radware Cloud API (a portal API key and
+your Application Protection ID), and writes:
+
+- the policy fragment `securepath-app-map` — hostname, application id and inspection endpoint
+  per application (a fragment holds hundreds of entries);
+- one **secret** Named Value per application, `rdwr-app-key-<application id>`, holding that
+  application's API key — the fragment references it, so no key is ever written into policy
+  text, exactly like `rdwr-api-key`;
+- on Standard v2 / Premium v2, the backend entity each inspection endpoint needs.
+
+Your `rdwr-app-map` entries are never touched and take precedence over generated ones.
 
 ```bash
 RG="your-resource-group"
@@ -518,19 +527,26 @@ CLOUD_CONTEXT="your-application-protection-id"
 python3 tools/securepath-apim-sync.py apply -g "$RG" -n "$APIM" --cloud-api-key "$CLOUD_API_KEY" --cloud-context "$CLOUD_CONTEXT"
 ```
 
-Run `apply` again after onboarding an application; it changes only the difference. Add
-`--prune` to also drop entries whose application is gone. `check` exits 1 when the instance
-differs from the account, so a scheduler can alert; `export --out appmap.parameters.json`
-writes the map as a parameter file for `deploy/securepath-apim.bicep`, when you would rather
-push everything through one deployment.
+Run `apply` again after onboarding an application or rotating a key; it changes only the
+difference. Add `--prune` to also drop entries (and their key Named Values) whose application
+is gone — not when several accounts feed one instance, because the other account's entries
+look gone. `check` exits 1 when the instance differs from the account, so a scheduler can
+alert; `export --out appmap.parameters.json` writes the map as a parameter file for
+`deploy/securepath-apim.bicep`; `--from-file apps.json` uses a saved copy of the account's
+application list instead of calling the API.
 
 **Automation.** Run `check` or `apply` from any scheduler you already have: a pipeline in
 GitHub Actions or Azure DevOps, a cron host, a Logic App calling a runbook. Nothing in the
-gateway itself polls the Radware Cloud; application selection happens on the request path,
-reading the map, and stays deterministic whatever the state of the Radware Cloud API. If the
+gateway polls the Radware Cloud; application selection happens on the request path, reading
+the map, and stays deterministic whatever the state of the Radware Cloud API. If the
 synchronisation has to live inside Azure without a pipeline, a timer-triggered Azure Function
 or a Container Apps job running the same command is the shape to use; talk to Radware before
 setting one up.
+
+**What a first `apply` costs at scale.** One Azure call per application key and per backend
+entity: a few seconds per application, so a couple of minutes for a hundred. Later runs write
+only the difference. Per request, the gateway parses the map once; that stays well under a
+millisecond at a hundred entries.
 
 ---
 ---
@@ -547,8 +563,8 @@ Pick **one** form and install at **one** scope.
 
 ## Form 1 — Fragments at All APIs scope *(default)*
 
-**Bicep, one command.** See `deploy/README.md`. It creates the Named Values too, so Step 3 can
-be skipped when you use it.
+**Bicep, one command.** See `deploy/README.md`. It creates the Named Values and registers all
+four fragments, so Step 3 can be skipped when you use it.
 
 **Azure CLI.** Run from the directory containing the `fragments/` folder, after Step 3:
 
@@ -559,7 +575,7 @@ APIM="your-apim-instance"
 SUB=$(az account show --query id -o tsv)
 BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
 
-for F in inbound outbound onerror; do
+for F in app-map inbound outbound onerror; do
   jq -Rs "{properties:{format:\"rawxml\",description:\"Radware SecurePath $F\",value:.}}" \
      fragments/securepath-$F.fragment.xml > rdwr-frag-$F.json &&
   az rest --method PUT --uri "$BASE/policyFragments/securepath-$F?api-version=2024-05-01" \
@@ -571,8 +587,8 @@ az rest --method PUT --uri "$BASE/policies/policy?api-version=2024-05-01" \
 echo "installed at All APIs scope"
 ```
 
-**Azure Portal.** APIs → **Policy fragments** → **+ Create**, three times, pasting each file
-from `fragments/`. Then APIs → **All APIs** → **Policies**, open the code editor and replace the
+**Azure Portal.** APIs → **Policy fragments** → **+ Create**, four times, pasting each file
+from `fragments/` (`securepath-app-map` first: the inbound fragment references it). Then APIs → **All APIs** → **Policies**, open the code editor and replace the
 document with:
 
 ```xml
@@ -594,16 +610,18 @@ document with:
 
 There is no `<base />` at this scope: the All APIs policy has no parent to inherit from.
 
-Updating the connector later means replacing the three fragments; every scope that references
-them picks up the change. A fragment cannot be deleted while a policy still references it; API
+Updating the connector later means replacing the fragments; every scope that references them
+picks up the change. `securepath-app-map` is the one fragment the sync tool rewrites (Step 3d);
+a connector update leaves it as it is. A fragment cannot be deleted while a policy still references it; API
 Management refuses and names the referencing policy.
 
 ---
 
 ## Form 2 — Fragments inside an existing API or product policy
 
-Register the fragments exactly as in Form 1 (the loop, or the Portal). Then open the policy for
-the API or product and add the three `include-fragment` lines **immediately after `<base />`,
+Register the fragments exactly as in Form 1 (the loop, or the Portal; `securepath-app-map` is
+referenced by the inbound fragment itself, so your policy names only three). Then open the
+policy for the API or product and add the three `include-fragment` lines **immediately after `<base />`,
 before any policy of your own**:
 
 ```xml
@@ -926,7 +944,11 @@ BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/provide
 az rest --method DELETE --uri "$BASE/policyFragments/securepath-inbound?api-version=2024-05-01" --headers "If-Match=*"
 az rest --method DELETE --uri "$BASE/policyFragments/securepath-outbound?api-version=2024-05-01" --headers "If-Match=*"
 az rest --method DELETE --uri "$BASE/policyFragments/securepath-onerror?api-version=2024-05-01" --headers "If-Match=*"
+az rest --method DELETE --uri "$BASE/policyFragments/securepath-app-map?api-version=2024-05-01" --headers "If-Match=*"
 ```
+
+If the sync tool was used, the generated key Named Values (`rdwr-app-key-*`) are inert once the
+fragments are gone; list them with `az apim nv list` and delete them at your convenience.
 
 ## If you installed Form 3 — policy document at API scope
 

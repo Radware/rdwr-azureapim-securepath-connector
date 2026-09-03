@@ -176,6 +176,7 @@ class Reader:
     def product_policy(self, product_id: str) -> Optional[str]: raise NotImplementedError
     def named_values(self) -> Dict[str, Optional[str]]: raise NotImplementedError
     def backends(self) -> List[str]: raise NotImplementedError
+    def fragment(self, fragment_id: str) -> Optional[str]: return None  # text, or None when absent
 
 
 class AzReader(Reader):
@@ -264,6 +265,15 @@ class AzReader(Reader):
         return [(b.get("properties") or {}).get("url", "")
                 for b in self._get("/backends").get("value", [])]
 
+    def fragment(self, fragment_id):
+        raw = (self._az(["rest", "--method", "GET", "--uri",
+                         f"{self.base}/policyFragments/{fragment_id}?api-version={API_VERSION}&format=rawxml"]) or "").lstrip("\ufeff").strip()
+        if not raw:
+            return None
+        if raw.startswith("<"):
+            return raw
+        return (self._parse(raw).get("properties") or {}).get("value")
+
 
 def parse_app_map(raw: str) -> dict:
     """The application map is single-quoted JSON (a Named Value is substituted inside
@@ -332,6 +342,39 @@ def lint_instance(reader: Reader) -> List[Finding]:
 
     # endpoints that need trust: the default one (when TLS is on) plus every map entry
     endpoints = {ep.lower()} if (ep and ep_ssl) else set()
+
+    # generated application map (tools/securepath-apim-sync.py) in the securepath-app-map fragment
+    uses_fragments = any(text and 'fragment-id="securepath-inbound"' in text for _, _, text in docs)
+    gen_text = reader.fragment("securepath-app-map")
+    if uses_fragments and gen_text is None:
+        findings.append(Finding("L11", "fragments", None, "the securepath-app-map fragment is not registered; the inbound fragment references it",
+                                "register fragments/securepath-app-map.fragment.xml (README Step 4, Form 1) before the inbound fragment"))
+    if gen_text:
+        m = re.search(r'name="rdwrAppMapGenerated" value="(.*?)" />', gen_text, re.S)
+        raw = (m.group(1).strip() if m else "")
+        if not m:
+            findings.append(Finding("L11", "fragments", None, "the securepath-app-map fragment does not set rdwrAppMapGenerated",
+                                    "re-register fragments/securepath-app-map.fragment.xml or run securepath-apim-sync apply"))
+        elif raw.lower() not in DISABLE_TOKENS:
+            try:
+                gen = parse_app_map(raw)
+                if not isinstance(gen, dict):
+                    raise ValueError("top level must be an object")
+                for key, entry in gen.items():
+                    for field in ("app_id", "api_key", "endpoint"):
+                        if not isinstance(entry, dict) or not entry.get(field):
+                            findings.append(Finding("L10", "fragments", None, f"generated map entry '{key}' lacks '{field}'",
+                                                    "run securepath-apim-sync apply again"))
+                    if isinstance(entry, dict):
+                        ref = str(entry.get("api_key", ""))
+                        if ref.startswith("{{") and ref.endswith("}}") and ref[2:-2] not in nvs:
+                            findings.append(Finding("L13", "named-values", None, f"generated map entry '{key}' references the key Named Value {ref[2:-2]}, which does not exist",
+                                                    "run securepath-apim-sync apply (it writes the key Named Values before the fragment)"))
+                        if entry.get("endpoint") and entry.get("ssl", True) is not False:
+                            endpoints.add(str(entry["endpoint"]).lower())
+            except ValueError as e:
+                findings.append(Finding("L10", "fragments", None, f"the generated map is not valid JSON ({e})",
+                                        "run securepath-apim-sync apply again"))
     app_map_raw = nvs.get("rdwr-app-map")
     if app_map_raw is not None and app_map_raw.strip().lower() not in DISABLE_TOKENS:
         try:

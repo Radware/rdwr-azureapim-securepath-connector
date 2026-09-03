@@ -75,19 +75,39 @@
           }
           return host.ToLower();
         }" />
+        <!-- Form 3 keeps the whole document self-contained: the generated application map
+             (tools/securepath-apim-sync.py) is a fragment-install feature. Use rdwr-app-map. -->
+        <set-variable name="rdwrAppMapGenerated" value="##DISABLED##" />
         <set-variable name="rdwrAppMapRaw" value="{{rdwr-app-map}}" />
         <set-variable name="rdwrAppMapSource" value="@{
           string m = ((string)context.Variables.GetValueOrDefault("rdwrAppMapRaw", "") ?? "").Trim().ToLower();
+          string g = ((string)context.Variables.GetValueOrDefault("rdwrAppMapGenerated", "") ?? "").Trim().ToLower();
           bool mapOff = m == "" || m == "-" || m == "disabled" || m == "off" || m == "false" || m == "none" || m == "~" || m == "##disabled##";
-          return mapOff ? "none" : "map";
+          bool genOff = g == "" || g == "-" || g == "disabled" || g == "off" || g == "false" || g == "none" || g == "~" || g == "##disabled##";
+          return (mapOff && genOff) ? "none" : "map";
         }" />
         <set-variable name="rdwrAppMapJson" value="@{
-          string src = (string)context.Variables.GetValueOrDefault("rdwrAppMapSource", "none");
-          return src == "map" ? (string)context.Variables.GetValueOrDefault("rdwrAppMapRaw", "") : "";
+          // Merge the generated map (from the sync tool) with the hand-written map; hand-written
+          // entries win. Either may be absent. Returns ##INVALID## when one of them is unparsable.
+          string m = ((string)context.Variables.GetValueOrDefault("rdwrAppMapRaw", "") ?? "").Trim();
+          string g = ((string)context.Variables.GetValueOrDefault("rdwrAppMapGenerated", "") ?? "").Trim();
+          string ml = m.ToLower(); string gl = g.ToLower();
+          bool mapOff = ml == "" || ml == "-" || ml == "disabled" || ml == "off" || ml == "false" || ml == "none" || ml == "~" || ml == "##disabled##";
+          bool genOff = gl == "" || gl == "-" || gl == "disabled" || gl == "off" || gl == "false" || gl == "none" || gl == "~" || gl == "##disabled##";
+          if (mapOff && genOff) { return ""; }
+          if (genOff) { return m; }
+          if (mapOff) { return g; }
+          try {
+            JObject merged = JObject.Parse(g);
+            JObject hand = JObject.Parse(m);
+            foreach (JProperty p in hand.Properties()) { merged[p.Name] = p.Value; }
+            return merged.ToString(Newtonsoft.Json.Formatting.None);
+          } catch { return "##INVALID##"; }
         }" />
         <set-variable name="rdwrAppSelection" value="@{
           string raw = (string)context.Variables.GetValueOrDefault("rdwrAppMapJson", "");
           if (string.IsNullOrWhiteSpace(raw)) { return ""; }
+          if (raw == "##INVALID##") { return "##INVALID##"; }
           try {
             JObject map = JObject.Parse(raw);
             string apiId = (context.Api != null && context.Api.Id != null) ? context.Api.Id.Trim().ToLower() : "";

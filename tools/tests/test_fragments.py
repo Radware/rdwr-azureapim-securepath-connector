@@ -64,3 +64,15 @@ def test_403_block_enforcement_branch_is_present():
     t = frag("inbound")
     assert 'reason="RadwareAction"' in t
     assert t.index('== 403)">') < t.index("unexpected_status_")
+
+
+def test_inbound_includes_the_generated_map_before_reading_the_hand_map():
+    t = frag("inbound")
+    i = t.index('<include-fragment fragment-id="securepath-app-map" />')
+    assert i < t.index('name="rdwrAppMapRaw"')
+    assert "rdwrAppMapGenerated" in t and "merged[p.Name] = p.Value" in t
+
+
+def test_default_app_map_fragment_is_disabled():
+    t = frag("app-map")
+    assert 'name="rdwrAppMapGenerated" value="##DISABLED##"' in t
