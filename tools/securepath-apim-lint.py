@@ -6,7 +6,11 @@ install can be silently ineffective: the connector missing or installed twice,
 an API policy without <base /> skipping a global connector, a request-ending
 policy placed ahead of the connector, an empty set-variable left by a manual
 merge, an incomplete fragment set, missing or malformed Named Values, an invalid
-application map, and a missing backend entity on v2 tiers.
+application map, and a missing backend entity on v2 tiers. With --trace it reads
+one API Management trace (the JSON returned by listTrace, or saved from the
+Portal) and says what happened to that request: whether the connector ran,
+what ran before it, where the inspection call went and how it ended, the
+verdict, and why a request was served uninspected.
 
 Text-based on purpose: API Management policy documents are not well-formed
 XML (Named Value references and C# expressions sit inside attribute values).
@@ -419,19 +423,220 @@ def lint_instance(reader: Reader) -> List[Finding]:
 
 # ---------------------------------------------------------------- CLI
 
+# ---------------------------------------------------------------- traces
+
+OOP_SUFFIX = ".oop.radwarecloud.net"
+_ERR_IGNORED_RE = re.compile(r"request to '([^']+)' resulted in error, error ignored: (.*)", re.S)
+_DIAG_MEANING = {
+    "sideband_error_or_timeout": "the inspection call failed or timed out",
+    "sideband_error_failopen_5xx": "SecurePath answered with a server error",
+    "wrong_api_key_redirect": "SecurePath did not recognise the Application ID / API key pair",
+    "no_app_mapping": "no application map entry matched this request (Step 3d)",
+    "config_incomplete": "the selected application has no Application ID, API key or endpoint (Step 3a / 3d)",
+    "app_map_invalid": "rdwr-app-map or the generated map is not valid JSON (Step 3d)",
+}
+
+
+def load_trace(path: str) -> dict:
+    with open(path, encoding="utf-8-sig") as f:
+        data = json.load(f)
+    if not isinstance(data, dict) or "traceEntries" not in data:
+        raise RuntimeError(f"{path} is not an API Management trace (no traceEntries)")
+    return data
+
+
+def _trace_entries(trace: dict):
+    te = trace.get("traceEntries") or {}
+    for sec in ("inbound", "backend", "outbound", "onError", "on-error"):
+        for e in te.get(sec) or []:
+            data = e.get("data")
+            text = data if isinstance(data, str) else (json.dumps(data) if data is not None else "")
+            yield sec, (e.get("source") or ""), text, (data if isinstance(data, dict) else {})
+
+
+def summarize_trace(trace: dict) -> dict:
+    """One dict describing what happened to the request, read from the trace entries."""
+    s = {"trace_id": trace.get("traceId"), "api": None, "operation": None,
+         "connector_ran": False, "connector_form": None, "before_connector": [],
+         "bypassed": False, "sideband_url": None, "sideband_error": None, "sideband_status": None,
+         "verdict_status": None, "oop_request_status": None, "diag": None, "wrong_api_key": False,
+         "oop_log": None, "response_log": None, "origin_status": None}
+    seen = False
+    for sec, src, text, data in _trace_entries(trace):
+        if src == "api-inspector" and isinstance(data.get("configuration"), dict):
+            cfg = data["configuration"]
+            s["api"] = (cfg.get("api") or {}).get("from")
+            op = cfg.get("operation") or {}
+            if op.get("method") or op.get("uriTemplate"):
+                s["operation"] = f"{op.get('method', '')} {op.get('uriTemplate', '')}".strip()
+        if sec == "inbound":
+            if not seen:
+                if src == "include-fragment" and "Entering policy fragment 'securepath-inbound'" in text:
+                    seen, s["connector_form"] = True, "fragments"
+                elif src == "set-variable" and data.get("name") == "rdwrAppEpAddr":
+                    seen, s["connector_form"] = True, "document"
+                elif src in REQUEST_ENDING and src not in s["before_connector"]:
+                    s["before_connector"].append(src)
+                continue
+            if src == "set-variable":
+                n, v = data.get("name"), data.get("value")
+                if n == "shouldBypassRadware" and v is True:
+                    s["bypassed"] = True
+                elif n == "rwStatus":
+                    s["verdict_status"] = v
+                elif n == "oopRequestStatusHeader":
+                    s["oop_request_status"] = v
+                elif n == "rdwrOopLog":
+                    s["oop_log"] = v
+                elif n == "radwareDiag" and v:
+                    s["diag"] = v
+            elif src == "request-forwarder" and isinstance(data.get("request"), dict) and not s["sideband_url"]:
+                s["sideband_url"] = data["request"].get("url")
+            elif src == "send-request":
+                m = _ERR_IGNORED_RE.search(text)
+                if m:
+                    s["sideband_url"] = s["sideband_url"] or m.group(1)
+                    s["sideband_error"] = m.group(2).strip().rstrip(".")
+                elif isinstance(data.get("response"), dict):
+                    resp = data["response"]
+                    s["sideband_status"] = (resp.get("status") or {}).get("code")
+                    for h in resp.get("headers") or []:
+                        if (h.get("name") or "").lower() == "location" and "wrong-api-key" in (h.get("value") or ""):
+                            s["wrong_api_key"] = True
+        elif sec == "backend" and src == "forward-request" and isinstance(data.get("response"), dict):
+            s["origin_status"] = (data["response"].get("status") or {}).get("code")
+        if src == "send-one-way-request" and "One way request was successfully send" in text:
+            s["response_log"] = "sent"
+    s["connector_ran"] = seen
+    if s["diag"] == "wrong_api_key_redirect":
+        s["wrong_api_key"] = True
+    if s["response_log"] is None and seen:
+        s["response_log"] = "not requested" if s["oop_log"] not in ("2", "3") else "not sent"
+    return s
+
+
+def lint_trace(trace: dict) -> List[Finding]:
+    s = summarize_trace(trace)
+    out: List[Finding] = []
+    where = "trace"
+    if not s["connector_ran"]:
+        out.append(Finding("T01", where, None,
+                           f"the connector did not run on this request (API {s['api'] or '?'}, {s['operation'] or '?'})",
+                           "install the connector at a scope that covers this API (Step 4), make sure the API's own "
+                           "inbound policy keeps <base /> (Step 2b), and confirm the request matched the API you expect"))
+        return out
+    for p in s["before_connector"]:
+        out.append(Finding("T02", where, None,
+                           f"'{p}' ran before the connector; every request it rejects is never inspected",
+                           "move the connector's include lines directly after <base /> so it runs first (Step 4)"))
+    host = _host_of(s["sideband_url"] or "")
+    if host and not host.lower().endswith(OOP_SUFFIX):
+        out.append(Finding("T03", where, None,
+                           f"the inspection call went to '{host}', which is not a SecurePath inspection endpoint",
+                           f"set rdwr-app-ep-addr (or the application-map entry) to <APP_ID>{OOP_SUFFIX} — the "
+                           "'.v1.radwarecloud.net' hostname is the application's front-end address (Step 3a, Step 3c)"))
+    err = s["sideband_error"] or ""
+    if err:
+        low = err.lower()
+        if "certificate" in low:
+            fix = ("establish trust for exactly this host (Step 1): CA certificates on Developer/Basic/Standard/"
+                   "Premium (Path A), a backend entity with certificate validation disabled on Standard v2/Premium v2 "
+                   "(Path B)")
+            if host and not host.lower().endswith(OOP_SUFFIX):
+                fix += "; fix T03 first — a backend entity created for the .oop host does not apply to this URL"
+            out.append(Finding("T04", where, None,
+                               f"the inspection call was rejected on TLS ({err}); the request was served uninspected", fix))
+        elif "timed out" in low or "timeout" in low or "canceled" in low or "cancelled" in low:
+            out.append(Finding("T04", where, None,
+                               f"the inspection endpoint did not answer within rdwr-app-ep-timeout-seconds ({err})",
+                               f"check that the gateway can reach {host or 'the endpoint'} on port 443 (VNet, NSG, "
+                               "firewall, forced tunnelling) and that the hostname is right (Step 3c)"))
+        elif "no such host" in low or "resolve" in low or "name resolution" in low or "nodename" in low:
+            out.append(Finding("T04", where, None, f"the inspection endpoint hostname does not resolve ({err})",
+                               "check rdwr-app-ep-addr for a typo (Step 3a, Step 3c)"))
+        else:
+            out.append(Finding("T04", where, None, f"the inspection call failed ({err}); the request was served uninspected",
+                               "check the endpoint host, port and TLS settings (Step 1, Step 3a); contact Radware with this trace"))
+    if s["wrong_api_key"]:
+        out.append(Finding("T05", where, None,
+                           "SecurePath redirected to wrong-api-key: the Application ID / API key pair is not recognised",
+                           "compare rdwr-app-id and rdwr-api-key with the application in the Radware Cloud portal (Step 3a, 3c)"))
+    vs = s["verdict_status"]
+    if isinstance(vs, int) and vs >= 500:
+        out.append(Finding("T06", where, None, f"SecurePath answered {vs}; the request was served uninspected",
+                           "usually transient on the SecurePath side; if it persists, contact Radware support with this trace"))
+    diag = s["diag"]
+    if diag and not out:
+        out.append(Finding("T07", where, None,
+                           f"inspection did not complete: X-Rdwr-Diag = {diag} ({_DIAG_MEANING.get(diag, 'see the Debugging section')})",
+                           "see the X-Rdwr-Diag table in Step 5 (4c)"))
+    if s["bypassed"] and not s["sideband_url"] and not out:
+        out.append(Finding("T08", where, None,
+                           "the connector ran but made no inspection call: the request matched a bypass rule",
+                           "expected for static extensions, methods in static-list-of-methods-not-to-inspect and inline "
+                           "trusted sources; if this request should be inspected, review those Named Values (Step 3b)"))
+    return out
+
+
+def format_trace_summary(s: dict) -> str:
+    call = "not made"
+    if s["sideband_url"]:
+        if s["sideband_error"]:
+            call = f"{s['sideband_url']} -> FAILED: {s['sideband_error']}"
+        else:
+            st = s["sideband_status"]
+            call = f"{s['sideband_url']} -> {st if st is not None else '?'}"
+            if s["oop_request_status"]:
+                call += f" ({s['oop_request_status']})"
+    if not s["connector_ran"]:
+        verdict = "-"
+    elif s["diag"]:
+        verdict = f"served uninspected (X-Rdwr-Diag = {s['diag']})"
+    elif s["verdict_status"] == 200 and s["oop_request_status"] == "allowed":
+        verdict = "allow"
+    elif s["verdict_status"] in (403,):
+        verdict = "block (403 from SecurePath)"
+    elif s["verdict_status"] in (301, 302):
+        verdict = f"redirect ({s['verdict_status']})"
+    elif s["verdict_status"] == 200:
+        verdict = "block (SecurePath 200 without an allow marker)"
+    elif s["bypassed"]:
+        verdict = "bypassed by rule (not inspected, by configuration)"
+    else:
+        verdict = "-"
+    lines = [
+        "Trace summary",
+        f"  trace id:               {s['trace_id'] or '-'}",
+        f"  API / operation:        {s['api'] or '-'} / {s['operation'] or '-'}",
+        f"  connector ran:          {'yes (' + s['connector_form'] + ')' if s['connector_ran'] else 'NO'}",
+        f"  policies before it:     {', '.join(s['before_connector']) if s['before_connector'] else 'none'}",
+        f"  inspection call:        {call}",
+        f"  verdict:                {verdict}",
+        f"  response-phase log:     {s['response_log'] or '-'}",
+        f"  origin answered:        {s['origin_status'] if s['origin_status'] is not None else '-'}",
+    ]
+    return "\n".join(lines)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Lint a SecurePath connector install on Azure API Management")
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--file", help="policy document to check")
     mode.add_argument("--live", action="store_true", help="read every policy on a live instance")
+    mode.add_argument("--trace", help="an API Management trace (JSON from listTrace) to read")
     ap.add_argument("--scope", choices=["global", "product", "api"], default="api", help="scope of --file")
     ap.add_argument("--label", default=None, help="label for --file findings")
     ap.add_argument("-g", "--resource-group")
     ap.add_argument("-n", "--apim")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
+    summary = None
     try:
-        if a.file:
+        if a.trace:
+            trace = load_trace(a.trace)
+            summary = summarize_trace(trace)
+            findings = lint_trace(trace)
+        elif a.file:
             with open(a.file, encoding="utf-8-sig") as f:
                 text = f.read()
             findings = lint_document(text, a.scope, a.label or a.file)
@@ -443,12 +648,16 @@ def main(argv=None) -> int:
             if not (a.resource_group and a.apim):
                 ap.error("--live needs -g RESOURCE_GROUP and -n APIM")
             findings = lint_instance(AzReader(a.resource_group, a.apim))
-    except (OSError, RuntimeError) as e:
+    except (OSError, RuntimeError, ValueError) as e:
         print(f"could not read: {e}", file=sys.stderr)
         return 2
     if a.json:
-        print(json.dumps([f.__dict__ for f in findings], indent=2))
+        payload = [f.__dict__ for f in findings]
+        print(json.dumps({"summary": summary, "findings": payload} if summary else payload, indent=2))
     else:
+        if summary:
+            print(format_trace_summary(summary))
+            print()
         for f in findings:
             print(f)
         print("clean" if not findings else f"{len(findings)} finding(s)")

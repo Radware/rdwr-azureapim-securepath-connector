@@ -819,25 +819,96 @@ explained in `tools/README.md`.
 
 # ▶ DEBUGGING
 
-## Start here: capture a trace
+## Start here: trace one request
 
 Almost every question about this connector is answered by one API Management trace. The inspection
 call is made with errors suppressed, by design, so that a problem on the inspection path never
-breaks your traffic. That means failures do not surface anywhere except the trace.
+breaks your traffic. That means failures do not surface anywhere except the trace: no error code,
+no failed-request metric, no alert. **A `200` from the gateway proves nothing about inspection.**
 
-1. Portal → your API Management instance → **APIs** → select your API.
-2. Open the **Test** tab and select an operation.
-3. Enable tracing for the call, then **Send**.
-4. Open the **Trace** tab on the response and expand the **Inbound** section.
-5. Find the `send-request` entry. That is the inspection call.
+There are three ways to get a trace. The first is one command and works everywhere, including
+private gateways and traffic that arrives through Front Door.
 
-If the Trace tab is unavailable, tracing is not enabled for the subscription you are testing with.
+### Option A — one command: capture and read *(recommended)*
 
-### Tracing without the Portal (private gateway, or traffic through Front Door)
+`tools/securepath-apim-trace.sh` obtains a one-hour debug token for the API, sends one request the
+way your clients do, fetches the trace by its id, saves it as `trace.json`, and prints a readout.
+Anything after the script name goes to `curl` unchanged, so add whatever your API needs to accept
+the request — a bearer token, a subscription key, a body.
 
-When the gateway has no public access, the Portal's Test tab cannot reach it. Tracing does not
-need the Portal: obtain a one-hour debug token for the API, send one real request with it (through
-Front Door or any path clients use), then fetch the trace by its id. Verified on Standard v2.
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+API_ID="your-api-resource-name"
+URL="https://your-client-facing-host/your/api/path"
+
+RG="$RG" APIM="$APIM" API_ID="$API_ID" URL="$URL" tools/securepath-apim-trace.sh -H "Authorization: Bearer <your JWT>"
+```
+
+Use the **URL your clients use** (through Front Door if that is how traffic arrives) and a request
+that your own policies accept. `API_ID` is the API's resource name from `az apim api list`; the
+debug token is issued per API, so a request that matches a different API produces no trace.
+
+A healthy request reads like this:
+
+```
+request: GET https://your-apim-instance.azure-api.net/orders/1 -> HTTP 200
+trace id: 6130d4b8a70b462892d104751b2a9d40
+trace saved: trace.json
+
+Trace summary
+  trace id:               1292df32-131c-4c5d-9588-66f9855e7ba4
+  API / operation:        /orders / GET /orders/{id}
+  connector ran:          yes (fragments)
+  policies before it:     none
+  inspection call:        https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net/orders/1 -> 200 (allowed)
+  verdict:                allow
+  response-phase log:     sent
+  origin answered:        200
+
+clean
+```
+
+The request that started this section — the connector installed correctly, the endpoint Named Value
+holding the application's front-end host instead of the inspection endpoint — reads like this:
+
+```
+request: GET https://your-apim-instance.azure-api.net/orders/1 -> HTTP 200
+trace id: 1315ea8b5b304fe899afe195c8e744f6
+trace saved: trace.json
+
+Trace summary
+  trace id:               9bae4bd5-1dd3-4b8c-9cd3-587cd8394cc8
+  API / operation:        /orders / GET /orders/{id}
+  connector ran:          yes (fragments)
+  policies before it:     none
+  inspection call:        https://afa37f7d53ce4e76a4988c4955c2d7e5.v1.radwarecloud.net/orders/1 -> FAILED: The remote certificate was rejected by the provided RemoteCertificateValidationCallback
+  verdict:                served uninspected (X-Rdwr-Diag = sideband_error_or_timeout)
+  response-phase log:     not requested
+  origin answered:        200
+
+T03 [trace]: the inspection call went to 'afa37f7d53ce4e76a4988c4955c2d7e5.v1.radwarecloud.net', which is not a SecurePath inspection endpoint. Fix: set rdwr-app-ep-addr (or the application-map entry) to <APP_ID>.oop.radwarecloud.net — the '.v1.radwarecloud.net' hostname is the application's front-end address (Step 3a, Step 3c)
+T04 [trace]: the inspection call was rejected on TLS (The remote certificate was rejected by the provided RemoteCertificateValidationCallback); the request was served uninspected. Fix: establish trust for exactly this host (Step 1): CA certificates on Developer/Basic/Standard/Premium (Path A), a backend entity with certificate validation disabled on Standard v2/Premium v2 (Path B); fix T03 first — a backend entity created for the .oop host does not apply to this URL
+2 finding(s)
+```
+
+Each `T` line names the problem, the fix, and the step of this guide that covers it. The codes are
+listed in `tools/README.md`. Exit code `0` means the trace shows a completed inspection, `1` a
+problem, `2` no trace could be captured (the message says why).
+
+**Reading a saved trace.** The readout works on any trace file — one you saved from the Portal, or
+one a colleague sent you:
+
+```bash
+python3 tools/securepath-apim-lint.py --trace trace.json
+```
+
+### Option B — the same three calls by hand (CLI or Postman)
+
+If you would rather see each step, or want to send the request from Postman, this is what the
+script does.
+
+**1. Get a debug token for the API** (valid one hour):
 
 ```bash
 RG="your-resource-group"
@@ -847,33 +918,74 @@ API_ID="your-api-resource-name"
 SUB=$(az account show --query id -o tsv)
 RES="/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
 BASE="https://management.azure.com$RES"
-TOKEN=$(az rest --method POST --uri "$BASE/gateways/managed/listDebugCredentials?api-version=2024-05-01" --headers "Content-Type=application/json" --body "{\"credentialsExpireAfter\":\"PT1H\",\"apiId\":\"$RES/apis/$API_ID\",\"purposes\":[\"tracing\"]}" --query token -o tsv)
-echo "$TOKEN"
+az rest --method POST --uri "$BASE/gateways/managed/listDebugCredentials?api-version=2024-05-01" --headers "Content-Type=application/json" --body "{\"credentialsExpireAfter\":\"PT1H\",\"apiId\":\"$RES/apis/$API_ID\",\"purposes\":[\"tracing\"]}" --query token -o tsv
 ```
 
-Send one request the way your clients do, adding `Apim-Debug-Authorization: <token>`; the response
-carries an `Apim-Trace-Id` header. Then:
+`apiId` is the API's ARM resource **path** (`/subscriptions/.../apis/<API_ID>`), not a
+`https://management.azure.com/...` URL — the latter is rejected with `LinkedInvalidPropertyId`.
+
+**2. Send one request with the token.** With curl:
+
+```bash
+URL="https://your-client-facing-host/your/api/path"
+TOKEN="the token from step 1"
+
+curl -s -D - -o /dev/null "$URL" -H "Apim-Debug-Authorization: $TOKEN" -H "Authorization: Bearer <your JWT>" | grep -i "apim-trace-id"
+```
+
+With **Postman**: build the request exactly as your client would (URL, method, body, your
+`Authorization` header), add a header `Apim-Debug-Authorization` with the token as its value, and
+send. The response headers contain `Apim-Trace-Id`; copy its value.
+
+**3. Fetch the trace by id:**
 
 ```bash
 RG="your-resource-group"
 APIM="your-apim-instance"
-TRACE_ID="the-apim-trace-id-from-the-response"
+TRACE_ID="the Apim-Trace-Id from step 2"
 
 SUB=$(az account show --query id -o tsv)
 BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
 az rest --method POST --uri "$BASE/gateways/managed/listTrace?api-version=2024-05-01" --headers "Content-Type=application/json" --body "{\"traceId\":\"$TRACE_ID\"}" -o json > trace.json
+python3 tools/securepath-apim-lint.py --trace trace.json
 ```
 
-In `trace.json`: `Entering policy fragment 'securepath-inbound'` (or the connector's own
-`set-variable` lines in the whole-document form) shows the connector ran on this API; a
-`send-request` entry with `request to 'https://<application id>.oop.radwarecloud.net/...' has
-been sent` shows the inspection call went out; `error ignored` right after it means that call
-failed and says why; `One way request was successfully send to` shows the response-phase log.
-If your own `validate-jwt` appears before the connector lines, the order is wrong (Step 4).
+From Postman instead of the CLI: `POST` the same `listTrace` URL with body `{"traceId":"<id>"}`,
+`Content-Type: application/json`, and an `Authorization: Bearer <ARM token>` header, where the ARM
+token comes from `az account get-access-token --query accessToken -o tsv`. Save the response body
+as `trace.json` and read it with the command above.
+
+### Option C — the Portal Test tab (gateway reachable from the Portal)
+
+1. Portal → your API Management instance → **APIs** → select your API.
+2. Open the **Test** tab and select an operation.
+3. Enable tracing for the call, then **Send**.
+4. Open the **Trace** tab on the response and expand the **Inbound** section.
+
+If the Trace tab is unavailable, tracing is not enabled for the subscription you are testing with.
+If the gateway is private or your traffic arrives through Front Door, the Test tab cannot reach it
+— use Option A. To read a Portal trace with the tool, download it as JSON and run
+`securepath-apim-lint.py --trace` on the file.
+
+## Reading a trace yourself
+
+If you read the raw trace rather than the readout, these are the lines that matter, in the order
+they appear in the **Inbound** section:
+
+| Line in the trace | What it tells you | If it is wrong |
+|---|---|---|
+| `Entering policy fragment 'securepath-inbound'` (fragments) or `set-variable ... rdwrAppEpAddr` (Form 3) | The connector ran on this request. **Absent: the connector is not in this API's policy path** — not installed at a covering scope, or the API's own policy lacks `<base />`. | Step 4, Step 2b |
+| Any `validate-jwt`, `check-header`, `ip-filter`, `rate-limit`, `return-response` **above** that line | Your policy runs first. Whatever it rejects is never seen by SecurePath. (A `check-header` on `X-Azure-FDID` ahead of the connector is a deliberate choice: direct-to-gateway probes are dropped before inspection.) | Step 4: move the include lines directly after `<base />` |
+| `request to 'https://<host>/...'` inside `send-request` | Where the inspection call went. **The host must end in `.oop.radwarecloud.net`.** A host ending `.v1.radwarecloud.net` is the application's front-end address: the Named Value is wrong. | Step 3a, 3c |
+| `... resulted in error, error ignored: <reason>` | The inspection call failed and the request was served uninspected. The reason names the cause: a certificate rejection (trust, Step 1 — for the host actually called), a timeout (network path to the endpoint), a hostname that does not resolve (typo). | Issue 1, Issue 8 |
+| `send-request` response with status `301`/`302` and a `location` containing `wrong-api-key` | SecurePath did not recognise the Application ID / API key pair. | Step 3a, Issue 3 |
+| `set-variable rwStatus = 200` and `oopRequestStatusHeader = allowed` | Inspection completed, verdict allow. `rwStatus = 403` is a block. `rwStatus >= 500` is a SecurePath-side error and the request is served uninspected. | — |
+| `set-header X-Rdwr-Diag: <value>` | The request was served **without** a completed inspection; the value says why (table in 4c). This header goes to your backend, so its access log is an ongoing health signal. | 4c |
+| `One way request was successfully send to https://<host>/...` in **Outbound** (or **On error**) | The response-phase log was sent. Absent when SecurePath did not request it (`x-rdwr-oop-log` other than `2`/`3`) — that is normal. | — |
 
 ## The one string to search for
 
-In the trace, search for:
+If you only have time for one search, search the trace for:
 
 ```
 error ignored
@@ -882,11 +994,12 @@ error ignored
 Every suppressed failure appears in that shape:
 
 ```
-... request to 'https://<your-endpoint>.oop.radwarecloud.net/...' resulted in error, error ignored: <reason>
+... request to 'https://<host>/...' resulted in error, error ignored: <reason>
 ```
 
 **If that line is present, the request was not inspected.** It was forwarded to your backend anyway
-and the client received a normal response. If it is absent, the inspection call completed.
+and the client received a normal response. If it is absent, the inspection call completed — then
+look at the host in the `request to` line and at `rwStatus`.
 
 ## Issue 1 — Certificate rejected
 

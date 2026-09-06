@@ -31,6 +31,47 @@ so no XML parser is involved and the tool never rewrites a document.
 
     python3 -m pytest tools/tests -q
 
+### Reading a trace: `--trace`
+
+```bash
+python3 tools/securepath-apim-lint.py --trace trace.json          # readout + findings
+python3 tools/securepath-apim-lint.py --trace trace.json --json   # {"summary": ..., "findings": [...]}
+```
+
+`trace.json` is the JSON returned by `gateways/managed/listTrace` (what `securepath-apim-trace.sh`
+saves) or a trace downloaded from the Portal's Test tab. The readout says whether the connector ran
+and in which form, what ran before it, where the inspection call went and how it ended, the verdict,
+whether the response-phase log was sent, and what the origin answered. Findings:
+
+| Code | Meaning | Where to look |
+|---|---|---|
+| T01 | The connector did not run on this request | Step 4 (scope), Step 2b (`<base />`), the request matched another API |
+| T02 | A request-ending policy of yours ran before the connector | Step 4: move the include lines directly after `<base />` |
+| T03 | The inspection call went to a host that is not `<APP_ID>.oop.radwarecloud.net` (typically the `.v1` front-end host) | Step 3a, 3c: `rdwr-app-ep-addr` or the map entry |
+| T04 | The inspection call failed (`error ignored`): certificate rejected, timeout, or hostname not resolving — the message says which | Step 1 (trust for the host actually called), network path, Step 3c |
+| T05 | SecurePath redirected to `wrong-api-key` | Step 3a: Application ID / API key |
+| T06 | SecurePath answered 5xx; served uninspected | usually transient; contact Radware with the trace if sustained |
+| T07 | Served uninspected for another reason (`X-Rdwr-Diag` value: `no_app_mapping`, `config_incomplete`, `app_map_invalid`, ...) | Step 3d, the `X-Rdwr-Diag` table in Step 5 |
+| T08 | The connector ran but made no inspection call: a bypass rule matched | Step 3b (static extensions, methods not to inspect, inline trusted sources) — expected for such requests |
+
+Exit code 0 when the trace shows a completed inspection, 1 with findings, 2 when the file is not a trace.
+
+## securepath-apim-trace.sh
+
+Captures one trace without the Portal and runs the readout above on it: debug token for the API →
+one request through the URL your clients use, with `Apim-Debug-Authorization` → `listTrace` by the
+returned `Apim-Trace-Id` → `trace.json` → readout. Bash (Cloud Shell, macOS, Linux, Git Bash);
+needs `az` logged in and `curl`; `python3` optional (without it the key lines are grepped).
+
+```bash
+RG=my-rg APIM=my-apim API_ID=orders-api URL=https://api.example.com/orders/1 tools/securepath-apim-trace.sh -H "Authorization: Bearer <JWT>"
+```
+
+Everything after the script name is passed to `curl`. `METHOD` (default `GET`) and `OUT` (default
+`trace.json`) are also settable. Exit 0 / 1 / 2 as for `--trace`, with 2 also covering "no debug
+token" and "no `Apim-Trace-Id` in the response" (request did not reach the instance, matched a
+different API than `API_ID`, or a proxy removed the header).
+
 ## securepath-apim-sync
 
 Keeps the application map (`rdwr-app-map`) and, on Standard v2 / Premium v2, the backend

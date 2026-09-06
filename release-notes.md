@@ -77,6 +77,20 @@ Two new Named Values (22 in total): `rdwr-app-map` and `rdwr-true-host-header`.
 
 ---
 
+### Debugging: trace one request from the command line, and read it
+
+- **`tools/securepath-apim-trace.sh`** captures one API Management trace without the Portal —
+  debug token for the API, one request through the URL your clients use (Front Door included),
+  fetch by `Apim-Trace-Id`, save, read. Anything after the script name is passed to `curl`.
+- **`securepath-apim-lint.py --trace trace.json`** reads any trace (from the script, the Portal,
+  or a colleague) and prints a readout: whether the connector ran, what ran before it, where the
+  inspection call went and how it ended, the verdict, and why a request was served uninspected.
+  Findings T01–T08 name the cause, the fix and the step of the README that covers it.
+- The README Debugging section now leads with these, shows a healthy readout and the readout of the
+  most common field failure (the `.v1` front-end host in `rdwr-app-ep-addr`, which the backend
+  entity for the `.oop` host cannot cover), and adds a line-by-line table for reading a raw trace.
+  Both readouts were produced on a Standard v2 instance against a live SecurePath application.
+
 ## v1.3.4 (2026-08-16)
 
 **Documentation and packaging release. The policy XML is unchanged from v1.3.2** — there is nothing
