@@ -1,69 +1,100 @@
-# SecurePath Endpoint CA Certificates
+# Radware certificate authority for the inspection endpoint
 
-The SecurePath endpoint (`*.oop.radwarecloud.net`) uses a private Radware CA chain, not a public CA. Azure APIM must trust this chain for the `<send-request>` (sideband) and `<send-one-way-request>` (response-phase log) policies to succeed over HTTPS.
+The SecurePath inspection endpoint (`<APP_ID>.oop.radwarecloud.net`) presents a certificate
+issued by a private Radware certificate authority. API Management does not trust it by default,
+and every inspection call fails until trust is established — the connector then serves traffic
+uninspected and says so (main README, Debugging, Issue 1).
 
-## Certificate Chain
+| File | Content | Use |
+|---|---|---|
+| `rdwr-root-ca.pem` | the root authority (`RDWR Root R1`) | upload as a **Root** CA certificate |
+| `rdwr-intermediate-ca.pem` | the issuing authority (`RDWR CA 1A1`) | upload as an **Intermediate** CA certificate |
+| `rdwr-ca-chain.pem` | both, in one file | for tools that take a chain (not needed by API Management) |
 
-| File | Subject | Issuer | Expires |
-|------|---------|--------|---------|
-| `rdwr-root-ca.pem` | RDWR Root R1 | RDWR Root R1 (self-signed) | 2042-01-25 |
-| `rdwr-intermediate-ca.pem` | RDWR CA 1A1 | RDWR Root R1 | 2032-01-28 |
-| `rdwr-ca-chain.pem` | Both certificates combined (informational; APIM needs them uploaded individually) | - | - |
+These are public certificates presented on every TLS handshake, not secrets.
 
-## Azure APIM Setup
+## Which tiers need them
 
-How trust is established depends on your API Management tier.
+**Developer, Basic, Standard, Premium** have a service-level CA certificate store: upload both
+certificates there (main README, Step 1, Path A). **Standard v2 and Premium v2** have no such
+store; trust is configured on a backend entity instead (Path B), and these files are not used.
 
-**Developer / Basic / Standard / Premium.** Upload both the root and intermediate CA certificates to the **CA certificates** store, as described below. The certificate is then fully validated on every inspection call.
+## Uploading — Azure Portal *(the path Radware executed for this release)*
 
-**Standard v2 / Premium v2.** These tiers have no service-level CA certificate store, and the platform rejects any attempt to add one. **Do not upload these files there** — instead, create a backend entity for the SecurePath endpoint with certificate validation disabled, as described in **Step 1 Path B** of the main README. That is the supported route on v2, and it requires no policy change.
+1. Rename the files to `.cer`: PEM and CER are the same Base64 X.509 format, and the upload
+   dialog filters on the extension.
+2. Portal → your API Management instance → **Security → Certificates → CA certificates → + Add**.
+3. `rdwr-root-ca.cer`: Certificate ID `rdwr-root-r1`, store **Trusted Root Certification
+   Authorities**, no password. **Add**, then **Save**.
+4. `rdwr-intermediate-ca.cer`: Certificate ID `rdwr-ca-1a1`, store **Intermediate Certification
+   Authorities**. **Add**, then **Save**.
 
-**Consumption.** Not currently supported. Contact Radware before deploying.
+Under *Security → Certificates* there are two tabs. The plain **Certificates** tab holds client
+certificates used to authenticate *to* a backend; putting the Radware CAs there has no effect on
+the inspection call. They must go in **CA certificates**. Provisioning shows as *"CA certificate
+update in progress"* and can take 15 minutes or more.
 
-> **Important — `az apim` CLI does NOT support CA certificate management.** The `az apim` command tree has no `certificate` or `certificate-authority` subcommand (verify with `az apim --help`). Earlier revisions of these docs incorrectly suggested `az apim certificate create` and `az apim certificate-authority create` — neither command exists in `az apim`. The supported programmatic paths are PowerShell and ARM/Bicep; for one-time onboarding the Portal is the simplest.
+## Uploading — PowerShell *(from Microsoft's documentation; not executed by Radware for this release)*
 
-### Option 1: Azure Portal (recommended for one-time setup)
+`az apim` has no CA-certificate command. In PowerShell the two certificates become system
+certificate configurations that are applied to the instance with `Set-AzApiManagement`:
 
-1. **Rename the `.pem` files to `.cer`** before uploading. APIM's upload dialog filters by file extension and only accepts `.cer` — but PEM and CER are the same Base64 X.509 format, so renaming is sufficient (no conversion needed):
-   ```bash
-   cp rdwr-root-ca.pem rdwr-root-ca.cer
-   cp rdwr-intermediate-ca.pem rdwr-intermediate-ca.cer
-   ```
-2. Open the Azure Portal, navigate to your APIM instance.
-3. In the left menu, under **Security**, select **Certificates** → **CA certificates** → **+ Add**.
-4. Browse to `rdwr-root-ca.cer`. **Store** = *Trusted Root Certification Authorities*. Certificate ID = `rdwr-root-r1`. Password = (leave blank — only the public key is needed). Click **Add** → **Save**.
-5. Click **+ Add** again. Browse to `rdwr-intermediate-ca.cer`. **Store** = *Intermediate Certification Authorities*. Certificate ID = `rdwr-ca-1a1`. Click **Add** → **Save**.
+```powershell
+$root = New-AzApiManagementSystemCertificate -StoreName "Root" -PfxPath ".\certs\rdwr-root-ca.pem"
+$int  = New-AzApiManagementSystemCertificate -StoreName "CertificateAuthority" -PfxPath ".\certs\rdwr-intermediate-ca.pem"
+$apim = Get-AzApiManagement -ResourceGroupName "your-resource-group" -Name "your-apim-instance"
+$apim.SystemCertificates = @($root, $int)
+Set-AzApiManagement -InputObject $apim
+```
 
-The provisioning step ("CA certificate update in progress") can take 15+ minutes on larger instances.
+## Uploading — ARM / Bicep *(from the ARM schema; not executed by Radware for this release)*
 
-### Option 2: Azure PowerShell (for scripted environments)
+CA certificates are a property of the service resource itself (`properties.certificates`), not a
+child resource. The `Microsoft.ApiManagement/service/certificates` child resource is the client
+certificate store mentioned above and does not establish trust for the inspection call.
 
-Microsoft's documented PowerShell command for this is `New-AzApiManagementSystemCertificate`. See [Microsoft's CA-certificate doc](https://learn.microsoft.com/en-us/azure/api-management/api-management-howto-ca-certificates) for the parameter list — the cmdlet accepts the certificate file path directly (PEM works in PowerShell; the file-extension restriction is a Portal-upload-dialog filter, not a service-side requirement).
+```bicep
+param apimName string
+param location string        // az apim show --query location
+param skuName string         // az apim show --query sku.name
+param skuCapacity int        // az apim show --query sku.capacity
+param publisherEmail string  // az apim show --query publisherEmail
+param publisherName string   // az apim show --query publisherName
 
-### Option 3: ARM / Bicep (for IaC pipelines)
-
-The CA-certificate ARM resource type is `Microsoft.ApiManagement/service/certificates`:
-
-```json
-{
-  "type": "Microsoft.ApiManagement/service/certificates",
-  "apiVersion": "2022-08-01",
-  "name": "[concat(parameters('apimName'), '/rdwr-root-r1')]",
-  "properties": {
-    "data": "[base64(parameters('rdwrRootCaPem'))]"
+resource trust 'Microsoft.ApiManagement/service@2024-05-01' = {
+  name: apimName
+  location: location
+  sku: { name: skuName, capacity: skuCapacity }
+  properties: {
+    publisherEmail: publisherEmail
+    publisherName: publisherName
+    certificates: [
+      { encodedCertificate: base64(loadTextContent('../certs/rdwr-root-ca.pem')), storeName: 'Root' }
+      { encodedCertificate: base64(loadTextContent('../certs/rdwr-intermediate-ca.pem')), storeName: 'CertificateAuthority' }
+    ]
   }
 }
 ```
 
-Repeat for `rdwr-ca-1a1` with the intermediate CA contents.
+An update to the service resource must repeat the properties the instance already has; run
+`what-if` before deploying it.
 
-## Verification
+## Confirm they landed in the trust store
 
-After uploading, test the sideband connection by sending a request through APIM to a SecurePath-protected endpoint. If the certificates are not trusted, the `<send-request>` policy will fail with a TLS handshake error in the API Inspector trace (look for `RemoteCertificateChainErrors` or similar).
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+az apim show -g "$RG" -n "$APIM" --query "certificates[].{store:storeName,subject:certificate.subject}" -o table
+```
+
+Expect two rows, one `Root` and one `CertificateAuthority`. Then trace one request (main README,
+Debugging, Option A): the readout shows the inspection call answering, with no `error ignored`.
 
 ## Notes
 
-- Both certificates (root AND intermediate) must be uploaded. The intermediate alone is not sufficient.
-- These certificates apply to all SecurePath endpoints (`*.oop.radwarecloud.net`).
-- If your network uses a TLS-inspecting proxy (e.g., Zscaler), you may also need to upload that proxy's root CA to the APIM CA certificates store.
-- APIM enforces a hard limit of **10 CA certificates per instance**.
+- Both certificates are needed; the root alone is not sufficient.
+- They cover every SecurePath inspection endpoint (`*.oop.radwarecloud.net`).
+- If a TLS-inspecting proxy sits between the gateway and the internet, its own root certificate
+  must be uploaded the same way.
+- API Management allows at most 10 CA certificates per instance.

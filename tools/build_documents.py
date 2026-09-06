@@ -40,7 +40,7 @@ def render():
     inbound = fragment_body("inbound")
     assert "include-fragment" not in inbound, "the whole document must not reference fragments"
     return (
-        HEADER
+        HEADER.format(v=VERSION)
         + "<policies>\n"
         + "    <inbound>\n        <base />\n" + inbound + "\n    </inbound>\n"
         + "    <backend>\n        <base />\n    </backend>\n"

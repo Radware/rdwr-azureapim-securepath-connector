@@ -53,7 +53,11 @@ class FakeAz:
         if method == "GET":
             return json.dumps({"sku": {"name": self.sku_name}})
         if method == "PUT":
-            body = json.loads(args[8])
+            raw = args[8]
+            if raw.startswith("@"):
+                with open(raw[1:], encoding="utf-8") as f:
+                    raw = f.read()
+            body = json.loads(raw)
             self.puts.append((uri, body))
             if "/namedValues/" in uri:
                 self.keys[uri.split("/namedValues/")[1].split("?")[0]] = body["properties"]["value"]
@@ -221,3 +225,47 @@ def test_cli_render_offline(tmp_path, capsys):
     out = tmp_path / "bundle"
     assert sync.main(["render", "-g", "rg", "-n", "apim", "--from-file", str(apps), "--offline", "--out-dir", str(out)]) == 0
     assert (out / "apply.sh").exists() and "bundle ready" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- backend naming, export permissions, credential sources
+
+def test_backend_name_never_reuses_an_existing_name():
+    az = FakeAz(sku="StandardV2", backends=[("securepath-sideband-2", "https://zzzz.oop.radwarecloud.net")])
+    w = sync.AzWriter("rg", "apim", run=az)
+    assert w.backend_name(2, "aaaa.oop.radwarecloud.net") == "securepath-sideband-3"
+
+
+def test_put_sends_the_body_through_a_file_not_the_command_line():
+    seen = []
+    def run(args):
+        if args[:2] == ["account", "show"]:
+            return "sub-1\n"
+        seen.append(args); return ""
+    w = sync.AzWriter("rg", "apim", run=run)
+    w.write_key("rdwr-app-key-x", "SECRET")
+    body_arg = seen[-1][seen[-1].index("--body") + 1]
+    assert body_arg.startswith("@") and "SECRET" not in " ".join(seen[-1])
+
+
+def test_export_file_is_private_and_warns(tmp_path):
+    out = tmp_path / "p.json"
+    msgs = []
+    sync.export_parameters(sync.project_cloud_apps(APPS), str(out), log=msgs.append)
+    assert oct(out.stat().st_mode & 0o777) == "0o600" and "API keys" in msgs[0]
+
+
+def test_cloud_key_from_environment_and_file(tmp_path, monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(sync, "fetch_cloud_apps", lambda key, ctx: calls.append((key, ctx)) or APPS)
+    monkeypatch.setenv("RDWR_CLOUD_API_KEY", "env-key"); monkeypatch.setenv("RDWR_CLOUD_CONTEXT", "ctx-1")
+    assert sync.main(["export", "--out", str(tmp_path / "a.json")]) == 0
+    kf = tmp_path / "key.txt"; kf.write_text("file-key\n")
+    assert sync.main(["export", "--cloud-api-key-file", str(kf), "--out", str(tmp_path / "b.json")]) == 0
+    assert calls == [("env-key", "ctx-1"), ("file-key", "ctx-1")]
+
+
+def test_include_provisioning_works_on_the_api_envelope(tmp_path, capsys):
+    f = tmp_path / "apps.json"
+    f.write_text(json.dumps({"content": APPS}))
+    assert sync.main(["export", "--from-file", str(f), "--include-provisioning", "--out", str(tmp_path / "o.json")]) == 0
+    assert "3 entries" in capsys.readouterr().out

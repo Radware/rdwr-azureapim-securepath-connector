@@ -20,7 +20,8 @@ def test_rendered_document_contains_all_three_bodies_and_lints_clean():
     assert doc.count("<base />") == 4
     assert 'name="rdwrAppEpAddr"' in doc  # inbound body
     assert "x-rdwr-o2v-status" in doc  # outbound/on-error bodies
-    assert "x-rdwr-o2h-gateway-error" in doc  # on-error body
+    assert "rdwrLogSent" in doc  # on-error body (log-once guard)
+    assert doc.startswith("<!-- Radware SecurePath Connector for Azure API Management, v1.4.0 (policy document") and "{v}" not in doc
     assert "<fragment>" not in doc and "</fragment>" not in doc
     assert lint.lint_document(doc, "api", "generated") == []
 

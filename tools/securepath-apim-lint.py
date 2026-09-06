@@ -19,6 +19,7 @@ Exit codes: 0 clean, 1 findings, 2 could not read.
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -43,8 +44,12 @@ REQUIRED_NAMED_VALUES = (
     "static-inspect-if-query-string-exists", "chunked-request-allowed-content-types",
     "rdwr-inline-trusted-sources", "rdwr-inline-headers-enabled",
     # v1.4.0
-    "rdwr-app-map", "rdwr-true-host-header")
-NEW_IN_140 = {"rdwr-app-map", "rdwr-true-host-header"}
+    "rdwr-app-map", "rdwr-true-host-header", "rdwr-custom-bot-block-statuses")
+NEW_IN_140 = {"rdwr-app-map", "rdwr-true-host-header", "rdwr-custom-bot-block-statuses"}
+# the fragments shipped next to this tool (package layout: tools/ and fragments/ side by side)
+SHIPPED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fragments")
+SHIPPED_FRAGMENTS = ("securepath-inbound", "securepath-outbound", "securepath-onerror")
+STANDARD_VERDICT_STATUSES = (200, 301, 302, 403)
 DISABLE_TOKENS = {"", "-", "disabled", "off", "false", "none", "~", "##disabled##"}
 
 _BASE_RE = re.compile(r"<base\s*/>")
@@ -68,9 +73,17 @@ class Finding:
 
 # ---------------------------------------------------------------- documents
 
+def normalize_document(text: str) -> str:
+    """A policy written on one line (the All APIs policy from README Step 4 / the Bicep
+    template) gets one element per line so the line-based checks can see its sections."""
+    if re.search(r"^\s*<inbound\b", text, re.M):
+        return text
+    return re.sub(r">\s*<", ">\n<", text)
+
+
 def split_sections(text: str) -> Dict[str, Tuple[int, List[str]]]:
     """Section name -> (1-based line of its opening tag, the lines inside it)."""
-    lines = text.splitlines()
+    lines = normalize_document(text).splitlines()
     out: Dict[str, Tuple[int, List[str]]] = {}
     for name in SECTIONS:
         open_re = re.compile(rf"^\s*<{name}(\s*/>|\s*>)")
@@ -145,7 +158,7 @@ def lint_document(text: str, scope: str, label: str) -> List[Finding]:
                 "before your own policies"))
 
     # L05: set-variable without a value (manual merge damage)
-    for i, ln in enumerate(text.splitlines(), start=1):
+    for i, ln in enumerate(normalize_document(text).splitlines(), start=1):
         m = _EMPTY_SETVAR_RE.search(ln)
         if m:
             findings.append(Finding(
@@ -210,6 +223,17 @@ class AzReader(Reader):
                         "--uri", f"{self.base}{path}?api-version={API_VERSION}{query}"])
         return self._parse(raw)
 
+    def _list(self, path: str) -> List[dict]:
+        """Every item of a paged ARM collection (nextLink followed)."""
+        items: List[dict] = []
+        page = self._get(path)
+        while True:
+            items.extend(page.get("value", []))
+            link = page.get("nextLink")
+            if not link:
+                return items
+            page = self._parse(self._az(["rest", "--method", "GET", "--uri", link]))
+
     @staticmethod
     def _parse(raw: str) -> dict:
         # Policy responses carry a UTF-8 byte-order mark; az rest passes it through.
@@ -242,22 +266,27 @@ class AzReader(Reader):
         return self._policy("")
 
     def apis(self):
-        return [a["name"] for a in self._get("/apis").get("value", [])]
+        return [a["name"] for a in self._list("/apis")]
 
     def api_policy(self, api_id):
         return self._policy(f"/apis/{api_id}")
 
     def products(self):
-        return [p["name"] for p in self._get("/products").get("value", [])]
+        return [p["name"] for p in self._list("/products")]
 
     def product_policy(self, product_id):
         return self._policy(f"/products/{product_id}")
 
     def named_values(self):
+        # Secret values are read only for the connector's own Named Values; other workloads'
+        # secrets on the instance are listed by name and never read.
         out: Dict[str, Optional[str]] = {}
-        for nv in self._get("/namedValues").get("value", []):
+        for nv in self._list("/namedValues"):
             name, props = nv["name"], nv.get("properties") or {}
-            if props.get("secret"):
+            ours = name in REQUIRED_NAMED_VALUES or name.startswith("rdwr-app-key-")
+            if props.get("secret") and not ours:
+                out[name] = None
+            elif props.get("secret"):
                 raw = self._az(["rest", "--method", "POST", "--uri",
                                 f"{self.base}/namedValues/{name}/listValue?api-version={API_VERSION}"])
                 out[name] = self._parse(raw).get("value")
@@ -266,8 +295,7 @@ class AzReader(Reader):
         return out
 
     def backends(self):
-        return [(b.get("properties") or {}).get("url", "")
-                for b in self._get("/backends").get("value", [])]
+        return [(b.get("properties") or {}).get("url", "") for b in self._list("/backends")]
 
     def fragment(self, fragment_id):
         raw = (self._az(["rest", "--method", "GET", "--uri",
@@ -295,6 +323,76 @@ def _host_of(url: str) -> str:
     return re.sub(r"^https?://", "", url or "").split("/")[0].split(":")[0].lower()
 
 
+def shipped_fragment(fragment_id: str) -> Optional[str]:
+    path = os.path.join(SHIPPED_DIR, f"{fragment_id}.fragment.xml")
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8-sig") as f:
+        return f.read()
+
+
+def _norm_xml(text: str) -> str:
+    # the instance stores a fragment re-indented (tabs, CRLF): compare content, not layout
+    return "\n".join(line.strip() for line in (text or "").replace("\r\n", "\n").strip().split("\n") if line.strip())
+
+
+def check_shipped_fragments(reader: Reader, uses_fragments: bool) -> List[Finding]:
+    """L14: a connector fragment on the instance must be the one shipped in this package. A
+    fragment PUT is asynchronous — the CLI reports success before validation finishes — so a
+    rejected registration leaves the previous fragment in place without any error."""
+    out: List[Finding] = []
+    if not uses_fragments:
+        return out
+    for fid in SHIPPED_FRAGMENTS:
+        shipped = shipped_fragment(fid)
+        if shipped is None:
+            continue
+        live = reader.fragment(fid)
+        if live is None:
+            out.append(Finding("L14", "fragments", None, f"the {fid} fragment is referenced but not registered on the instance",
+                               f"register fragments/{fid}.fragment.xml (README Step 4, Form 1)"))
+        elif _norm_xml(live) != _norm_xml(shipped):
+            out.append(Finding("L14", "fragments", None,
+                               f"the {fid} fragment on the instance differs from fragments/{fid}.fragment.xml in this package",
+                               "re-register it from this package and run this check again: a fragment registration is asynchronous and "
+                               "the CLI reports success before validation, so a rejected upload silently keeps the previous fragment"))
+    return out
+
+
+def check_bot_block_statuses(value: str, bot_manager: str, where: str) -> List[Finding]:
+    """L13: rdwr-custom-bot-block-statuses (or a map entry's bot_block_statuses) must be a disable
+    token, "*", or a comma-separated list of status codes; 200/301/302/403 have no effect there,
+    5xx is never applied, and the whole setting is ignored unless Bot Manager is enabled."""
+    out: List[Finding] = []
+    v = (value or "").strip()
+    if v.lower() in DISABLE_TOKENS:
+        return out
+    if v != "*":
+        parts = [p.strip() for p in v.split(",") if p.strip()]
+        bad = [p for p in parts if not p.isdigit()]
+        if bad or not parts:
+            out.append(Finding("L13", "named-values", None,
+                               f"{where} '{v}' is not a status-code list: the connector ignores the setting",
+                               "use a comma-separated list of status codes such as 429,418, or * for any, or ##DISABLED##"))
+            return out
+        codes = [int(p) for p in parts]
+        no_effect = sorted({c for c in codes if c in STANDARD_VERDICT_STATUSES})
+        if no_effect:
+            out.append(Finding("L13", "named-values", None,
+                               f"{where} lists {', '.join(map(str, no_effect))}, which the connector handles as standard verdicts before this list is consulted",
+                               "remove them; the list is for statuses outside 200/301/302/403"))
+        fivexx = sorted({c for c in codes if c >= 500})
+        if fivexx:
+            out.append(Finding("L13", "named-values", None,
+                               f"{where} lists {', '.join(map(str, fivexx))}: a 5xx from SecurePath is an endpoint problem and is never relayed as a block",
+                               "remove them; a 5xx always fails open"))
+    if (bot_manager or "").strip().lower() != "true":
+        out.append(Finding("L13", "named-values", None,
+                           f"{where} is set but rdwr-bot-manager-enabled is not true, so it is ignored",
+                           "set rdwr-bot-manager-enabled=true if Bot Manager is enabled on the application, or set the list to ##DISABLED##"))
+    return out
+
+
 def lint_instance(reader: Reader) -> List[Finding]:
     findings: List[Finding] = []
     docs: List[Tuple[str, str, Optional[str]]] = [("global", "global", reader.global_policy())]
@@ -319,8 +417,9 @@ def lint_instance(reader: Reader) -> List[Finding]:
     for scope, label, text in docs:
         if not text:
             continue
+        product_has = any(sc == "product" for sc, _ in with_connector)
         for f in lint_document(text, scope, label):
-            if f.code == "L03" and not global_has:
+            if f.code == "L03" and not (global_has or (scope == "api" and product_has)):
                 continue  # <base /> only matters when a wider scope carries the connector
             findings.append(f)
 
@@ -381,22 +480,28 @@ def lint_instance(reader: Reader) -> List[Finding]:
                     if isinstance(entry, dict):
                         ref = str(entry.get("api_key", ""))
                         if ref.startswith("{{") and ref.endswith("}}") and ref[2:-2] not in nvs:
-                            findings.append(Finding("L13", "named-values", None, f"generated map entry '{key}' references the key Named Value {ref[2:-2]}, which does not exist",
+                            findings.append(Finding("L12", "named-values", None, f"generated map entry '{key}' references the key Named Value {ref[2:-2]}, which does not exist",
                                                     "run securepath-apim-sync apply (it writes the key Named Values before the fragment)"))
                         if entry.get("endpoint") and entry.get("ssl", True) is not False:
                             endpoints.add(str(entry["endpoint"]).lower())
             except ValueError as e:
                 findings.append(Finding("L10", "fragments", None, f"the generated map is not valid JSON ({e})",
                                         "run securepath-apim-sync apply again"))
+    findings.extend(check_shipped_fragments(reader, uses_fragments))
     app_map_raw = nvs.get("rdwr-app-map")
+    app_map = {}
     if app_map_raw is not None and app_map_raw.strip().lower() not in DISABLE_TOKENS:
         try:
             app_map = parse_app_map(app_map_raw)
             if not isinstance(app_map, dict):
                 raise ValueError("top level must be an object")
             for key, entry in app_map.items():
+                if not isinstance(entry, dict):
+                    findings.append(Finding("L10", "named-values", None, f"rdwr-app-map entry '{key}' is not an object",
+                                            "each entry is an object with app_id, api_key and endpoint"))
+                    continue
                 for field in ("app_id", "api_key", "endpoint"):
-                    if not isinstance(entry, dict) or not entry.get(field):
+                    if not entry.get(field):
                         findings.append(Finding("L10", "named-values", None, f"rdwr-app-map entry '{key}' lacks '{field}'",
                                                 "each entry needs app_id, api_key and endpoint"))
                 if isinstance(entry, dict):
@@ -404,6 +509,14 @@ def lint_instance(reader: Reader) -> List[Finding]:
                     if bp is not None and not str(bp).startswith("/"):
                         findings.append(Finding("L10", "named-values", None, f"rdwr-app-map entry '{key}' base_path '{bp}' must start with /",
                                                 "use the API's path prefix, for example /orders"))
+                    for field, ok, want in (("port", lambda v: isinstance(v, int) and not isinstance(v, bool), "a number such as 443"),
+                                            ("ssl", lambda v: isinstance(v, bool), "true or false"),
+                                            ("bot_manager", lambda v: isinstance(v, bool), "true or false"),
+                                            ("bot_block_statuses", lambda v: isinstance(v, str), "a quoted list such as '429,418'")):
+                        if entry.get(field) is not None and not ok(entry[field]):
+                            findings.append(Finding("L10", "named-values", None,
+                                                    f"rdwr-app-map entry '{key}' {field} is {json.dumps(entry[field])}, not {want}",
+                                                    "the connector treats a mistyped entry as invalid and serves that application's requests uninspected (X-Rdwr-Diag: app_map_invalid)"))
                     if entry.get("endpoint") and entry.get("ssl", True) is not False:
                         endpoints.add(str(entry["endpoint"]).lower())
         except ValueError as e:
@@ -418,6 +531,13 @@ def lint_instance(reader: Reader) -> List[Finding]:
                     f"no backend entity matches endpoint {host}; on v2 tiers the inspection call fails "
                     f"TLS validation and traffic is served uninspected",
                     "create the backend entity for this endpoint (README Step 1, Path B)"))
+    if "rdwr-custom-bot-block-statuses" in nvs:
+        findings.extend(check_bot_block_statuses(nvs.get("rdwr-custom-bot-block-statuses", ""), nvs.get("rdwr-bot-manager-enabled", ""), "rdwr-custom-bot-block-statuses"))
+    for key, entry in (app_map.items() if isinstance(app_map, dict) else []):
+        if isinstance(entry, dict) and entry.get("bot_block_statuses") is not None:
+            bm = entry.get("bot_manager")
+            bm_str = "true" if bm is True else ("false" if bm is False else nvs.get("rdwr-bot-manager-enabled", ""))
+            findings.extend(check_bot_block_statuses(str(entry["bot_block_statuses"]), bm_str, f"rdwr-app-map entry '{key}' bot_block_statuses"))
     return findings
 
 
@@ -427,6 +547,16 @@ def lint_instance(reader: Reader) -> List[Finding]:
 
 OOP_SUFFIX = ".oop.radwarecloud.net"
 _ERR_IGNORED_RE = re.compile(r"request to '([^']+)' resulted in error, error ignored: (.*)", re.S)
+FAIL_OPEN_DIAGS = ("sideband_error_or_timeout", "wrong_api_key_redirect", "no_app_mapping", "config_incomplete", "app_map_invalid")
+FAIL_OPEN_PREFIXES = ("sideband_error_failopen_", "unexpected_status_")
+ENFORCED_PREFIXES = ("action_enforced_status_", "custom_bot_block_status_", "redirect_issued_")
+INFO_DIAGS = {"uzmcr_allow": "allow (Bot Manager mobile exception: uzmcr)", "multipart_headers_only": "allow (multipart body: headers-only inspection)"}
+
+
+def _is_fail_open(diag: str) -> bool:
+    return diag in FAIL_OPEN_DIAGS or diag.startswith(FAIL_OPEN_PREFIXES)
+
+
 _DIAG_MEANING = {
     "sideband_error_or_timeout": "the inspection call failed or timed out",
     "sideband_error_failopen_5xx": "SecurePath answered with a server error",
@@ -459,7 +589,7 @@ def summarize_trace(trace: dict) -> dict:
     s = {"trace_id": trace.get("traceId"), "api": None, "operation": None,
          "connector_ran": False, "connector_form": None, "before_connector": [],
          "bypassed": False, "sideband_url": None, "sideband_error": None, "sideband_status": None,
-         "verdict_status": None, "oop_request_status": None, "diag": None, "wrong_api_key": False,
+         "verdict_status": None, "oop_request_status": None, "diag": None, "enforced": None, "note": None, "wrong_api_key": False,
          "oop_log": None, "response_log": None, "origin_status": None}
     seen = False
     for sec, src, text, data in _trace_entries(trace):
@@ -489,7 +619,15 @@ def summarize_trace(trace: dict) -> dict:
                 elif n == "rdwrOopLog":
                     s["oop_log"] = v
                 elif n == "radwareDiag" and v:
-                    s["diag"] = v
+                    v = str(v)
+                    if v.startswith(ENFORCED_PREFIXES):
+                        s["enforced"] = v
+                    elif v in INFO_DIAGS:
+                        s["note"] = v
+                    elif _is_fail_open(v):
+                        s["diag"] = v
+                    else:
+                        s["diag"] = v  # unknown value: treat as a fail-open so it is never hidden
             elif src == "request-forwarder" and isinstance(data.get("request"), dict) and not s["sideband_url"]:
                 s["sideband_url"] = data["request"].get("url")
             elif src == "send-request":
@@ -520,10 +658,17 @@ def lint_trace(trace: dict) -> List[Finding]:
     out: List[Finding] = []
     where = "trace"
     if not s["connector_ran"]:
-        out.append(Finding("T01", where, None,
-                           f"the connector did not run on this request (API {s['api'] or '?'}, {s['operation'] or '?'})",
-                           "install the connector at a scope that covers this API (Step 4), make sure the API's own "
-                           "inbound policy keeps <base /> (Step 2b), and confirm the request matched the API you expect"))
+        if s["before_connector"]:
+            out.append(Finding("T01", where, None,
+                               f"'{s['before_connector'][0]}' ran and the connector was never reached (API {s['api'] or '?'}, {s['operation'] or '?'}): "
+                               "a policy ahead of the connector ended the request",
+                               "move the connector's include lines directly after <base /> so it runs first (Step 4); "
+                               "if the connector is not installed at all, install it at a scope that covers this API"))
+        else:
+            out.append(Finding("T01", where, None,
+                               f"the connector did not run on this request (API {s['api'] or '?'}, {s['operation'] or '?'})",
+                               "install the connector at a scope that covers this API (Step 4), make sure the API's own "
+                               "inbound policy keeps <base /> (Step 2b), and confirm the request matched the API you expect"))
         return out
     for p in s["before_connector"]:
         out.append(Finding("T02", where, None,
@@ -568,14 +713,53 @@ def lint_trace(trace: dict) -> List[Finding]:
     diag = s["diag"]
     if diag and not out:
         out.append(Finding("T07", where, None,
-                           f"inspection did not complete: X-Rdwr-Diag = {diag} ({_DIAG_MEANING.get(diag, 'see the Debugging section')})",
-                           "see the X-Rdwr-Diag table in Step 5 (4c)"))
-    if s["bypassed"] and not s["sideband_url"] and not out:
-        out.append(Finding("T08", where, None,
-                           "the connector ran but made no inspection call: the request matched a bypass rule",
-                           "expected for static extensions, methods in static-list-of-methods-not-to-inspect and inline "
-                           "trusted sources; if this request should be inspected, review those Named Values (Step 3b)"))
+                           f"inspection did not complete: X-Rdwr-Diag = {diag} ({_DIAG_MEANING.get(diag, 'see the X-Rdwr-Diag table')})",
+                           "see the X-Rdwr-Diag table in Step 5 (5c)"))
     return out
+
+
+REDACT_HEADERS = {"authorization", "x-rdwr-api-key", "apim-debug-authorization", "ocp-apim-subscription-key",
+                  "cookie", "set-cookie", "proxy-authorization"}
+
+
+def redact_trace(trace: dict) -> int:
+    """Replace, in place, the values of credential-carrying headers anywhere in the trace
+    (the request's Authorization / subscription key / cookies, the debug token, and the
+    SecurePath API key the connector sends). Returns the number of values replaced."""
+    n = 0
+
+    def walk(o):
+        nonlocal n
+        if isinstance(o, dict):
+            if isinstance(o.get("name"), str) and o["name"].lower() in REDACT_HEADERS and "value" in o and o["value"] != "<redacted>":
+                o["value"] = "<redacted>"; n += 1
+            if isinstance(o.get("header"), dict):
+                walk(o["header"])
+            for k, v in o.items():
+                if k in ("expression", "value", "message", "data") and isinstance(v, str):
+                    continue
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(trace)
+    # set-variable / set-header entries also echo the value as a string in "value"/"message"
+    text_keys = ("value", "message")
+
+    def scrub(o, parent_name=None):
+        nonlocal n
+        if isinstance(o, dict):
+            name = o.get("name") if isinstance(o.get("name"), str) else parent_name
+            for k in text_keys:
+                if isinstance(o.get(k), str) and name and name.lower() in ("rdwrapikey", "x-rdwr-api-key") and o[k] != "<redacted>":
+                    o[k] = "<redacted>"; n += 1
+            for v in o.values():
+                scrub(v, name)
+        elif isinstance(o, list):
+            for v in o:
+                scrub(v, parent_name)
+    scrub(trace)
+    return n
 
 
 def format_trace_summary(s: dict) -> str:
@@ -592,6 +776,12 @@ def format_trace_summary(s: dict) -> str:
         verdict = "-"
     elif s["diag"]:
         verdict = f"served uninspected (X-Rdwr-Diag = {s['diag']})"
+    elif s["enforced"] and s["enforced"].startswith("custom_bot_block_status_"):
+        verdict = f"block (custom Bot Manager status {s['verdict_status']} relayed to the client)"
+    elif s["enforced"] and s["enforced"].startswith("redirect_issued_"):
+        verdict = f"redirect ({s['verdict_status']} from SecurePath)"
+    elif s["note"]:
+        verdict = INFO_DIAGS[s["note"]]
     elif s["verdict_status"] == 200 and s["oop_request_status"] == "allowed":
         verdict = "allow"
     elif s["verdict_status"] in (403,):
@@ -601,12 +791,12 @@ def format_trace_summary(s: dict) -> str:
     elif s["verdict_status"] == 200:
         verdict = "block (SecurePath 200 without an allow marker)"
     elif s["bypassed"]:
-        verdict = "bypassed by rule (not inspected, by configuration)"
+        verdict = "not inspected: a bypass rule matched (static extension, excluded method or inline trusted source) — expected for such requests"
     else:
         verdict = "-"
     lines = [
         "Trace summary",
-        f"  trace id:               {s['trace_id'] or '-'}",
+        f"  trace file id:          {s['trace_id'] or '-'}",
         f"  API / operation:        {s['api'] or '-'} / {s['operation'] or '-'}",
         f"  connector ran:          {'yes (' + s['connector_form'] + ')' if s['connector_ran'] else 'NO'}",
         f"  policies before it:     {', '.join(s['before_connector']) if s['before_connector'] else 'none'}",
@@ -624,6 +814,7 @@ def main(argv=None) -> int:
     mode.add_argument("--file", help="policy document to check")
     mode.add_argument("--live", action="store_true", help="read every policy on a live instance")
     mode.add_argument("--trace", help="an API Management trace (JSON from listTrace) to read")
+    mode.add_argument("--redact", help="replace credentials inside this trace file (in place) so it can be shared")
     ap.add_argument("--scope", choices=["global", "product", "api"], default="api", help="scope of --file")
     ap.add_argument("--label", default=None, help="label for --file findings")
     ap.add_argument("-g", "--resource-group")
@@ -632,6 +823,13 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     summary = None
     try:
+        if a.redact:
+            trace = load_trace(a.redact)
+            n = redact_trace(trace)
+            with open(a.redact, "w", encoding="utf-8") as f:
+                json.dump(trace, f, indent=1)
+            print(f"{a.redact}: {n} credential value(s) replaced with <redacted>")
+            return 0
         if a.trace:
             trace = load_trace(a.trace)
             summary = summarize_trace(trace)
@@ -643,7 +841,7 @@ def main(argv=None) -> int:
             if not document_has_connector(text):
                 findings.insert(0, Finding(
                     "L01", a.label or a.file, None, "no SecurePath connector in this document",
-                    "add the three include-fragment lines after <base /> (README Step 4)"))
+                    "add the four include-fragment lines (securepath-app-map, securepath-inbound, securepath-outbound, securepath-onerror) after <base /> (README Step 4, Form 2)"))
         else:
             if not (a.resource_group and a.apim):
                 ap.error("--live needs -g RESOURCE_GROUP and -n APIM")

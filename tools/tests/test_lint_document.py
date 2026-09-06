@@ -64,13 +64,20 @@ def test_inline_connector_counts_as_present():
     assert codes(f) == []
 
 
-def test_shipped_whole_documents_lint_clean():
+def test_shipped_v14_document_lints_clean_at_api_scope():
     root = os.path.join(HERE, "..", "..")
-    with open(os.path.join(root, "rdwr-azureapim-securepath-connector-v1.3.xml"), encoding="utf-8") as f:
-        assert lint.lint_document(f.read(), "api", "shipped") == []
-    with open(os.path.join(root, "rdwr-azureapim-securepath-connector-v1.3-all-apis-scope.xml"), encoding="utf-8") as f:
-        assert lint.lint_document(f.read(), "global", "shipped-global") == []
+    with open(os.path.join(root, "rdwr-azureapim-securepath-connector-v1.4.xml"), encoding="utf-8") as f:
+        doc = f.read()
+    assert lint.document_has_connector(doc)
+    assert lint.lint_document(doc, "api", "v1.4") == []
 
+
+def test_one_line_all_apis_policy_is_recognised():
+    doc = ('<policies><inbound><include-fragment fragment-id="securepath-app-map" /><include-fragment fragment-id="securepath-inbound" /></inbound>'
+           '<backend><forward-request /></backend><outbound><include-fragment fragment-id="securepath-outbound" /></outbound>'
+           '<on-error><include-fragment fragment-id="securepath-onerror" /></on-error></policies>')
+    assert lint.document_has_connector(doc)
+    assert lint.lint_document(doc, "global", "global") == []
 
 def test_manual_merge_shape_yields_l04_and_l05():
     f = lint.lint_document(fx("merged_jwt_first.xml"), "api", "merged")

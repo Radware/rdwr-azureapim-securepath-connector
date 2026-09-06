@@ -6,12 +6,14 @@
          so without this fragment SecurePath would record the request with no
          response status. A request SecurePath itself blocked or redirected
          never reaches this section: those verdicts end the pipeline with
-         return-response, so no log can be sent twice. -->
+         return-response. If the outbound fragment already sent the log and a later
+         outbound policy then failed, rdwrLogSent prevents a second record. -->
     <choose>
       <when condition="@{
         var oop_log = (string)context.Variables.GetValueOrDefault("rdwrOopLog", "");
         var oop_id = (string)context.Variables.GetValueOrDefault("rdwrOopId", "");
-        return (oop_log == "2" || oop_log == "3") && !string.IsNullOrEmpty(oop_id);
+        bool sent = (bool)context.Variables.GetValueOrDefault("rdwrLogSent", false);
+        return !sent && (oop_log == "2" || oop_log == "3") && !string.IsNullOrEmpty(oop_id);
       }">
         <send-one-way-request mode="new">
           <set-url>@{
@@ -79,13 +81,10 @@
             }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-content-type" exists-action="override">
-            <value>@(context.Response != null ? context.Response.Headers.GetValueOrDefault("Content-Type", "") : "")</value>
+            <value>@{ var v = context.Response != null ? context.Response.Headers.GetValueOrDefault("Content-Type", "") : ""; return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-rdwr-response" exists-action="override">
             <value>allowed</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-gateway-error" exists-action="override">
-            <value>@(context.LastError != null ? (context.LastError.Source ?? "") + ":" + (context.LastError.Reason ?? "") : "")</value>
           </set-header>
         </send-one-way-request>
       </when>

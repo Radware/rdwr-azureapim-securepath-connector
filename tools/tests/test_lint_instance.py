@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -16,7 +17,8 @@ NV_OK = {n: "x" for n in lint.REQUIRED_NAMED_VALUES}
 NV_OK.update({"rdwr-app-id": "afa37f7d53ce4e76a4988c4955c2d7e5",
               "rdwr-app-ep-addr": "afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net",
               "rdwr-app-ep-ssl": "true",
-              "rdwr-app-map": "##DISABLED##", "rdwr-true-host-header": "##DISABLED##"})
+              "rdwr-app-map": "##DISABLED##", "rdwr-true-host-header": "##DISABLED##",
+              "rdwr-custom-bot-block-statuses": "##DISABLED##"})
 
 
 class FakeReader(lint.Reader):
@@ -36,9 +38,16 @@ class FakeReader(lint.Reader):
     def named_values(self): return dict(self._nvs)
     def backends(self): return list(self._backends)
 
+    frags = None  # per-test overrides: fragment id -> text (None = not registered)
+
     def fragment(self, fragment_id):
-        # the shipped default app-map fragment is registered on a healthy instance
-        with open(os.path.join(HERE, "..", "..", "fragments", "securepath-app-map.fragment.xml"), encoding="utf-8") as f:
+        # a healthy instance carries the shipped fragments, registered as-is
+        if self.frags is not None and fragment_id in self.frags:
+            return self.frags[fragment_id]
+        path = os.path.join(HERE, "..", "..", "fragments", f"{fragment_id}.fragment.xml")
+        if not os.path.isfile(path):
+            return None
+        with open(path, encoding="utf-8") as f:
             return f.read()
 
 
@@ -158,7 +167,9 @@ class FakeReaderWithFragment(FakeReader):
         self._fragment = fragment
 
     def fragment(self, fragment_id):
-        return self._fragment
+        if fragment_id == "securepath-app-map":
+            return self._fragment
+        return super().fragment(fragment_id)
 
 
 GEN = ('<fragment>\n    <set-variable name="rdwrAppMapGenerated" value="{\'shop.example.test\': {\'app_id\': \'a1\', '
@@ -169,7 +180,7 @@ def test_generated_map_endpoints_and_key_named_values_are_checked():
     nvs = dict(NV_OK)
     r = FakeReaderWithFragment(glob=fx("clean_global.xml"), nvs=nvs, fragment=GEN,
                                backends=["https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net"])
-    assert codes(lint.lint_instance(r)) == ["L09", "L13"]
+    assert codes(lint.lint_instance(r)) == ["L09", "L12"]
     nvs["rdwr-app-key-a1"] = "k"
     r = FakeReaderWithFragment(glob=fx("clean_global.xml"), nvs=nvs, fragment=GEN,
                                backends=["https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net", "https://gen1.oop.radwarecloud.net"])
@@ -190,3 +201,116 @@ def test_l11_when_inbound_is_referenced_without_the_app_map_before_it():
         '        <include-fragment fragment-id="securepath-app-map" />\n        <include-fragment fragment-id="securepath-inbound" />',
         '        <include-fragment fragment-id="securepath-inbound" />\n        <include-fragment fragment-id="securepath-app-map" />')
     assert codes(lint.lint_instance(FakeReader(glob=swapped))) == ["L11"]
+
+
+# ---------------------------------------------------------------- L14 custom Bot Manager block statuses
+
+def _nv(**over):
+    d = dict(NV_OK); d.update(over); return d
+
+
+def _codes(nvs):
+    r = FakeReader(glob=fx("clean_global.xml"), nvs=nvs, backends=["https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net"])
+    return [f for f in lint.lint_instance(r) if f.code == "L13"]
+
+
+def test_L13_disabled_and_valid_list_with_bot_manager_are_clean():
+    assert _codes(_nv()) == []
+    assert _codes(_nv(**{"rdwr-custom-bot-block-statuses": "429, 418", "rdwr-bot-manager-enabled": "true"})) == []
+    assert _codes(_nv(**{"rdwr-custom-bot-block-statuses": "*", "rdwr-bot-manager-enabled": "true"})) == []
+
+
+def test_L13_invalid_list():
+    f = _codes(_nv(**{"rdwr-custom-bot-block-statuses": "429,abc", "rdwr-bot-manager-enabled": "true"}))
+    assert len(f) == 1 and "not a status-code list" in f[0].message
+
+
+def test_L13_standard_and_5xx_statuses_flagged():
+    f = _codes(_nv(**{"rdwr-custom-bot-block-statuses": "403,429,503", "rdwr-bot-manager-enabled": "true"}))
+    msgs = " | ".join(x.message for x in f)
+    assert "403" in msgs and "standard verdicts" in msgs and "503" in msgs and "never relayed" in msgs and len(f) == 2
+
+
+def test_L13_ignored_without_bot_manager():
+    f = _codes(_nv(**{"rdwr-custom-bot-block-statuses": "429", "rdwr-bot-manager-enabled": "false"}))
+    assert len(f) == 1 and "rdwr-bot-manager-enabled is not true" in f[0].message
+
+
+def test_L13_map_entry_override_checked():
+    m = "{'orders-api': {'app_id': 'a1', 'api_key': 'k', 'endpoint': 'a1.oop.radwarecloud.net', 'bot_manager': true, 'bot_block_statuses': '429,abc'}}"
+    f = _codes(_nv(**{"rdwr-app-map": m}))
+    assert len(f) == 1 and "entry 'orders-api'" in f[0].message
+
+
+# ---------------------------------------------------------------- L15 live fragments vs the shipped files
+
+def _l15(frags):
+    r = FakeReader(glob=fx("clean_global.xml"), nvs=NV_OK, backends=["https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net"])
+    r.frags = frags
+    return [f for f in lint.lint_instance(r) if f.code == "L14"]
+
+
+def test_L14_clean_when_live_fragments_match_shipped_files_modulo_whitespace():
+    shipped = lint.shipped_fragment("securepath-inbound")
+    assert shipped and _l15({}) == []
+    import re
+    reindented = re.sub(r"(?m)^( {4})+", lambda m: "\t" * (len(m.group(0)) // 4), shipped)  # what the instance stores
+    assert _l15({"securepath-inbound": reindented.replace("\n", "\r\n") + "\n\n"}) == []
+
+
+def test_L14_when_live_fragment_is_stale_or_missing():
+    stale = lint.shipped_fragment("securepath-inbound").replace("rdwrCustomBotBlockMatch", "rdwrOld")
+    f = _l15({"securepath-inbound": stale})
+    assert len(f) == 1 and "differs from fragments/securepath-inbound.fragment.xml" in f[0].message and "asynchronous" in f[0].fix
+    f = _l15({"securepath-onerror": None})
+    assert len(f) == 1 and "not registered" in f[0].message
+
+
+def test_L14_not_reported_for_document_installs():
+    doc = '<policies><inbound><base /><set-variable name="rdwrAppEpAddr" value="x" /></inbound><backend><base /></backend><outbound><base /></outbound><on-error><base /></on-error></policies>'
+    r = FakeReader(glob=None, apis={"orders": doc}, nvs=NV_OK)
+    r.frags = {"securepath-inbound": "<fragment>old</fragment>"}
+    assert [f for f in lint.lint_instance(r) if f.code == "L14"] == []
+
+
+# ---------------------------------------------------------------- L10 entry types, one-line documents, paging, secret reads
+
+def test_L10_flags_mistyped_map_entries():
+    nvs = dict(NV_OK)
+    nvs["rdwr-app-map"] = "{'orders': {'app_id': 'a', 'api_key': 'k', 'endpoint': 'y.oop.radwarecloud.net', 'port': 'https', 'ssl': 'yes'}, 'shop': 'not-an-object'}"
+    r = FakeReader(glob=fx("clean_global.xml"), nvs=nvs, backends=["https://y.oop.radwarecloud.net"])
+    msgs = [f.message for f in lint.lint_instance(r) if f.code == "L10"]
+    assert any("port is \"https\"" in m for m in msgs) and any("ssl is \"yes\"" in m for m in msgs) and any("'shop' is not an object" in m for m in msgs)
+
+
+class PagedAz:
+    """az stub: /apis comes in two pages via nextLink; secret Named Values include a foreign one."""
+    def __init__(self):
+        self.listed = []
+
+    def __call__(self, args):
+        if args[:2] == ["account", "show"]:
+            return "sub-1\n"
+        uri = args[4]
+        if "/apis?" in uri:
+            return json.dumps({"value": [{"name": "a1"}], "nextLink": "https://management.azure.com/next-page"})
+        if uri == "https://management.azure.com/next-page":
+            return json.dumps({"value": [{"name": "a2"}]})
+        if "/namedValues?" in uri:
+            return json.dumps({"value": [{"name": "rdwr-api-key", "properties": {"secret": True}},
+                                         {"name": "someone-elses-secret", "properties": {"secret": True}},
+                                         {"name": "rdwr-app-id", "properties": {"value": "x"}}]})
+        if "/listValue" in uri:
+            self.listed.append(uri.split("/namedValues/")[1].split("/")[0])
+            return json.dumps({"value": "k"})
+        return json.dumps({"value": [], "sku": {"name": "StandardV2"}})
+
+
+def test_reader_follows_next_link_and_reads_only_connector_secrets(monkeypatch):
+    az = PagedAz()
+    monkeypatch.setattr(lint.AzReader, "_az", staticmethod(az))
+    r = lint.AzReader("rg", "apim")
+    assert r.apis() == ["a1", "a2"]
+    nvs = r.named_values()
+    assert nvs["rdwr-api-key"] == "k" and nvs["someone-elses-secret"] is None and nvs["rdwr-app-id"] == "x"
+    assert az.listed == ["rdwr-api-key"]

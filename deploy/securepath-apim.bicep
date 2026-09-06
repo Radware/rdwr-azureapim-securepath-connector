@@ -1,6 +1,7 @@
 // Radware SecurePath connector for Azure API Management: one-shot install at All APIs scope.
 //
-// Creates the Named Values, registers the three policy fragments, sets the All APIs policy
+// Creates the Named Values, registers the four policy fragments (including the empty default of
+// the generated application map), sets the All APIs policy
 // to reference them, and (by default) creates the backend entity that establishes trust for
 // the inspection endpoint on Standard v2 / Premium v2. Existing API and product policies are
 // left untouched; they inherit the connector through <base />.
@@ -30,8 +31,8 @@ param endpointSsl bool = true
 @description('Set true if Bot Manager is enabled on the SecurePath application.')
 param botManagerEnabled bool = false
 
-@description('Request header carrying the real client IP when a proxy or CDN fronts the gateway.')
-param trueClientIpHeader string = 'x-forwarded-for'
+@description('Request header carrying the real client IP when a proxy you control fronts the gateway and is its sole path (for example X-Forwarded-For). ##DISABLED## uses the connection address. A client that can reach the gateway directly can write that header.')
+param trueClientIpHeader string = '##DISABLED##'
 
 @description('Path prefix to strip before inspection. "/" strips nothing.')
 param apiBasePath string = '/'
@@ -40,11 +41,17 @@ param apiBasePath string = '/'
 param createBackend bool = true
 
 @secure()
-@description('Optional map of API id or hostname (or "*") to {app_id, api_key, endpoint[, port, ssl, bot_manager, base_path]} for instances serving several SecurePath applications. Empty means the three values above apply to every API. See README "Protecting APIs that belong to different SecurePath applications".')
+@description('Optional map of API id or hostname (or "*") to {app_id, api_key, endpoint[, port, ssl, bot_manager, bot_block_statuses, base_path]} for instances serving several SecurePath applications. Empty means the three values above apply to every API. See README "Protecting APIs that belong to different SecurePath applications".')
 param appMap object = {}
 
 @description('Request header carrying the client-facing hostname when a CDN or Front Door fronts the gateway (for example X-Forwarded-Host). ##DISABLED## uses the host the gateway received.')
 param trueHostHeader string = '##DISABLED##'
+
+@description('Bot Manager: SecurePath status codes, beyond the standard verdicts, that the connector relays to the client as a Bot Manager block response, for example "429" or "429,418"; "*" for any such status; ##DISABLED## off. Used only when botManagerEnabled is true; a 5xx is never relayed. See README 3e.')
+param customBotBlockStatuses string = '##DISABLED##'
+
+@description('Register the securepath-app-map fragment with its empty default. Set false when tools/securepath-apim-sync.py manages the generated application map, so that a re-deployment does not replace it.')
+param manageAppMapFragment bool = true
 
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
   name: apimName
@@ -72,13 +79,14 @@ var namedValues = [
   { name: 'rdwr-inline-trusted-sources', value: '##DISABLED##', secret: false }
   { name: 'rdwr-inline-headers-enabled', value: 'false', secret: false }
   { name: 'rdwr-true-host-header', value: trueHostHeader, secret: false }
+  { name: 'rdwr-custom-bot-block-statuses', value: customBotBlockStatuses, secret: false }
 ]
 
 // A Named Value is substituted inside an XML attribute at policy save time, so the map is
 // stored as single-quoted JSON (the policy's parser accepts it).
 var appMapValue = empty(appMap) ? '##DISABLED##' : replace(string(appMap), '"', '\'')
-var mapEndpoints = [for e in items(appMap): toLower(string(e.value.endpoint))]
-var distinctMapEndpoints = union(mapEndpoints, [])
+var mapUrls = [for e in items(appMap): '${(contains(e.value, 'ssl') && e.value.ssl == false) ? 'http' : 'https'}://${toLower(string(e.value.endpoint))}${(contains(e.value, 'port') && e.value.port != 443 && e.value.port != 80) ? ':${e.value.port}' : ''}']
+var distinctMapUrls = union(mapUrls, [])
 
 resource nv 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = [for item in namedValues: {
   parent: apim
@@ -100,7 +108,7 @@ resource nvAppMap 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
   }
 }
 
-resource fragMap 'Microsoft.ApiManagement/service/policyFragments@2024-05-01' = {
+resource fragMap 'Microsoft.ApiManagement/service/policyFragments@2024-05-01' = if (manageAppMapFragment) {
   parent: apim
   name: 'securepath-app-map'
   properties: {
@@ -171,13 +179,13 @@ resource backend 'Microsoft.ApiManagement/service/backends@2024-05-01' = if (cre
   }
 }
 
-resource mapBackends 'Microsoft.ApiManagement/service/backends@2024-05-01' = [for (ep, i) in distinctMapEndpoints: if (createBackend && ep != toLower(endpoint)) {
+resource mapBackends 'Microsoft.ApiManagement/service/backends@2024-05-01' = [for (u, i) in distinctMapUrls: if (createBackend && u != '${endpointScheme}://${toLower(endpoint)}${endpointPortSuffix}') {
   parent: apim
   name: 'securepath-sideband-${i + 1}'
   properties: {
     title: 'SecurePath inspection endpoint (application map)'
     protocol: 'http'
-    url: 'https://${ep}'
+    url: u
     tls: {
       validateCertificateChain: false
       validateCertificateName: false

@@ -1,24 +1,57 @@
 <fragment>
+    <!-- X-Rdwr-Diag is the connector's own signal to the backend; a client may not forge it -->
+    <set-header name="X-Rdwr-Diag" exists-action="delete" />
 
     <!-- ====== Configuration ====== -->
     <set-variable name="rdwrAppEpAddr" value="{{rdwr-app-ep-addr}}" />
-    <set-variable name="rdwrAppEpPort" value="@(int.Parse("{{rdwr-app-ep-port}}"))" />
-    <set-variable name="rdwrAppEpSsl" value="@(bool.Parse("{{rdwr-app-ep-ssl}}"))" />
-    <set-variable name="rdwrAppEpTimeout" value="@(int.Parse("{{rdwr-app-ep-timeout-seconds}}"))" />
+    <!-- Numeric and boolean settings are parsed tolerantly: a value the policy cannot read falls
+         back to the documented default and is reported (rdwrConfigInvalid, trace) instead of
+         failing every request. -->
+    <set-variable name="rdwrAppEpPortStr" value="{{rdwr-app-ep-port}}" />
+    <set-variable name="rdwrAppEpSslStr" value="{{rdwr-app-ep-ssl}}" />
+    <set-variable name="rdwrAppEpTimeoutStr" value="{{rdwr-app-ep-timeout-seconds}}" />
+    <set-variable name="rdwrAppEpPort" value="@{ int v; return int.TryParse(((string)context.Variables["rdwrAppEpPortStr"]).Trim(), out v) ? v : 443; }" />
+    <set-variable name="rdwrAppEpSsl" value="@{ bool v; return bool.TryParse(((string)context.Variables["rdwrAppEpSslStr"]).Trim(), out v) ? v : true; }" />
+    <set-variable name="rdwrAppEpTimeout" value="@{ int v; return int.TryParse(((string)context.Variables["rdwrAppEpTimeoutStr"]).Trim(), out v) ? v : 10; }" />
     <set-variable name="rdwrAppId" value="{{rdwr-app-id}}" />
     <set-variable name="rdwrApiKey" value="{{rdwr-api-key}}" />
     <set-variable name="rdwrTrueClientIpHeaderNameFromNV" value="{{rdwr-true-client-ip-header}}" />
-    <set-variable name="rdwrBodyMaxSize" value="@(long.Parse("{{rdwr-body-max-size-bytes}}"))" />
-    <set-variable name="rdwrPartialBodySize" value="@(long.Parse("{{rdwr-partial-body-size-bytes}}"))" />
+    <set-variable name="rdwrBodyMaxSizeStr" value="{{rdwr-body-max-size-bytes}}" />
+    <set-variable name="rdwrPartialBodySizeStr" value="{{rdwr-partial-body-size-bytes}}" />
+    <set-variable name="rdwrBodyMaxSize" value="@{ long v; return long.TryParse(((string)context.Variables["rdwrBodyMaxSizeStr"]).Trim(), out v) ? v : 100000L; }" />
+    <set-variable name="rdwrPartialBodySize" value="@{ long v; return long.TryParse(((string)context.Variables["rdwrPartialBodySizeStr"]).Trim(), out v) ? v : 10240L; }" />
     <set-variable name="rdwrApiBasePath" value="@{
       var nv = "{{rdwr-api-base-path}}";
       return string.IsNullOrEmpty(nv) || nv.Contains("{{") ? "" : nv.TrimEnd('/');
     }" />
-    <set-variable name="rdwrMultipartMaxSize" value="@(long.Parse("{{rdwr-multipart-max-size-bytes}}"))" />
-    <set-variable name="staticExtensionsEnabled" value="@(bool.Parse("{{static-extensions-enabled}}"))" />
+    <set-variable name="rdwrMultipartMaxSizeStr" value="{{rdwr-multipart-max-size-bytes}}" />
+    <set-variable name="staticExtensionsEnabledStr" value="{{static-extensions-enabled}}" />
+    <set-variable name="rdwrMultipartMaxSize" value="@{ long v; return long.TryParse(((string)context.Variables["rdwrMultipartMaxSizeStr"]).Trim(), out v) ? v : 100000L; }" />
+    <set-variable name="staticExtensionsEnabled" value="@{ bool v; return bool.TryParse(((string)context.Variables["staticExtensionsEnabledStr"]).Trim(), out v) ? v : true; }" />
     <set-variable name="staticMethodsNoInspect" value="{{static-list-of-methods-not-to-inspect}}" />
     <set-variable name="staticBypassedExts" value="{{static-list-of-bypassed-extensions}}" />
-    <set-variable name="staticInspectWithQuery" value="@(bool.Parse("{{static-inspect-if-query-string-exists}}"))" />
+    <set-variable name="staticInspectWithQueryStr" value="{{static-inspect-if-query-string-exists}}" />
+    <set-variable name="staticInspectWithQuery" value="@{ bool v; return bool.TryParse(((string)context.Variables["staticInspectWithQueryStr"]).Trim(), out v) ? v : true; }" />
+    <set-variable name="rdwrConfigInvalid" value="@{
+      var bad = new System.Collections.Generic.List<string>();
+      int i; long l; bool b;
+      if (!int.TryParse(((string)context.Variables["rdwrAppEpPortStr"]).Trim(), out i)) { bad.Add("rdwr-app-ep-port"); }
+      if (!bool.TryParse(((string)context.Variables["rdwrAppEpSslStr"]).Trim(), out b)) { bad.Add("rdwr-app-ep-ssl"); }
+      if (!int.TryParse(((string)context.Variables["rdwrAppEpTimeoutStr"]).Trim(), out i)) { bad.Add("rdwr-app-ep-timeout-seconds"); }
+      if (!long.TryParse(((string)context.Variables["rdwrBodyMaxSizeStr"]).Trim(), out l)) { bad.Add("rdwr-body-max-size-bytes"); }
+      if (!long.TryParse(((string)context.Variables["rdwrPartialBodySizeStr"]).Trim(), out l)) { bad.Add("rdwr-partial-body-size-bytes"); }
+      if (!long.TryParse(((string)context.Variables["rdwrMultipartMaxSizeStr"]).Trim(), out l)) { bad.Add("rdwr-multipart-max-size-bytes"); }
+      if (!bool.TryParse(((string)context.Variables["staticExtensionsEnabledStr"]).Trim(), out b)) { bad.Add("static-extensions-enabled"); }
+      if (!bool.TryParse(((string)context.Variables["staticInspectWithQueryStr"]).Trim(), out b)) { bad.Add("static-inspect-if-query-string-exists"); }
+      return string.Join(",", bad);
+    }" />
+    <choose>
+      <when condition="@(!string.IsNullOrEmpty((string)context.Variables["rdwrConfigInvalid"]))">
+        <trace source="securepath" severity="error">
+          <message>@("Named Value(s) with a value the connector cannot read, default used instead: " + (string)context.Variables["rdwrConfigInvalid"] + " (README Step 3b; the install check reports them)")</message>
+        </trace>
+      </when>
+    </choose>
     <set-variable name="chunkedAllowedTypes" value="{{chunked-request-allowed-content-types}}" />
     <set-variable name="pluginInfo" value="{{plugin-version-info}}" />
     <set-variable name="rdwrBotManagerEnabledStr" value="{{rdwr-bot-manager-enabled}}" />
@@ -27,6 +60,10 @@
       bool b;
       if (bool.TryParse(s, out b)) { return b; } else { return false; }
     }" />
+    <!-- Bot Manager: SecurePath status codes, beyond the standard verdicts, that are relayed to the
+         client as a Bot Manager block response (README 3e). A comma-separated list, "*" for any, or
+         a disable token. Used only when Bot Manager is enabled; never applied to 5xx. -->
+    <set-variable name="rdwrCustomBotBlockStatuses" value="{{rdwr-custom-bot-block-statuses}}" />
 
     <!-- ====== Inline-bypass knobs ======
          Using Named Values by default.
@@ -39,7 +76,7 @@
     <set-variable name="inlineHeadersEnabledStr" value="false" />
     -->
 
-    <!-- Capture request start time for v2 response-phase request-time calculation -->
+    <!-- Request start time, for the response-phase log's request-time -->
     <set-variable name="requestStartTime" value="@(DateTime.UtcNow)" />
 
     <!-- ====== Initialize bypass flag ====== -->
@@ -63,8 +100,8 @@
         if (vals != null && vals.Length > 0 && !string.IsNullOrWhiteSpace(vals[0]))
         {
           string v = vals[0].Split(',')[0].Trim();
-          int colon = v.IndexOf(':');
-          if (colon > 0) { v = v.Substring(0, colon); }
+          if (v.StartsWith("[")) { int close = v.IndexOf(']'); if (close > 0) { v = v.Substring(0, close + 1); } }
+          else { int colon = v.IndexOf(':'); if (colon > 0) { v = v.Substring(0, colon); } }
           if (v.Length > 0) { host = v; }
         }
       }
@@ -112,7 +149,18 @@
         if (apiId != "") { foreach (JProperty p in map.Properties()) { if ((p.Name ?? "").Trim().ToLower() == apiId) { hit = p.Value; break; } } }
         if (hit == null && host != "") { foreach (JProperty p in map.Properties()) { if ((p.Name ?? "").Trim().ToLower() == host) { hit = p.Value; break; } } }
         if (hit == null && map["*"] != null) { hit = map["*"]; }
-        return hit == null ? "" : hit.ToString(Newtonsoft.Json.Formatting.None);
+        if (hit == null) { return ""; }
+        // an entry must be an object with the right value types; anything else is an invalid map
+        if (hit.Type != JTokenType.Object) { return "##INVALID##"; }
+        JObject e = (JObject)hit;
+        foreach (string f in new[] { "app_id", "api_key", "endpoint", "base_path", "bot_block_statuses" }) {
+          if (e[f] != null && e[f].Type != JTokenType.String) { return "##INVALID##"; }
+        }
+        if (e["port"] != null && e["port"].Type != JTokenType.Integer) { return "##INVALID##"; }
+        foreach (string f in new[] { "ssl", "bot_manager" }) {
+          if (e[f] != null && e[f].Type != JTokenType.Boolean) { return "##INVALID##"; }
+        }
+        return e.ToString(Newtonsoft.Json.Formatting.None);
       } catch { return "##INVALID##"; }
     }" />
     <choose>
@@ -126,6 +174,7 @@
         <set-variable name="rdwrAppEpPort" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); return e["port"] != null ? (int)e["port"] : (int)context.Variables["rdwrAppEpPort"]; }" />
         <set-variable name="rdwrAppEpSsl" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); return e["ssl"] != null ? (bool)e["ssl"] : (bool)context.Variables["rdwrAppEpSsl"]; }" />
         <set-variable name="rdwrBotManagerEnabled" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); return e["bot_manager"] != null ? (bool)e["bot_manager"] : (bool)context.Variables["rdwrBotManagerEnabled"]; }" />
+        <set-variable name="rdwrCustomBotBlockStatuses" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); string v = (string)e["bot_block_statuses"]; return string.IsNullOrEmpty(v) ? (string)context.Variables["rdwrCustomBotBlockStatuses"] : v.Trim(); }" />
         <set-variable name="rdwrApiBasePath" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); string bp = (string)e["base_path"]; return string.IsNullOrEmpty(bp) ? (string)context.Variables["rdwrApiBasePath"] : bp.TrimEnd('/'); }" />
       </when>
     </choose>
@@ -295,7 +344,8 @@
       }
       else if (headersEnabled && !ipConfigured)
       {
-        return headersMatch;
+        // headers alone are forgeable: without a trusted-source list there is no bypass
+        return false;
       }
       else if (!headersEnabled && ipConfigured)
       {
@@ -369,7 +419,7 @@
       </when>
     </choose>
 
-    <!-- ====== Static bypass (Tier-1) ====== -->
+    <!-- ====== Static bypass ====== -->
     <choose>
       <when condition="@(context.Variables.GetValueOrDefault("staticExtensionsEnabled", false))">
         <set-variable name="reqPathForExt" value="@(context.Request.Url.Path.ToLower())" />
@@ -433,7 +483,7 @@
       </when>
     </choose>
 
-    <!-- ====== Tier-1 path (no-bypass) ====== -->
+    <!-- ====== Inspected path ====== -->
     <choose>
       <when condition="@( !((bool)context.Variables["shouldBypassRadware"]) )">
 
@@ -472,7 +522,7 @@
             }" />
             <choose>
               <when condition="@((long)context.Variables.GetValueOrDefault("multipartContentLength", -1L) > context.Variables.GetValueOrDefault("rdwrMultipartMaxSize", long.MaxValue))">
-                <!-- Too large multipart: send headers only to sideband -->
+                <!-- Too large multipart: send headers only to the inspection endpoint -->
                 <set-variable name="radwareOverrideBody" value="@(true)" />
                 <set-variable name="multipartHeadersOnly" value="@(true)" />
                 <set-variable name="radwareReqBodyBytes" value="@(new byte[0])" />
@@ -488,7 +538,7 @@
             </choose>
           </when>
           <when condition="@(!string.IsNullOrEmpty((string)context.Variables["origContentLengthStr"]))">
-            <set-variable name="origContentLength" value="@(long.Parse((string)context.Variables["origContentLengthStr"]))" />
+            <set-variable name="origContentLength" value="@{ long v; return long.TryParse((string)context.Variables["origContentLengthStr"], out v) ? v : 0L; }" />
             <choose>
               <when condition="@(context.Variables.GetValueOrDefault("origContentLength", 0L) > 0 && context.Variables.GetValueOrDefault("origContentLength", 0L) <= context.Variables.GetValueOrDefault("rdwrBodyMaxSize", long.MaxValue))">
                 <set-variable name="readBodyFlag" value="@(true)" />
@@ -581,14 +631,19 @@
           <when condition="@(((string)context.Variables["configuredHeaderNameForClientIp"]) != "##DISABLED##" && !string.IsNullOrEmpty((string)context.Variables["configuredHeaderNameForClientIp"]) && context.Request.Headers.ContainsKey((string)context.Variables["configuredHeaderNameForClientIp"]))">
             <set-variable name="ipFromConfiguredHeader" value="@(context.Request.Headers.GetValueOrDefault((string)context.Variables["configuredHeaderNameForClientIp"], default(string[]))?.FirstOrDefault())" />
             <choose>
-              <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("ipFromConfiguredHeader", "")))">
-                <set-variable name="clientIpToSend" value="@((string)context.Variables["ipFromConfiguredHeader"])" />
+              <when condition="@{
+                string raw = (string)context.Variables.GetValueOrDefault("ipFromConfiguredHeader", "") ?? "";
+                string first = raw.Split(',')[0].Trim();
+                System.Net.IPAddress parsed;
+                return first != "" && System.Net.IPAddress.TryParse(first, out parsed);
+              }">
+                <set-variable name="clientIpToSend" value="@(((string)context.Variables["ipFromConfiguredHeader"]).Split(',')[0].Trim())" />
               </when>
             </choose>
           </when>
         </choose>
 
-        <!-- Build sideband URL -->
+        <!-- Build the inspection URL -->
         <set-variable name="urlScheme" value="@(context.Variables.GetValueOrDefault("rdwrAppEpSsl", true) ? "https" : "http")" />
         <set-variable name="urlHost" value="@((string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", "localhost"))" />
         <set-variable name="urlPortValue" value="@(context.Variables.GetValueOrDefault("rdwrAppEpPort", 443))" />
@@ -707,7 +762,7 @@
           </otherwise>
         </choose>
 
-        <!-- ====== Verdict handling (Tier-1) ====== -->
+        <!-- ====== Verdict handling ====== -->
         <choose>
           <when condition="@(!context.Variables.ContainsKey("radwareDiag"))">
             <set-variable name="radwareDiag" value="@(string.Empty)" />
@@ -722,7 +777,7 @@
             <set-variable name="oopRequestStatusHeader" value="@(((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("x-rdwr-oop-request-status", default(string[]))?.FirstOrDefault()?.ToLower() ?? "")" />
             <set-variable name="radwareLocationHeader" value="@(((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("Location", default(string[]))?.FirstOrDefault() ?? "")" />
             <set-variable name="radwareCt" value="@(((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("Content-Type", default(string[]))?.FirstOrDefault()?.ToLower() ?? "")" />
-            <!-- v2 control headers from SecurePath response -->
+            <!-- Response-phase log control headers from the SecurePath response -->
             <set-variable name="rdwrOopId" value="@(((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("x-rdwr-oop-id", default(string[]))?.FirstOrDefault() ?? "")" />
             <set-variable name="rdwrOopLog" value="@(((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("x-rdwr-oop-log", default(string[]))?.FirstOrDefault() ?? "")" />
             <set-variable name="rdwrOopLogBody" value="@(((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("x-rdwr-oop-log-body", default(string[]))?.FirstOrDefault() ?? "")" />
@@ -734,9 +789,6 @@
                 if (k == "uzmcr") { return true; }
               }
               return false;
-            }" />
-            <set-variable name="bmHeaderSourcePresent" value="@{
-              return context.Variables.ContainsKey("radwareResponse") && context.Variables["radwareResponse"] != null;
             }" />
             <set-variable name="bmSetCookie0" value="@{
               if (!(bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false)) { return ""; }
@@ -780,6 +832,48 @@
               }
               return list.Count > 2 ? list[2] : "";
             }" />
+            <set-variable name="bmSetCookie3" value="@{
+              if (!(bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false)) { return ""; }
+              if (!context.Variables.ContainsKey("radwareResponse") || context.Variables["radwareResponse"] == null) { return ""; }
+              var headers = ((IResponse)context.Variables["radwareResponse"]).Headers;
+              var setCookies = headers.GetValueOrDefault("Set-Cookie", default(string[]));
+              if (setCookies == null) { return ""; }
+              var list = new System.Collections.Generic.List<string>();
+              foreach (var c in setCookies)
+              {
+                var lc = (c ?? "").ToLower();
+                if (lc.Contains("__uzm") || lc.Contains("uzmcr") || lc.Contains("trkevent")) { list.Add(c); }
+              }
+              return list.Count > 3 ? list[3] : "";
+            }" />
+            <set-variable name="bmSetCookie4" value="@{
+              if (!(bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false)) { return ""; }
+              if (!context.Variables.ContainsKey("radwareResponse") || context.Variables["radwareResponse"] == null) { return ""; }
+              var headers = ((IResponse)context.Variables["radwareResponse"]).Headers;
+              var setCookies = headers.GetValueOrDefault("Set-Cookie", default(string[]));
+              if (setCookies == null) { return ""; }
+              var list = new System.Collections.Generic.List<string>();
+              foreach (var c in setCookies)
+              {
+                var lc = (c ?? "").ToLower();
+                if (lc.Contains("__uzm") || lc.Contains("uzmcr") || lc.Contains("trkevent")) { list.Add(c); }
+              }
+              return list.Count > 4 ? list[4] : "";
+            }" />
+            <set-variable name="bmSetCookie5" value="@{
+              if (!(bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false)) { return ""; }
+              if (!context.Variables.ContainsKey("radwareResponse") || context.Variables["radwareResponse"] == null) { return ""; }
+              var headers = ((IResponse)context.Variables["radwareResponse"]).Headers;
+              var setCookies = headers.GetValueOrDefault("Set-Cookie", default(string[]));
+              if (setCookies == null) { return ""; }
+              var list = new System.Collections.Generic.List<string>();
+              foreach (var c in setCookies)
+              {
+                var lc = (c ?? "").ToLower();
+                if (lc.Contains("__uzm") || lc.Contains("uzmcr") || lc.Contains("trkevent")) { list.Add(c); }
+              }
+              return list.Count > 5 ? list[5] : "";
+            }" />
             <set-variable name="bmShieldSquareHeader0" value="@{
               if (!(bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false)) { return ""; }
               if (!context.Variables.ContainsKey("radwareResponse") || context.Variables["radwareResponse"] == null) { return ""; }
@@ -789,6 +883,7 @@
               return h[0] ?? "";
             }" />
             <set-variable name="bmUzmcrHeader0" value="@{
+              if (!(bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false)) { return ""; }
               if (!context.Variables.ContainsKey("radwareResponse") || context.Variables["radwareResponse"] == null) { return ""; }
               var headers = ((IResponse)context.Variables["radwareResponse"]).Headers;
               var h = headers.GetValueOrDefault("uzmcr", default(string[]));
@@ -796,7 +891,7 @@
               return h[0] ?? "";
             }" />
 
-            <!-- Cache SP response body (stream can only be read once) -->
+            <!-- Cache the SecurePath response body (the stream can only be read once) -->
             <set-variable name="radwareResponseBody" value="@{
               try {
                 return ((IResponse)context.Variables["radwareResponse"]).Body.As<string>();
@@ -860,14 +955,13 @@
               return rendered;
             }" />
 
-            <!-- ====== Fail-open: sideband returned 5xx error ====== -->
-            <!-- If status >= 500, fail-open to origin unless SP explicitly set
-                 a blocking verdict (non-empty oop-request-status that isn't "allowed").
-                 Covers: gateway timeouts, DNS failures, connection errors,
-                 and SP 500/502/504 errors.  The connector should never block
-                 traffic because SP had a problem. -->
+            <!-- ====== Fail-open: the inspection endpoint answered 5xx ====== -->
+            <!-- Every 5xx fails open to the origin: a 5xx is an endpoint problem, never a verdict.
+                 Covers gateway timeouts, DNS failures, connection errors and 500/502/504 from
+                 the endpoint. The connector never blocks traffic because SecurePath had a
+                 problem; the request is served and X-Rdwr-Diag says so. -->
             <choose>
-              <when condition="@((int)context.Variables["rwStatus"] >= 500 && (string.IsNullOrEmpty((string)context.Variables["oopRequestStatusHeader"]) || (string)context.Variables["oopRequestStatusHeader"] == "allowed"))">
+              <when condition="@((int)context.Variables["rwStatus"] >= 500)">
                 <set-variable name="radwareDiag" value="@($"sideband_error_failopen_{(int)context.Variables["rwStatus"]}")" />
                 <!-- no return-response → request continues to origin (fail-open) -->
               </when>
@@ -879,7 +973,8 @@
                 <choose>
                   <!-- JSON block from SecurePath -> map to 403 -->
                   <when condition="@(((string)context.Variables["radwareCt"]).StartsWith("application/json"))">
-                    <!-- v2: Fire response-phase log for blocked request -->
+                    <set-variable name="rdwrReturnedBody" value="@((string)context.Variables.GetValueOrDefault("radwareResponseBody", ""))" />
+                    <!-- Response-phase log for the blocked request -->
                     <choose>
                       <when condition="@{
                         var oop_log = (string)context.Variables.GetValueOrDefault("rdwrOopLog", "");
@@ -921,10 +1016,10 @@
                             <value>403</value>
                           </set-header>
                           <set-header name="x-rdwr-o2v-body-bytes-sent" exists-action="override">
-                            <value>0</value>
+                            <value>@(System.Text.Encoding.UTF8.GetByteCount((string)context.Variables.GetValueOrDefault("rdwrReturnedBody", "")).ToString())</value>
                           </set-header>
                           <set-header name="x-rdwr-o2v-bytes-sent" exists-action="override">
-                            <value>0</value>
+                            <value>@(System.Text.Encoding.UTF8.GetByteCount((string)context.Variables.GetValueOrDefault("rdwrReturnedBody", "")).ToString())</value>
                           </set-header>
                           <set-header name="x-rdwr-o2v-request-time" exists-action="override">
                             <value>@{
@@ -962,6 +1057,24 @@
                           return string.IsNullOrEmpty(v) ? null : v;
                         }</value>
                       </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie3", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie4", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie5", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
                       <set-header name="shieldsquare-response" exists-action="append">
                         <value>@{
                           var v = (string)context.Variables.GetValueOrDefault("bmShieldSquareHeader0", "");
@@ -985,7 +1098,12 @@
                   </when>
                   <!-- implicit block -->
                   <otherwise>
-                    <!-- v2: Fire response-phase log for blocked request -->
+                    <set-variable name="rdwrReturnedBody" value="@{
+              bool enabled = (bool)context.Variables.GetValueOrDefault("rdwrCustomBlockPageEnabled", false);
+              if (enabled) { return (string)context.Variables.GetValueOrDefault("rdwrRenderedBlockPage", ""); }
+              return (string)context.Variables.GetValueOrDefault("radwareResponseBody", "");
+            }" />
+                    <!-- Response-phase log for the blocked request -->
                     <choose>
                       <when condition="@{
                         var oop_log = (string)context.Variables.GetValueOrDefault("rdwrOopLog", "");
@@ -1027,10 +1145,10 @@
                             <value>403</value>
                           </set-header>
                           <set-header name="x-rdwr-o2v-body-bytes-sent" exists-action="override">
-                            <value>0</value>
+                            <value>@(System.Text.Encoding.UTF8.GetByteCount((string)context.Variables.GetValueOrDefault("rdwrReturnedBody", "")).ToString())</value>
                           </set-header>
                           <set-header name="x-rdwr-o2v-bytes-sent" exists-action="override">
-                            <value>0</value>
+                            <value>@(System.Text.Encoding.UTF8.GetByteCount((string)context.Variables.GetValueOrDefault("rdwrReturnedBody", "")).ToString())</value>
                           </set-header>
                           <set-header name="x-rdwr-o2v-request-time" exists-action="override">
                             <value>@{
@@ -1071,6 +1189,24 @@
                           return string.IsNullOrEmpty(v) ? null : v;
                         }</value>
                       </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie3", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie4", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie5", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
                       <set-header name="shieldsquare-response" exists-action="append">
                         <value>@{
                           var v = (string)context.Variables.GetValueOrDefault("bmShieldSquareHeader0", "");
@@ -1108,7 +1244,7 @@
                   </when>
                   <otherwise>
                     <set-variable name="radwareDiag" value="@($"redirect_issued_{(int)context.Variables["rwStatus"]}")" />
-                    <!-- v2: Fire response-phase log for redirected request -->
+                    <!-- Response-phase log for the redirected request -->
                     <choose>
                       <when condition="@{
                         var oop_log = (string)context.Variables.GetValueOrDefault("rdwrOopLog", "");
@@ -1153,7 +1289,7 @@
                             <value>0</value>
                           </set-header>
                           <set-header name="x-rdwr-o2v-bytes-sent" exists-action="override">
-                            <value>0</value>
+                            <value>@((20 + 2 + ("Location: " + (string)context.Variables.GetValueOrDefault("radwareLocationHeader", "")).Length + 2).ToString())</value>
                           </set-header>
                           <set-header name="x-rdwr-o2v-request-time" exists-action="override">
                             <value>@{
@@ -1169,7 +1305,7 @@
                       </when>
                     </choose>
                     <return-response>
-                      <set-status code="@((int)context.Variables["rwStatus"])" reason="Redirect" />
+                      <set-status code="@((int)context.Variables["rwStatus"])" reason="@((int)context.Variables["rwStatus"] == 301 ? "Moved Permanently" : "Found")" />
                       <set-header name="Location" exists-action="override">
                         <value>@((string)context.Variables["radwareLocationHeader"])</value>
                       </set-header>
@@ -1188,6 +1324,24 @@
                       <set-header name="Set-Cookie" exists-action="append">
                         <value>@{
                           var v = (string)context.Variables.GetValueOrDefault("bmSetCookie2", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie3", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie4", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie5", "");
                           return string.IsNullOrEmpty(v) ? null : v;
                         }</value>
                       </set-header>
@@ -1212,7 +1366,14 @@
                    (custom block page when enabled), with Bot Manager cookies. -->
               <when condition="@((int)context.Variables["rwStatus"] == 403)">
                 <set-variable name="radwareDiag" value="@($"action_enforced_status_{(int)context.Variables["rwStatus"]}")" />
-                <!-- v2: Fire response-phase log for enforced action -->
+                <set-variable name="rdwrReturnedBody" value="@{
+              bool enabled = (bool)context.Variables.GetValueOrDefault("rdwrCustomBlockPageEnabled", false);
+              string ct = (string)context.Variables.GetValueOrDefault("radwareCt", "text/html");
+              bool isJson = ct.StartsWith("application/json");
+              if (enabled && !isJson) { return (string)context.Variables.GetValueOrDefault("rdwrRenderedBlockPage", ""); }
+              return (string)context.Variables.GetValueOrDefault("radwareResponseBody", "");
+            }" />
+                <!-- Response-phase log for the enforced action -->
                 <choose>
                   <when condition="@{
                     var oop_log = (string)context.Variables.GetValueOrDefault("rdwrOopLog", "");
@@ -1254,10 +1415,10 @@
                         <value>@(((int)context.Variables["rwStatus"]).ToString())</value>
                       </set-header>
                       <set-header name="x-rdwr-o2v-body-bytes-sent" exists-action="override">
-                        <value>0</value>
+                        <value>@(System.Text.Encoding.UTF8.GetByteCount((string)context.Variables.GetValueOrDefault("rdwrReturnedBody", "")).ToString())</value>
                       </set-header>
                       <set-header name="x-rdwr-o2v-bytes-sent" exists-action="override">
-                        <value>0</value>
+                        <value>@(System.Text.Encoding.UTF8.GetByteCount((string)context.Variables.GetValueOrDefault("rdwrReturnedBody", "")).ToString())</value>
                       </set-header>
                       <set-header name="x-rdwr-o2v-request-time" exists-action="override">
                         <value>@{
@@ -1273,7 +1434,7 @@
                   </when>
                 </choose>
                 <return-response>
-                  <set-status code="@((int)context.Variables["rwStatus"])" reason="RadwareAction" />
+                  <set-status code="403" reason="Forbidden" />
                   <set-header name="Content-Type" exists-action="override">
                     <value>@{
                       bool enabled = (bool)context.Variables.GetValueOrDefault("rdwrCustomBlockPageEnabled", false);
@@ -1300,6 +1461,24 @@
                       return string.IsNullOrEmpty(v) ? null : v;
                     }</value>
                   </set-header>
+                  <set-header name="Set-Cookie" exists-action="append">
+                    <value>@{
+                      var v = (string)context.Variables.GetValueOrDefault("bmSetCookie3", "");
+                      return string.IsNullOrEmpty(v) ? null : v;
+                    }</value>
+                  </set-header>
+                  <set-header name="Set-Cookie" exists-action="append">
+                    <value>@{
+                      var v = (string)context.Variables.GetValueOrDefault("bmSetCookie4", "");
+                      return string.IsNullOrEmpty(v) ? null : v;
+                    }</value>
+                  </set-header>
+                  <set-header name="Set-Cookie" exists-action="append">
+                    <value>@{
+                      var v = (string)context.Variables.GetValueOrDefault("bmSetCookie5", "");
+                      return string.IsNullOrEmpty(v) ? null : v;
+                    }</value>
+                  </set-header>
                   <set-header name="shieldsquare-response" exists-action="append">
                     <value>@{
                       var v = (string)context.Variables.GetValueOrDefault("bmShieldSquareHeader0", "");
@@ -1323,14 +1502,227 @@
                   }</set-body>
                 </return-response>
               </when>
-              <!-- Any other status (401, 418, ...): not a verdict the connector knows. Like the
-                   reference connector, pass the request to the origin (fail open) and say so;
-                   the response phase is logged by the outbound fragment as usual. -->
+              <!-- Any other status (401, 418, 429, ...): not a verdict the connector knows.
+                   With Bot Manager enabled and the status listed in rdwr-custom-bot-block-statuses
+                   (or "*"), it is a custom Bot Manager block response: relayed to the client as it
+                   came, logged as blocked (README 3e). Otherwise, like the reference connector, the
+                   request goes to the origin (fail open) and the connector says so; the response
+                   phase is then logged by the outbound fragment as usual. A 5xx never reaches this
+                   branch as a block. -->
               <otherwise>
-                <set-variable name="radwareDiag" value="@($"unexpected_status_{(int)context.Variables["rwStatus"]}")" />
-                <trace source="securepath" severity="error">
-                  <message>@("SecurePath answered " + ((int)context.Variables["rwStatus"]).ToString() + ", which is not a verdict; request served without a verdict (fail open)")</message>
-                </trace>
+                <set-variable name="rdwrCustomBotBlockMatch" value="@{
+                  if (!(bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false)) { return false; }
+                  int st = (int)context.Variables["rwStatus"];
+                  if (st >= 500 || st == 200 || st == 301 || st == 302 || st == 403) { return false; }
+                  string raw = ((string)context.Variables.GetValueOrDefault("rdwrCustomBotBlockStatuses", "") ?? "").Trim();
+                  string lc = raw.ToLower();
+                  if (raw == "" || lc == "-" || lc == "disabled" || lc == "off" || lc == "false" || lc == "none" || lc == "~" || lc == "##disabled##") { return false; }
+                  if (raw == "*") { return true; }
+                  bool match = false;
+                  foreach (var part in raw.Split(',')) {
+                    string p = part.Trim();
+                    if (p == "") { continue; }
+                    int code;
+                    if (!int.TryParse(p, out code)) { return false; }
+                    if (code == st) { match = true; }
+                  }
+                  return match;
+                }" />
+                <choose>
+                  <when condition="@((bool)context.Variables["rdwrCustomBotBlockMatch"])">
+                    <set-variable name="radwareDiag" value="@($"custom_bot_block_status_{(int)context.Variables["rwStatus"]}")" />
+                    <set-variable name="rdwrCustomBotBlockBody" value="@{
+                      string body = (string)context.Variables.GetValueOrDefault("radwareResponseBody", "") ?? "";
+                      string t = body.Trim();
+                      if (t == "" || t == "nil" || t == "null") { return ""; }
+                      return body;
+                    }" />
+                    <set-variable name="rdwrCustomBotBlockPage" value="@{
+                      string body = (string)context.Variables.GetValueOrDefault("rdwrCustomBotBlockBody", "");
+                      if (body != "") { return body; }
+                      string page = (string)context.Variables.GetValueOrDefault("rdwrRenderedBlockPage", "");
+                      return page.Replace("403 Forbidden", ((int)context.Variables["rwStatus"]).ToString() + " Blocked");
+                    }" />
+                    <trace source="securepath" severity="information">
+                      <message>@("SecurePath answered " + ((int)context.Variables["rwStatus"]).ToString() + ", listed in rdwr-custom-bot-block-statuses; relayed to the client as a Bot Manager block" + ((((string)context.Variables["rdwrCustomBotBlockBody"]) == "") ? " (SecurePath sent no body: the connector block page is served)" : ""))</message>
+                    </trace>
+    <!-- Response-phase log for the relayed Bot Manager block -->
+                    <choose>
+                      <when condition="@{
+                        var oop_log = (string)context.Variables.GetValueOrDefault("rdwrOopLog", "");
+                        var oop_id = (string)context.Variables.GetValueOrDefault("rdwrOopId", "");
+                        return (oop_log == "2" || oop_log == "3") && !string.IsNullOrEmpty(oop_id);
+                      }">
+                        <send-one-way-request mode="new">
+                          <set-url>@{
+                            var ep_addr = (string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", "");
+                            var ep_port = (int)context.Variables.GetValueOrDefault("rdwrAppEpPort", 443);
+                            var ep_ssl = (bool)context.Variables.GetValueOrDefault("rdwrAppEpSsl", true);
+                            var scheme = ep_ssl ? "https" : "http";
+                            var path = context.Request.OriginalUrl.Path;
+                            return $"{scheme}://{ep_addr}:{ep_port}{path}";
+                          }</set-url>
+                          <set-method>POST</set-method>
+                          <set-header name="Host" exists-action="override">
+                            <value>@((string)context.Variables["rdwrTrueHost"])</value>
+                          </set-header>
+                          <set-header name="x-rdwr-connector-proto" exists-action="override">
+                            <value>2</value>
+                          </set-header>
+                          <set-header name="x-rdwr-connector-stage" exists-action="override">
+                            <value>log</value>
+                          </set-header>
+                          <set-header name="x-rdwr-plugin-info" exists-action="override">
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.4.0"))</value>
+                          </set-header>
+                          <set-header name="x-rdwr-app-id" exists-action="override">
+                            <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
+                          </set-header>
+                          <set-header name="x-rdwr-api-key" exists-action="override">
+                            <value>@((string)context.Variables.GetValueOrDefault("rdwrApiKey", ""))</value>
+                          </set-header>
+                          <set-header name="x-rdwr-oop-id" exists-action="override">
+                            <value>@((string)context.Variables.GetValueOrDefault("rdwrOopId", ""))</value>
+                          </set-header>
+                          <set-header name="x-rdwr-o2v-status" exists-action="override">
+                            <value>@(((int)context.Variables["rwStatus"]).ToString())</value>
+                          </set-header>
+                          <set-header name="x-rdwr-o2v-body-bytes-sent" exists-action="override">
+                            <value>@(System.Text.Encoding.UTF8.GetByteCount((string)context.Variables.GetValueOrDefault("rdwrCustomBotBlockPage", "")).ToString())</value>
+                          </set-header>
+                          <set-header name="x-rdwr-o2v-bytes-sent" exists-action="override">
+                            <value>@(System.Text.Encoding.UTF8.GetByteCount((string)context.Variables.GetValueOrDefault("rdwrCustomBotBlockPage", "")).ToString())</value>
+                          </set-header>
+                          <set-header name="x-rdwr-o2v-request-time" exists-action="override">
+                            <value>@{
+                              var start = (DateTime)context.Variables.GetValueOrDefault("requestStartTime", DateTime.UtcNow);
+                              return (DateTime.UtcNow - start).TotalSeconds.ToString("F3");
+                            }</value>
+                          </set-header>
+                          <set-header name="x-rdwr-o2h-rdwr-response" exists-action="override">
+                            <value>blocked</value>
+                          </set-header>
+                          <set-body />
+                        </send-one-way-request>
+                      </when>
+                    </choose>
+                                    <return-response>
+                      <set-status code="@((int)context.Variables["rwStatus"])" reason="@{
+                        int st = (int)context.Variables["rwStatus"];
+                        if (st == 429) { return "Too Many Requests"; }
+                        if (st == 401) { return "Unauthorized"; }
+                        if (st == 400) { return "Bad Request"; }
+                        if (st == 406) { return "Not Acceptable"; }
+                        if (st == 451) { return "Unavailable For Legal Reasons"; }
+                        return "Blocked";
+                      }" />
+                      <set-header name="Content-Type" exists-action="override">
+                        <value>@{
+                          if (((string)context.Variables["rdwrCustomBotBlockBody"]) == "") { return "text/html; charset=UTF-8"; }
+                          var ct = ((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("Content-Type", default(string[]))?.FirstOrDefault();
+                          return string.IsNullOrEmpty(ct) ? "text/html" : ct;
+                        }</value>
+                      </set-header>
+                      <set-header name="Retry-After" exists-action="append">
+                        <value>@{
+                          var v = ((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("Retry-After", default(string[]))?.FirstOrDefault();
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Cache-Control" exists-action="append">
+                        <value>@{
+                          var v = ((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("Cache-Control", default(string[]))?.FirstOrDefault();
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Expires" exists-action="append">
+                        <value>@{
+                          var v = ((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("Expires", default(string[]))?.FirstOrDefault();
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Pragma" exists-action="append">
+                        <value>@{
+                          var v = ((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("Pragma", default(string[]))?.FirstOrDefault();
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="WWW-Authenticate" exists-action="append">
+                        <value>@{
+                          var v = ((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("WWW-Authenticate", default(string[]))?.FirstOrDefault();
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Content-Language" exists-action="append">
+                        <value>@{
+                          var v = ((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("Content-Language", default(string[]))?.FirstOrDefault();
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Vary" exists-action="append">
+                        <value>@{
+                          var v = ((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("Vary", default(string[]))?.FirstOrDefault();
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie0", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie1", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie2", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie3", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie4", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="Set-Cookie" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmSetCookie5", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="shieldsquare-response" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmShieldSquareHeader0", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-header name="uzmcr" exists-action="append">
+                        <value>@{
+                          var v = (string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", "");
+                          return string.IsNullOrEmpty(v) ? null : v;
+                        }</value>
+                      </set-header>
+                      <set-body>@((string)context.Variables["rdwrCustomBotBlockPage"])</set-body>
+                    </return-response>
+                  </when>
+                  <otherwise>
+                    <set-variable name="radwareDiag" value="@($"unexpected_status_{(int)context.Variables["rwStatus"]}")" />
+                    <trace source="securepath" severity="error">
+                      <message>@("SecurePath answered " + ((int)context.Variables["rwStatus"]).ToString() + ", which is not a verdict; request served without a verdict (fail open)")</message>
+                    </trace>
+                  </otherwise>
+                </choose>
               </otherwise>
             </choose>
 
@@ -1345,7 +1737,7 @@
       </when>
     </choose>
 
-    <!-- ====== End tier-1 path ====== -->
+    <!-- ====== End of the inspected path ====== -->
 
     <!-- Propagate diagnostics to backend for observability -->
     <choose>

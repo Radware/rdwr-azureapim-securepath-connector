@@ -34,7 +34,7 @@ def test_no_fail_closed_configuration_error_remains():
 def test_diag_header_is_emitted_outside_the_inspection_branch():
     t = frag("inbound")
     i_diag = t.rindex('name="X-Rdwr-Diag"')
-    i_tier1_close = t.rindex("<!-- ====== End tier-1 path ====== -->")
+    i_tier1_close = t.rindex("<!-- ====== End of the inspected path ====== -->")
     assert i_diag > i_tier1_close
 
 
@@ -62,7 +62,7 @@ def test_uzmcr_relay_is_not_gated_on_bot_manager_flag():
 
 def test_403_block_enforcement_branch_is_present():
     t = frag("inbound")
-    assert 'reason="RadwareAction"' in t
+    assert t.count('reason="Forbidden"') >= 3  # reserved header, JSON block, implicit block, 403
     assert t.index('== 403)">') < t.index("unexpected_status_")
 
 

@@ -14,25 +14,36 @@ touched and takes precedence in the policy.
             --prune also removes map entries whose application is gone
     check   exit 1 when the instance differs from the account (for a scheduler)
     export  write the map as a Bicep parameter file for deploy/securepath-apim.bicep
+    render  write what apply would do as a reviewable change bundle (CHANGES.md, apply.sh,
+            the fragment, the backend bodies, app-keys.env) and send nothing to Azure;
+            --offline does not read the instance at all
 
-    python3 tools/securepath-apim-sync.py plan  -g RG -n APIM --cloud-api-key KEY --cloud-context CTX
-    python3 tools/securepath-apim-sync.py apply -g RG -n APIM --cloud-api-key KEY --cloud-context CTX [--prune]
-    python3 tools/securepath-apim-sync.py check -g RG -n APIM --cloud-api-key KEY --cloud-context CTX
-    python3 tools/securepath-apim-sync.py export --cloud-api-key KEY --cloud-context CTX --out appmap.parameters.json
+    python3 tools/securepath-apim-sync.py plan   -g RG -n APIM --cloud-context CTX
+    python3 tools/securepath-apim-sync.py apply  -g RG -n APIM --cloud-context CTX [--prune]
+    python3 tools/securepath-apim-sync.py check  -g RG -n APIM --cloud-context CTX
+    python3 tools/securepath-apim-sync.py export --cloud-context CTX --out appmap.parameters.json
+    python3 tools/securepath-apim-sync.py render -g RG -n APIM --cloud-context CTX --out-dir bundle [--offline] [--prune]
+
+The Radware Cloud portal API key is read from the RDWR_CLOUD_API_KEY environment variable,
+from --cloud-api-key-file PATH, or from --cloud-api-key KEY (visible in shell history and
+process listings: prefer the first two). The context can also come from RDWR_CLOUD_CONTEXT.
 
 --from-file apps.json reads the application list from a file (the JSON the Radware Cloud API
 returns for /v1/gms/applications) instead of calling the API. Applications are keyed by their
 domain (and by the API Protection hostname when one is set). Run it from any machine or
 scheduler with the Azure CLI logged in; the same command run again only changes what differs.
 
-Exit codes: 0 done / in sync, 1 drift (check) or nothing to write, 2 failure.
+Exit codes: 0 done / in sync / bundle written, 1 drift (check) or no application in
+PROTECTING state was returned, 2 failure.
 """
 import argparse
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -164,7 +175,8 @@ def diff_maps(current: dict, desired: dict, current_keys: dict = None):
         differs = any(str(cur.get(f, "")) != str(e.get(f, "")) for f in ("app_id", "endpoint"))
         if not differs:
             if current_keys is not None:
-                differs = current_keys.get(key_nv_name(e["app_id"])) != e["api_key"]
+                have = current_keys.get(key_nv_name(e["app_id"]))
+                differs = have is not None and have != e["api_key"]
             elif str(cur.get("api_key", "")) not in ("{{" + key_nv_name(e["app_id"]) + "}}", e["api_key"]):
                 differs = True
         if differs:
@@ -225,8 +237,16 @@ class AzWriter:
         return json.loads(raw.lstrip("﻿")) if raw.strip() else {}
 
     def put(self, path, body):
-        self.run(["rest", "--method", "PUT", "--uri", f"{self.base}{path}?api-version={API_VERSION}",
-                  "--headers", "Content-Type=application/json", "--body", json.dumps(body), "-o", "none"])
+        # the body may carry an API key: it goes through a mode-600 file, never the command line
+        fd, tmp = tempfile.mkstemp(prefix="securepath-apim-", suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(body, f)
+            os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+            self.run(["rest", "--method", "PUT", "--uri", f"{self.base}{path}?api-version={API_VERSION}",
+                      "--headers", "Content-Type=application/json", "--body", f"@{tmp}", "-o", "none"])
+        finally:
+            os.unlink(tmp)
 
     def sku(self):
         return (self.get("").get("sku") or {}).get("name", "")
@@ -276,8 +296,11 @@ class AzWriter:
     def create_backend(self, name, host):
         self.put(f"/backends/{name}", backend_body(host))
 
-    @staticmethod
-    def backend_name(n, host):
+    def backend_name(self, n, host):
+        # never a name that already exists: a PUT on it would overwrite another endpoint's backend
+        taken = set(self.backend_hosts().values())
+        while f"securepath-sideband-{n}" in taken:
+            n += 1
         return f"securepath-sideband-{n}"
 
     def current_fragment_text(self) -> str:
@@ -443,10 +466,12 @@ def render_bundle(ops, plan_lines, out_dir, rg, apim, offline, prune, source, pr
     def emit(name, text, secret=False):
         path = os.path.join(out_dir, name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
         if secret:
-            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+            f = os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8", newline="\n")
+        else:
+            f = open(path, "w", encoding="utf-8", newline="\n")
+        with f:
+            f.write(text)
         written.append(name)
 
     if fragments:
@@ -469,8 +494,8 @@ def render_bundle(ops, plan_lines, out_dir, rg, apim, offline, prune, source, pr
         sh = [
             "#!/usr/bin/env bash",
             f"# SecurePath application map — apply bundle for {apim} ({rg}), generated {when} by",
-            "# tools/securepath-apim-sync.py render. Review CHANGES.md first. Every step is a PUT (idempotent):",
-            "# running this twice is safe. Needs: az logged in as API Management Service Contributor on the",
+            "# tools/securepath-apim-sync.py render. Review CHANGES.md first. Running it twice is safe: every write",
+            "# is a PUT and removals tolerate an already-removed value. Needs: az logged in as API Management Service Contributor on the",
             "# instance, python3. Run from any directory: bash apply.sh",
             "set -e",
             f'RG="{rg}"',
@@ -482,22 +507,28 @@ def render_bundle(ops, plan_lines, out_dir, rg, apim, offline, prune, source, pr
             f'V="api-version={API_VERSION}"',
             "",
         ]
+        step = 1
         if keys:
-            sh += [f"# 1. {len(keys)} secret Named Value(s) holding API keys (values come from app-keys.env, never from this file)",
-                   '. "$DIR/app-keys.env"']
+            sh += [f"# {step}. {len(keys)} secret Named Value(s) holding API keys. The values come from app-keys.env, never from",
+                   "#    this file, and reach az through a private temporary file, never the command line.",
+                   'if [ -f "$DIR/app-keys.env" ]; then',
+                   '  . "$DIR/app-keys.env"',
+                   '  umask 077; TMP=$(mktemp -d); trap \'rm -rf "$TMP"\' EXIT']
             for n, _ in keys:
-                sh.append(f'az rest --method PUT --uri "$BASE/namedValues/{n}?$V" --headers "Content-Type=application/json" '
-                          f'--body "$(python3 -c \'import json,sys;print(json.dumps({{"properties":{{"displayName":sys.argv[1],"value":sys.argv[2],"secret":True}}}}))\' "{n}" "${_env_name(n)}")" -o none')
-                sh.append(f'echo "named value written: {n}"')
-            sh.append("")
+                sh.append(f'  KEY_NAME="{n}" KEY_VALUE="${_env_name(n)}" python3 -c \'import json,os;print(json.dumps({{"properties":{{"displayName":os.environ["KEY_NAME"],"value":os.environ["KEY_VALUE"],"secret":True}}}}))\' > "$TMP/{n}.json"')
+                sh.append(f'  az rest --method PUT --uri "$BASE/namedValues/{n}?$V" --headers "Content-Type=application/json" --body @"$TMP/{n}.json" -o none')
+                sh.append(f'  echo "named value written: {n}"')
+            sh += ['else', '  echo "app-keys.env not found: skipping the key Named Values (already applied and the file deleted?)"', 'fi', ""]
+            step += 1
         if fragments:
-            sh += ["# 2. the generated application map fragment (replaces the current generated map; hand-written",
+            sh += [f"# {step}. the generated application map fragment (replaces the current generated map; hand-written",
                    "#    entries live in the rdwr-app-map Named Value and are not touched)",
                    'python3 -c \'import json,sys;print(json.dumps({"properties":{"format":"rawxml","value":open(sys.argv[1],encoding="utf-8").read(),"description":"Radware SecurePath generated application map (written by tools/securepath-apim-sync.py)"}}))\' "$DIR/securepath-app-map.fragment.xml" > "$DIR/fragment-body.json"',
                    f'az rest --method PUT --uri "$BASE/policyFragments/{FRAGMENT_ID}?$V" --headers "Content-Type=application/json" --body @"$DIR/fragment-body.json" -o none',
                    f'echo "fragment written: {FRAGMENT_ID}"', ""]
+            step += 1
         if backends:
-            sh += [f"# 3. {len(backends)} backend entit(y/ies): TLS trust for each inspection endpoint on Standard v2 / Premium v2.",
+            sh += [f"# {step}. {len(backends)} backend entit{'y' if len(backends) == 1 else 'ies'}: TLS trust for each inspection endpoint on Standard v2 / Premium v2.",
                    "#    Other tiers use CA certificates (README Step 1, Path A) and skip this step.",
                    'SKU=$(az apim show -g "$RG" -n "$APIM" --query sku.name -o tsv)',
                    'case "$SKU" in',
@@ -506,11 +537,11 @@ def render_bundle(ops, plan_lines, out_dir, rg, apim, offline, prune, source, pr
                 sh.append(f'    az rest --method PUT --uri "$BASE/backends/{n}?$V" --headers "Content-Type=application/json" --body @"$DIR/backends/{n}.json" -o none')
                 sh.append(f'    echo "backend written: {n} -> https://{h}"')
             sh += ["    ;;", '  *) echo "tier $SKU: backend entities not needed (CA certificates, Step 1 Path A)" ;;', "esac", ""]
+            step += 1
         if deletes:
-            sh += [f"# 4. {len(deletes)} key Named Value(s) whose application is gone (--prune)"]
+            sh += [f"# {step}. {len(deletes)} key Named Value(s) whose application is gone (--prune); already-removed ones are skipped"]
             for n in deletes:
-                sh.append(f'az rest --method DELETE --uri "$BASE/namedValues/{n}?$V" --headers "If-Match=*" -o none')
-                sh.append(f'echo "named value removed: {n}"')
+                sh.append(f'az rest --method DELETE --uri "$BASE/namedValues/{n}?$V" --headers "If-Match=*" -o none 2>/dev/null && echo "named value removed: {n}" || echo "named value already removed: {n}"')
             sh.append("")
         sh += ["echo \"done. Verify: python3 tools/securepath-apim-sync.py check -g '$RG' -n '$APIM' --cloud-api-key ... --cloud-context ...\"", ""]
         emit("apply.sh", "\n".join(sh))
@@ -553,7 +584,8 @@ def render_bundle(ops, plan_lines, out_dir, rg, apim, offline, prune, source, pr
         md += ["", "## How to apply", "",
                "```bash", "bash apply.sh", "```", "",
                "Needs the Azure CLI logged in with **API Management Service Contributor** on the instance, and "
-               "`python3`. Every step is a PUT, so running it twice is safe.", "",
+               "`python3`. Running it twice is safe: every write is a PUT and removals tolerate an already-removed value. "
+               "API keys reach Azure through a private temporary file, never the command line.", "",
                "## How to verify", "", "```bash",
                f"python3 tools/securepath-apim-sync.py check -g {rg} -n {apim} --cloud-api-key ... --cloud-context ...",
                f"python3 tools/securepath-apim-lint.py --live -g {rg} -n {apim}",
@@ -596,9 +628,10 @@ def export_parameters(desired, out_path, log=print):
     body = {"$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
             "contentVersion": "1.0.0.0",
             "parameters": {"appMap": {"value": desired}}}
-    with open(out_path, "w", encoding="utf-8") as f:
+    with os.fdopen(os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
         json.dump(body, f, indent=2)
-    log(f"wrote {out_path} ({len(desired)} entries); pass it with --parameters @{os.path.basename(out_path)} together with apimName, appId, apiKey and endpoint")
+    log(f"wrote {out_path} ({len(desired)} entries, contains the applications' API keys — delete it after the deployment); "
+        f"pass it with --parameters @{os.path.basename(out_path)} together with apimName, appId, apiKey and endpoint")
     return 0
 
 
@@ -607,8 +640,9 @@ def main(argv=None):
     ap.add_argument("command", choices=["plan", "apply", "check", "export", "render"])
     ap.add_argument("-g", "--resource-group")
     ap.add_argument("-n", "--apim")
-    ap.add_argument("--cloud-api-key", help="Radware Cloud portal API key")
-    ap.add_argument("--cloud-context", help="Application Protection ID (context header)")
+    ap.add_argument("--cloud-api-key", help="Radware Cloud portal API key (prefer RDWR_CLOUD_API_KEY or --cloud-api-key-file: this form is visible in shell history)")
+    ap.add_argument("--cloud-api-key-file", help="file holding the Radware Cloud portal API key")
+    ap.add_argument("--cloud-context", help="Application Protection ID (context header; or RDWR_CLOUD_CONTEXT)")
     ap.add_argument("--from-file", help="read the application list from this JSON file instead of the Radware Cloud API")
     ap.add_argument("--prune", action="store_true", help="apply: remove map entries whose application is gone from the account")
     ap.add_argument("--include-provisioning", action="store_true", help="also include applications still provisioning")
@@ -617,13 +651,21 @@ def main(argv=None):
     ap.add_argument("--offline", action="store_true", help="render: do not read the instance; bundle the whole desired state")
     a = ap.parse_args(argv)
     try:
+        cloud_key = a.cloud_api_key or os.environ.get("RDWR_CLOUD_API_KEY", "")
+        if a.cloud_api_key_file:
+            with open(a.cloud_api_key_file, encoding="utf-8") as f:
+                cloud_key = f.read().strip()
+        cloud_context = a.cloud_context or os.environ.get("RDWR_CLOUD_CONTEXT", "")
+        a.cloud_context = cloud_context
         if a.from_file:
             with open(a.from_file, encoding="utf-8") as f:
                 raw = json.load(f)
-        elif a.cloud_api_key and a.cloud_context:
-            raw = fetch_cloud_apps(a.cloud_api_key, a.cloud_context)
+        elif cloud_key and cloud_context:
+            raw = fetch_cloud_apps(cloud_key, cloud_context)
         else:
-            ap.error("give --cloud-api-key and --cloud-context, or --from-file")
+            ap.error("give the Radware Cloud API key (RDWR_CLOUD_API_KEY, --cloud-api-key-file or --cloud-api-key) and the context (RDWR_CLOUD_CONTEXT or --cloud-context), or --from-file")
+        if isinstance(raw, dict):
+            raw = raw.get("content") or raw.get("applications") or []
         if a.include_provisioning:
             for app in raw:
                 if isinstance(app, dict) and app.get("deploymentStatus") == "PROVISIONING":

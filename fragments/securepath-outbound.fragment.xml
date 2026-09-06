@@ -23,24 +23,46 @@
           </when>
         </choose>
         <choose>
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmSetCookie3", "")))">
+            <set-header name="Set-Cookie" exists-action="append">
+              <value>@((string)context.Variables["bmSetCookie3"])</value>
+            </set-header>
+          </when>
+        </choose>
+        <choose>
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmSetCookie4", "")))">
+            <set-header name="Set-Cookie" exists-action="append">
+              <value>@((string)context.Variables["bmSetCookie4"])</value>
+            </set-header>
+          </when>
+        </choose>
+        <choose>
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmSetCookie5", "")))">
+            <set-header name="Set-Cookie" exists-action="append">
+              <value>@((string)context.Variables["bmSetCookie5"])</value>
+            </set-header>
+          </when>
+        </choose>
+        <choose>
           <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmShieldSquareHeader0", "")))">
             <set-header name="shieldsquare-response" exists-action="append">
               <value>@((string)context.Variables["bmShieldSquareHeader0"])</value>
             </set-header>
           </when>
         </choose>
+        <!-- The uzmcr header (Bot Manager mobile flow) is relayed with the other Bot Manager
+             headers: only when Bot Manager is enabled. As a verdict signal it is honoured
+             regardless (inbound). -->
+        <choose>
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", "")))">
+            <set-header name="uzmcr" exists-action="append">
+              <value>@((string)context.Variables["bmUzmcrHeader0"])</value>
+            </set-header>
+          </when>
+        </choose>
       </when>
     </choose>
-    <!-- The uzmcr header (Bot Manager mobile flow) is relayed to the client whenever
-         SecurePath sent it, independently of rdwr-bot-manager-enabled. -->
-    <choose>
-      <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", "")))">
-        <set-header name="uzmcr" exists-action="append">
-          <value>@((string)context.Variables["bmUzmcrHeader0"])</value>
-        </set-header>
-      </when>
-    </choose>
-    <!-- ====== v2 Response Phase Logging ====== -->
+    <!-- ====== Response-phase log to SecurePath ====== -->
     <choose>
       <when condition="@{
         var oop_log = (string)context.Variables.GetValueOrDefault("rdwrOopLog", "");
@@ -94,10 +116,7 @@
           <set-header name="x-rdwr-o2v-bytes-sent" exists-action="override">
             <value>@{
               // bytes-sent = status line (~20 bytes) + serialized response
-              // headers ("name: value\r\n" each) + final empty line (2 bytes)
-              // + body. Matches NGINX $bytes_sent semantics. Without the
-              // header term, this previously equalled x-rdwr-o2v-body-bytes-sent.
-              // Fixed in v1.3.2 (2026-05-03).
+              // headers ("name: value\r\n" each) + final empty line (2 bytes) + body
               try {
                 var body = context.Response.Body.As<byte[]>(preserveContent: true);
                 int bodyLen = body != null ? body.Length : 0;
@@ -123,69 +142,69 @@
           </set-header>
           <!-- Origin response headers (x-rdwr-o2h-*) — only set when non-empty -->
           <set-header name="x-rdwr-o2h-content-type" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("Content-Type", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Content-Type", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-server" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("Server", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Server", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-set-cookie" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("Set-Cookie", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Set-Cookie", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-cache-control" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("Cache-Control", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Cache-Control", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-content-security-policy" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("Content-Security-Policy", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Content-Security-Policy", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-referrer-policy" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("Referrer-Policy", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Referrer-Policy", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-strict-transport-security" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("Strict-Transport-Security", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Strict-Transport-Security", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-access-control-allow-origin" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Origin", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Origin", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-access-control-allow-credentials" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Credentials", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Credentials", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-access-control-expose-headers" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("Access-Control-Expose-Headers", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Access-Control-Expose-Headers", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-access-control-allow-methods" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Methods", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Methods", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-permissions-policy" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("Permissions-Policy", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Permissions-Policy", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-x-frame-options" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("X-Frame-Options", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("X-Frame-Options", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-x-content-type-options" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("X-Content-Type-Options", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("X-Content-Type-Options", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-x-backend-server" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("X-Backend-Server", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("X-Backend-Server", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-x-runtime" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("X-Runtime", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("X-Runtime", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-x-cf-powered-by" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("X-CF-Powered-By", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("X-CF-Powered-By", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-x-aspnet-version" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("X-AspNet-Version", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("X-AspNet-Version", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-rdwr-response" exists-action="override">
             <value>allowed</value>
           </set-header>
           <set-header name="x-rdwr-o2h-transfer-encoding" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("Transfer-Encoding", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Transfer-Encoding", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
           <set-header name="x-rdwr-o2h-content-encoding" exists-action="override">
-            <value>@(context.Response.Headers.GetValueOrDefault("Content-Encoding", ""))</value>
+            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Content-Encoding", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
           </set-header>
-          <!-- Mode 3: content-type and content-transfer-encoding for base64 body -->
+          <!-- Body sample requested by SecurePath: content-type and content-transfer-encoding for the base64 body -->
           <set-header name="content-type" exists-action="override">
             <value>@{
               var oop_log = (string)context.Variables.GetValueOrDefault("rdwrOopLog", "");
@@ -251,6 +270,7 @@
             return "";
           }</set-body>
         </send-one-way-request>
+        <set-variable name="rdwrLogSent" value="@(true)" />
       </when>
     </choose>
 </fragment>

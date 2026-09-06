@@ -195,11 +195,10 @@ def test_T07_no_app_mapping():
     assert codes(f) == ["T07"] and "no application map entry" in f[0].message
 
 
-def test_T08_bypassed_by_rule():
+def test_bypass_by_rule_is_not_a_finding():
     t = trace([inspector(), enter_fragment(), setvar("shouldBypassRadware", True), leave_fragment()])
-    f = lint.lint_trace(t)
-    assert codes(f) == ["T08"]
-    assert "bypassed by rule" in lint.format_trace_summary(lint.summarize_trace(t))
+    assert lint.lint_trace(t) == []
+    assert "a bypass rule matched" in lint.format_trace_summary(lint.summarize_trace(t))
 
 
 def test_block_verdict_summary():
@@ -242,3 +241,66 @@ def test_cli_trace_with_bom(capsys):
         assert lint.main(["--trace", f.name]) == 0
     finally:
         os.unlink(f.name)
+
+
+def test_enforced_403_is_a_block_not_a_fail_open():
+    t = trace([inspector(), enter_fragment()] + sideband_sent(status=403, headers={})
+              + [setvar("radwareDiag", ""), setvar("rwStatus", 403), setvar("oopRequestStatusHeader", ""),
+                 setvar("radwareDiag", "action_enforced_status_403")], backend=[])
+    s = lint.summarize_trace(t)
+    assert s["diag"] is None and s["enforced"] == "action_enforced_status_403"
+    assert lint.lint_trace(t) == [] and "block (403" in lint.format_trace_summary(s)
+
+
+def test_custom_bot_block_relay_summary():
+    t = trace([inspector(), enter_fragment()] + sideband_sent(status=429, headers={"retry-after": "30"})
+              + [setvar("radwareDiag", ""), setvar("rwStatus", 429), setvar("oopRequestStatusHeader", ""),
+                 setvar("radwareDiag", "custom_bot_block_status_429")], backend=[])
+    s = lint.summarize_trace(t)
+    assert lint.lint_trace(t) == []
+    assert "block (custom Bot Manager status 429 relayed to the client)" in lint.format_trace_summary(s)
+
+
+# ---------------------------------------------------------------- diag classification and T01 wording
+
+def test_every_connector_diag_value_is_classified():
+    fail_open = ["sideband_error_or_timeout", "sideband_error_failopen_503", "wrong_api_key_redirect",
+                 "unexpected_status_418", "no_app_mapping", "config_incomplete", "app_map_invalid"]
+    for d in fail_open:
+        t = trace([inspector(), enter_fragment()] + sideband_sent() + diag(d))
+        s = lint.summarize_trace(t)
+        assert s["diag"] == d and "served uninspected" in lint.format_trace_summary(s), d
+    for d, text in (("uzmcr_allow", "mobile exception"), ("multipart_headers_only", "headers-only")):
+        t = trace([inspector(), enter_fragment()] + sideband_sent() + [setvar("rwStatus", 200), setvar("radwareDiag", d)])
+        s = lint.summarize_trace(t)
+        assert s["diag"] is None and s["note"] == d and text in lint.format_trace_summary(s) and lint.lint_trace(t) == [], d
+    t = trace([inspector(), enter_fragment()] + sideband_sent(status=302, headers={"location": "https://challenge.example/"})
+              + [setvar("rwStatus", 302), setvar("radwareDiag", "redirect_issued_302")], backend=[])
+    s = lint.summarize_trace(t)
+    assert s["enforced"] == "redirect_issued_302" and "redirect (302 from SecurePath)" in lint.format_trace_summary(s)
+    assert lint.lint_trace(t) == []
+
+
+def test_T01_names_the_policy_that_ended_the_request():
+    t = trace([inspector(), e("validate-jwt", {"message": "JWT validation failed."})], backend=[])
+    f = lint.lint_trace(t)
+    assert codes(f) == ["T01"] and "'validate-jwt' ran and the connector was never reached" in f[0].message
+
+
+def test_redact_replaces_credentials_everywhere():
+    t = trace([inspector(), e("api-inspector", {"request": {"headers": [{"name": "Authorization", "value": "Bearer abc"},
+                                                                      {"name": "Cookie", "value": "__uzma=1"},
+                                                                      {"name": "Apim-Debug-Authorization", "value": "tok"}]}}),
+               enter_fragment(), e("set-header", {"header": {"name": "X-Rdwr-Api-Key", "value": "k-secret"}, "message": "assigned"}),
+               setvar("rdwrApiKey", "k-secret")] + sideband_sent())
+    n = lint.redact_trace(t)
+    dumped = json.dumps(t)
+    assert n >= 5 and "Bearer abc" not in dumped and "k-secret" not in dumped and "tok" not in dumped and "__uzma=1" not in dumped
+    assert lint.summarize_trace(t)["connector_ran"]  # still readable
+
+
+def test_cli_redact_in_place(tmp_path):
+    f = tmp_path / "t.json"
+    f.write_text(json.dumps(trace([inspector(), e("api-inspector", {"request": {"headers": [{"name": "authorization", "value": "x"}]}}), enter_fragment()] + sideband_sent())))
+    assert lint.main(["--redact", str(f)]) == 0
+    assert "<redacted>" in f.read_text() and '"x"' not in f.read_text()

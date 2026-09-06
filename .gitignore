@@ -1,39 +1,31 @@
-# Archive (previous versions and dev docs)
-_archive/
-
-# OS
+# OS files
 .DS_Store
 Thumbs.db
 
-# Local CA bundles
-*.pem
-*.cer
-
-# Python cache
+# Python caches
 __pycache__/
+.pytest_cache/
 
-# Other connector sources
-rdwr_lambda_connector_v1.2.9/
-rdwr_nginx_connector_v1.0.6/
-
-# Internal-only files (must not appear in customer-facing repo)
-.github/COPILOT_INSTRUCTIONS.md
-
-# Built release artifacts (uploaded to GitHub releases, never committed)
+# Built release archives (published as GitHub release assets, never committed)
 *.zip
 *.tar.gz
 SHA256SUMS
 
-# ...but the Radware CA certificates MUST ship so customers can upload them to
-# API Management. These are public CA certificates presented on every TLS
-# handshake, not secrets. Step 1 Path A of the README instructs customers to
-# upload the root and the intermediate individually, so all three must be
-# tracked — omitting them produced release archives with an empty certs/
-# directory in v1.3.0 through v1.3.2.
+# Local files the tools write
+*.log
+trace.json
+securepath-apim-bundle/
+securepath-appmap.parameters.json
+
+# Certificates other than the Radware certificate authority, which must ship:
+# customers upload certs/rdwr-root-ca.pem and certs/rdwr-intermediate-ca.pem
+# in Step 1 Path A (public CA certificates, not secrets).
+*.pem
+*.cer
 !certs/rdwr-ca-chain.pem
 !certs/rdwr-root-ca.pem
 !certs/rdwr-intermediate-ca.pem
-!rdwr_ca_chain.pem
 
-# Engineering-only assistant notes (never customer-facing)
+# Engineering notes, not part of the package
 CLAUDE.md
+_archive/

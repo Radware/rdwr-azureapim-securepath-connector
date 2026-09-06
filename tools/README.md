@@ -23,11 +23,17 @@ Exit code 0 means clean, 1 means findings, 2 means the instance or file could no
 | L08 | `rdwr-app-id` contains a dot, or `rdwr-app-ep-addr` is not an `.oop.radwarecloud.net` host | README Step 3a |
 | L09 | Standard v2 / Premium v2: an inspection endpoint has no matching backend entity | README Step 1, Path B; without it traffic is served uninspected |
 | L10 | `rdwr-app-map` is present but not valid | Single-quoted JSON; each entry needs `app_id`, `api_key`, `endpoint`; `base_path` starts with `/` |
+| L11 | The generated-map fragment `securepath-app-map` is missing, malformed, or not referenced immediately before `securepath-inbound` | Register `fragments/securepath-app-map.fragment.xml` and put its `include-fragment` line right before the inbound one (a fragment cannot include a fragment; the policy must) |
+| L12 | A generated-map entry references a key Named Value (`rdwr-app-key-…`) that does not exist | Run `securepath-apim-sync apply`; it writes the key Named Values before the fragment |
+| L13 | `rdwr-custom-bot-block-statuses` (or a map entry's `bot_block_statuses`) is not a status-code list, lists a standard verdict (200/301/302/403) or a 5xx, or is set while Bot Manager is disabled | See README 3e; the setting is ignored in each of those cases |
+| L14 | A connector fragment on the instance differs from the file shipped in this package, or is referenced but not registered | Re-register it from `fragments/` and run the check again. A fragment registration is asynchronous: the CLI reports success before validation, so a rejected upload silently keeps the previous fragment |
 
 Run it after every install and whenever a policy on the instance changes.
 
 The checks are text-based on purpose: API Management policy documents are not well-formed XML,
 so no XML parser is involved and the tool never rewrites a document.
+
+To run the tools' own tests (needs `pytest`):
 
     python3 -m pytest tools/tests -q
 
@@ -52,7 +58,10 @@ whether the response-phase log was sent, and what the origin answered. Findings:
 | T05 | SecurePath redirected to `wrong-api-key` | Step 3a: Application ID / API key |
 | T06 | SecurePath answered 5xx; served uninspected | usually transient; contact Radware with the trace if sustained |
 | T07 | Served uninspected for another reason (`X-Rdwr-Diag` value: `no_app_mapping`, `config_incomplete`, `app_map_invalid`, ...) | Step 3d, the `X-Rdwr-Diag` table in Step 5 |
-| T08 | The connector ran but made no inspection call: a bypass rule matched | Step 3b (static extensions, methods not to inspect, inline trusted sources) — expected for such requests |
+
+A request that matched a bypass rule (a static extension, an excluded method, an inline trusted source) is not a finding: the verdict line of the readout says so and the exit code is 0.
+
+`--redact trace.json` replaces, in place, the credential values inside a trace (the request's `Authorization`, subscription key and cookies, the debug token, and the `x-rdwr-api-key` the connector sends) so the file can be shared. `securepath-apim-trace.sh` does this for every trace it saves.
 
 Exit code 0 when the trace shows a completed inspection, 1 with findings, 2 when the file is not a trace.
 
@@ -74,15 +83,18 @@ different API than `API_ID`, or a proxy removed the header).
 
 ## securepath-apim-sync
 
-Keeps the application map (`rdwr-app-map`) and, on Standard v2 / Premium v2, the backend
-entities in step with the SecurePath applications of your Radware Cloud account. Needs a portal
-API key and your Application Protection ID; the Azure CLI logged in for everything but `export`.
+Keeps the generated application map — the `securepath-app-map` fragment and one `rdwr-app-key-<id>`
+Named Value per application — and, on Standard v2 / Premium v2, the backend entities in step with
+the SecurePath applications of your Radware Cloud account (the hand-written `rdwr-app-map` Named
+Value is never touched). Needs a portal API key and your Application Protection ID, read from
+`RDWR_CLOUD_API_KEY` and `RDWR_CLOUD_CONTEXT` (or `--cloud-api-key-file`; `--cloud-api-key` works
+but lands in shell history); the Azure CLI logged in for everything but `export` and `render --offline`.
 
-    python3 tools/securepath-apim-sync.py plan   -g RG -n APIM --cloud-api-key KEY --cloud-context CTX
-    python3 tools/securepath-apim-sync.py apply  -g RG -n APIM --cloud-api-key KEY --cloud-context CTX [--prune]
-    python3 tools/securepath-apim-sync.py check  -g RG -n APIM --cloud-api-key KEY --cloud-context CTX
-    python3 tools/securepath-apim-sync.py export --cloud-api-key KEY --cloud-context CTX --out appmap.parameters.json
-    python3 tools/securepath-apim-sync.py render -g RG -n APIM --cloud-api-key KEY --cloud-context CTX --out-dir bundle [--offline] [--prune]
+    python3 tools/securepath-apim-sync.py plan   -g RG -n APIM --cloud-context CTX
+    python3 tools/securepath-apim-sync.py apply  -g RG -n APIM --cloud-context CTX [--prune]
+    python3 tools/securepath-apim-sync.py check  -g RG -n APIM --cloud-context CTX
+    python3 tools/securepath-apim-sync.py export --cloud-context CTX --out appmap.parameters.json
+    python3 tools/securepath-apim-sync.py render -g RG -n APIM --cloud-context CTX --out-dir bundle [--offline] [--prune]
 
 | Command | Does | Exit |
 |---|---|---|

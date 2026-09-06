@@ -1,8 +1,26 @@
 # Release Notes — Radware SecurePath Connector for Azure API Management
 
+### Named Values and version
+
+Three new Named Values (23 in total): `rdwr-app-map`, `rdwr-true-host-header` and
+`rdwr-custom-bot-block-statuses`. `x-rdwr-plugin-info` becomes `700-v1.4.0`.
+
+### Upgrading from v1.3.x
+
+1. Create the three new Named Values (README 3b) and set `plugin-version-info` to `700-v1.4.0`.
+2. Register the four v1.4.0 fragments (README Step 4, Form 1, first block). Two are new
+   (`securepath-app-map`, `securepath-onerror`); the other two replace the v1.3.4 ones in place.
+3. If you installed v1.3.4 Form C (two fragments referenced from a policy), add the two missing
+   include lines — `securepath-app-map` immediately before `securepath-inbound`, and
+   `securepath-onerror` in `<on-error>` (README Form 2).
+4. If you installed v1.3.4 Form A or B (a policy document), replace it with the fragment install
+   (Form 1 or 2) or with `rdwr-azureapim-securepath-connector-v1.4.xml` (Form 3).
+5. Run `python3 tools/securepath-apim-lint.py --live` (README 5e) and trace one request
+   (README Debugging, Option A).
+
 ---
 
-## v1.4.0 — in progress, not yet released
+## v1.4.0 (2026-09-07)
 
 ### Several SecurePath applications on one instance
 
@@ -40,42 +58,73 @@ map used to be able to end a request with a 500. Such requests are now served wi
 inspection and marked with `X-Rdwr-Diag` (`config_incomplete`, `no_app_mapping`,
 `app_map_invalid`) and a trace line, so the condition is visible without affecting traffic.
 
-### Two behaviours aligned with the reference connector
+### Two behaviours aligned with the other SecurePath connectors
 
 - A SecurePath response with a status the connector does not know (for example 401 or 418) is no
   longer relayed to the client. The request is served without a verdict, marked with
-  `X-Rdwr-Diag: unexpected_status_<code>` and a trace line, which is what the reference connector
-  does.
-- The `uzmcr` header (the Bot Manager mobile flow) is relayed to the client whenever SecurePath
-  sends it, no longer only when `rdwr-bot-manager-enabled` is true.
+  `X-Rdwr-Diag: unexpected_status_<code>` and a trace line, which is what the other SecurePath
+  connectors do — unless the status is listed in `rdwr-custom-bot-block-statuses` (below).
+- The `uzmcr` header (the Bot Manager mobile flow) is honoured as an allow signal whether or not
+  Bot Manager is enabled, and relayed to the client — with the Bot Manager cookies — only when
+  `rdwr-bot-manager-enabled` is true, as the SecurePath specification requires.
 
 ### Requests rejected by your own policies now get a response-phase record
 
-A third fragment, `fragments/securepath-onerror.fragment.xml`, sends the response-phase log from
+An on-error fragment, `fragments/securepath-onerror.fragment.xml`, sends the response-phase log from
 the `on-error` section. Previously, when the connector allowed a request and a later policy in
 the gateway rejected it (an expired token, a rate limit), API Management skipped the outbound
-section and the record for that request had no response status. All three fragments are
-referenced together; the install forms and the Bicep template do this for you.
+section and the record for that request had no response status. All four fragments —
+`securepath-app-map`, `securepath-inbound`, `securepath-outbound`, `securepath-onerror` — are
+referenced together, the app-map one immediately before the inbound one; the install forms and the
+Bicep template do this for you.
 
 ### Fragments at All APIs scope are the default install
 
 The connector installed at the All APIs scope runs before every API's own policy, so nothing has
 to be ordered by hand and no existing policy is edited. `deploy/securepath-apim.bicep` installs
 everything in one deployment. The whole-document form is now generated from the fragments
-(`rdwr-azureapim-securepath-connector-v1.4.xml`); the v1.3 documents remain for one release.
+(`rdwr-azureapim-securepath-connector-v1.4.xml`); the v1.3 documents are no longer shipped.
 
 ### `tools/securepath-apim-lint.py`
 
 Reads a policy document or a live instance and reports the conditions under which the connector
 is installed but ineffective: missing or duplicated install, an API policy without `<base />`, a
 request-ending policy placed ahead of the connector, an empty `set-variable` left by a manual
-merge, missing or malformed Named Values, an invalid application map, and a missing backend
-entity on v2 tiers.
+merge, missing or malformed Named Values, an invalid or mistyped application map, a missing
+backend entity on v2 tiers, a fragment on the instance that differs from the shipped file (a
+fragment registration is asynchronous and a rejected upload keeps the previous fragment), and an
+invalid custom Bot Manager status list.
 
-Two new Named Values (22 in total): `rdwr-app-map` and `rdwr-true-host-header`.
-`x-rdwr-plugin-info` becomes `700-v1.4.0`.
+### Custom Bot Manager block responses are relayed
 
----
+- New Named Value **`rdwr-custom-bot-block-statuses`** (default `##DISABLED##`; Bicep parameter
+  `customBotBlockStatuses`). When Bot Manager is enabled and SecurePath answers with a status
+  outside the standard verdicts that is listed here (`429`, `429,418`, or `*` for any), the connector
+  relays that response to the client as a Bot Manager block: status, body, `Content-Type`,
+  `Retry-After`, `Cache-Control`, `Expires`, `Pragma`, `WWW-Authenticate`, `Content-Language`,
+  `Vary`, and the Bot Manager cookies; the response-phase log marks it `blocked`. A missing body is
+  replaced by the connector's block page with that status. Standard verdicts are unaffected, a
+  `5xx` is never relayed, an invalid list is ignored (and reported by the install check as `L13`),
+  and an application-map entry may override the list with `bot_block_statuses`. Matches the
+  NGINX connector's `rdwr_custom_bot_block_statuses`. README 3e.
+
+### Robustness and hygiene
+
+- A numeric or boolean Named Value the policy cannot read (`10s`, `yes`) no longer fails every
+  request: the documented default is used and the trace names the value.
+- A client-supplied `X-Rdwr-Diag` header is removed before the connector runs, so the signal your
+  backend logs cannot be forged.
+- `rdwr-true-client-ip-header` now defaults to `##DISABLED##`; when set, only the first address in
+  the header is used and only if it is a valid IP address. `rdwr-inline-headers-enabled` no longer
+  bypasses inspection on its own: a trusted-source list is required.
+- All Bot Manager cookies SecurePath sends are relayed (up to six per response, previously three).
+- The response-phase log of a blocked or redirected request reports the bytes actually sent to the
+  client instead of zero, and origin response headers are reported only when the origin sent them.
+- The response-phase log is sent once per request even when an outbound policy fails after it.
+- Block responses use standard HTTP reason phrases (`Forbidden`, `Found`, `Too Many Requests`).
+- An application-map entry that is not an object, or whose `port`, `ssl` or `bot_manager` has the
+  wrong type, is treated as an invalid map (served uninspected, `X-Rdwr-Diag: app_map_invalid`)
+  instead of failing the request; the install check names the entry.
 
 ### `securepath-apim-sync render`: a change bundle instead of a direct write
 
@@ -89,7 +138,9 @@ Two new Named Values (22 in total): `rdwr-app-map` and `rdwr-true-host-header`.
 
 - **`tools/securepath-apim-trace.sh`** captures one API Management trace without the Portal —
   debug token for the API, one request through the URL your clients use (Front Door included),
-  fetch by `Apim-Trace-Id`, save, read. Anything after the script name is passed to `curl`.
+  fetch by `Apim-Trace-Id`, save, redact the credentials inside it, read. Anything after the
+  script name is passed to `curl`. `securepath-apim-lint.py --redact` does the redaction for a
+  trace saved any other way.
 - **`securepath-apim-lint.py --trace trace.json`** reads any trace (from the script, the Portal,
   or a colleague) and prints a readout: whether the connector ran, what ran before it, where the
   inspection call went and how it ended, the verdict, and why a request was served uninspected.
@@ -216,7 +267,7 @@ with no error surfaced. The tier table, Step 1 and the troubleshooting section n
 
 - **`x-rdwr-o2v-bytes-sent` now reports total wire bytes** (status line + headers + body), not body length alone. `x-rdwr-o2v-body-bytes-sent` continues to report body bytes only.
 
-### Sideband Plugin Info
+### Inspection call Plugin Info
 
 - `x-rdwr-plugin-info` default updated to `700-v1.3.2`.
 
@@ -238,10 +289,10 @@ Same XML policy file (`rdwr-azureapim-securepath-connector-v1.3.xml`). No new Na
   - `allowed` — the request reached the origin backend
   - `blocked` — the connector blocked or redirected the request
   
-  This enables the SecurePath portal to report which requests actually reached origin.
+  This enables the Radware Cloud portal to report which requests actually reached origin.
 - **Response-phase log on all verdict paths.** The response-phase log now fires on allow, block, and redirect verdicts (previously only on allow). This gives full analytics visibility for traffic that never reaches the origin.
 
-### Sideband Plugin Info
+### Inspection call Plugin Info
 - `x-rdwr-plugin-info` default updated to `700-v1.3.1`.
 
 ### Deployment
@@ -251,16 +302,16 @@ Same XML policy file (`rdwr-azureapim-securepath-connector-v1.3.xml`). No new Na
 
 ## v1.3.0 (2026-03-12)
 
-**General availability.** Full SecurePath feature coverage at the API Management policy layer. Adds asynchronous response-phase logging via `send-one-way-request`, complete sideband header assembly, and a customisable block page.
+**General availability.** Full SecurePath feature coverage at the API Management policy layer. Adds asynchronous response-phase logging via `send-one-way-request`, complete inspection call header assembly, and a customisable block page.
 
 ### Features
 - **XML policy-based architecture.** No custom C# code; all SecurePath logic is implemented as Azure APIM XML policies.
-- **Complete sideband header assembly.** All mandatory `x-rdwr-*` headers (`x-rdwr-app-id`, `x-rdwr-api-key`, `x-rdwr-connector-ip`, `x-rdwr-true-client-ip`, `x-rdwr-host`, `x-rdwr-connector-port`, `x-rdwr-connector-scheme`, `x-rdwr-plugin-info`, `x-rdwr-connector-proto`, `x-rdwr-connector-stage`).
+- **Complete inspection call header assembly.** All mandatory `x-rdwr-*` headers (`x-rdwr-app-id`, `x-rdwr-api-key`, `x-rdwr-connector-ip`, `x-rdwr-true-client-ip`, `x-rdwr-host`, `x-rdwr-connector-port`, `x-rdwr-connector-scheme`, `x-rdwr-plugin-info`, `x-rdwr-connector-proto`, `x-rdwr-connector-stage`).
 - **Verdict enforcement.** Allow, block (HTML and JSON), 301/302 redirect, challenge, true-bypass.
 - **Bot Manager integration.** Bot Manager cookie and header propagation on all verdict paths.
-- **Response-phase logging (v2).** Fire-and-forget log POST via `send-one-way-request`, correlated by `x-rdwr-oop-id`. Captures origin response metadata; mode 3 includes a base64-encoded body sample.
+- **Response-phase logging (v2).** Fire-and-forget log POST via `send-one-way-request`, correlated by `x-rdwr-oop-id`. Captures origin response metadata; body sample includes a base64-encoded body sample.
 - **Reserved header security.** Strips spoofed `x-rdwr-*` headers from incoming client requests (returns 403).
-- **Static resource bypass.** Configurable file extensions and HTTP methods skip sideband entirely.
+- **Static resource bypass.** Configurable file extensions and HTTP methods skip inspection call entirely.
 - **Fail-open by default.** Traffic flows to backend if SecurePath is unreachable.
 - **Custom block page.** Configurable HTML/JSON block page rendered on block verdict, with transaction ID extraction.
 
@@ -269,7 +320,7 @@ Same XML policy file (`rdwr-azureapim-securepath-connector-v1.3.xml`). No new Na
 - **`x-rdwr-connector-scheme` always `https`.** Azure APIM forces HTTPS termination; the scheme value reflects this.
 - **Partial body format.** APIM forwards a truncated body when oversize is detected; other Radware SecurePath connectors may instead send `Content-Length: 0`. Both are valid SecurePath inputs.
 
-### Sideband Plugin Info
+### Inspection call Plugin Info
 - `x-rdwr-plugin-info` value: `700-v1.3.0`. Platform code `700` identifies this connector as the Azure API Management variant.
 
 ### Deployment
@@ -284,7 +335,7 @@ Deploy the XML policy file (`rdwr-azureapim-securepath-connector-v1.3.xml`) to y
 
 ## v1.2.0 (2025-11-30)
 
-Bot Manager cookie and header handling, reserved header security, static bypass, sideband Host header override for Azure Web Apps backends.
+Bot Manager cookie and header handling, reserved header security, static bypass, inspection call Host header override for Azure Web Apps backends.
 
 ---
 
@@ -296,7 +347,7 @@ Body handling improvements, chunked request support.
 
 ## v1.0.0 (2025-05-01)
 
-Initial release. Basic sideband and verdict enforcement.
+Initial release. Basic inspection call and verdict enforcement.
 
 ---
 
@@ -304,8 +355,11 @@ Initial release. Basic sideband and verdict enforcement.
 
 | Version    | Date       | Status      | Highlights                                                       |
 |------------|------------|-------------|------------------------------------------------------------------|
-| **v1.3.2** | 2026-05-03 | **Current** | `x-rdwr-o2v-bytes-sent` reports total wire bytes (status line + headers + body) |
-| v1.3.1     | 2026-03-31 | Superseded  | Disposition header, v2 log on block/redirect, body-truncation fix |
+| **v1.4.0** | 2026-09-07 | **Current** | Several applications on one instance, generated map and sync tool, on-error log, custom Bot Manager block responses, install check, trace tool |
+| v1.3.4     | 2026-08-16 | Superseded  | Three install forms, pre-flight checks (documentation and packaging; policy unchanged) |
+| v1.3.3     | 2026-08-14 | Superseded  | Certificate files shipped in the package (documentation and packaging) |
+| v1.3.2     | 2026-05-03 | Superseded  | `x-rdwr-o2v-bytes-sent` reports total wire bytes (status line + headers + body) |
+| v1.3.1     | 2026-03-31 | Superseded  | Disposition header, response-phase log on block/redirect, body-truncation fix |
 | v1.3.0     | 2026-03-12 | Superseded  | GA release, full feature coverage, response-phase logging        |
 | v1.2.0     | 2025-11-30 | Superseded  | Bot Manager support, reserved header enforcement                 |
 | v1.1.0     | 2025-09-15 | Superseded  | Body handling, chunked support                                   |
