@@ -529,6 +529,26 @@ CLOUD_CONTEXT="your-application-protection-id"
 
 python3 tools/securepath-apim-sync.py apply -g "$RG" -n "$APIM" --cloud-api-key "$CLOUD_API_KEY" --cloud-context "$CLOUD_CONTEXT"
 ```
+**If you would rather not let a tool write to Azure.** `render` produces the same change as
+files you can review and hand to whoever applies it: a `CHANGES.md` change document, an
+`apply.sh` with the commands in order, the fragment as it will be stored, one JSON body per backend
+entity, and the API keys in a separate `app-keys.env` so that nothing else in the bundle carries
+a secret. Add `--offline` to skip reading the instance, so the tool needs no Azure login at all —
+the bundle then carries the whole desired state rather than the difference.
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+CLOUD_API_KEY="your Radware Cloud portal API key"
+CLOUD_CONTEXT="your Application Protection ID"
+
+python3 tools/securepath-apim-sync.py render -g "$RG" -n "$APIM" --cloud-api-key "$CLOUD_API_KEY" --cloud-context "$CLOUD_CONTEXT" --out-dir securepath-apim-bundle
+```
+
+Then review `securepath-apim-bundle/CHANGES.md` and run `bash securepath-apim-bundle/apply.sh`
+with an account that holds API Management Service Contributor. `check` confirms the instance
+matches afterwards.
+
 
 Run `apply` again after onboarding an application or rotating a key; it changes only the
 difference. Add `--prune` to also drop entries (and their key Named Values) whose application

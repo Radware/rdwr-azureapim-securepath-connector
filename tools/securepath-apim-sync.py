@@ -274,9 +274,95 @@ class AzWriter:
         return out
 
     def create_backend(self, name, host):
-        self.put(f"/backends/{name}", {"properties": {
-            "url": f"https://{host}", "protocol": "http", "title": "SecurePath inspection endpoint",
-            "tls": {"validateCertificateChain": False, "validateCertificateName": False}}})
+        self.put(f"/backends/{name}", backend_body(host))
+
+    @staticmethod
+    def backend_name(n, host):
+        return f"securepath-sideband-{n}"
+
+    def current_fragment_text(self) -> str:
+        raw = self.run(["rest", "--method", "GET", "--uri",
+                        f"{self.base}/policyFragments/{FRAGMENT_ID}?api-version={API_VERSION}&format=rawxml", "-o", "json"])
+        raw = (raw or "").lstrip("\ufeff").strip()
+        if not raw:
+            return ""
+        return raw if raw.startswith("<") else (json.loads(raw).get("properties") or {}).get("value", "")
+
+
+def backend_body(host: str) -> dict:
+    return {"properties": {
+        "url": f"https://{host}", "protocol": "http", "title": "SecurePath inspection endpoint",
+        "tls": {"validateCertificateChain": False, "validateCertificateName": False}}}
+
+
+def _v2(sku) -> bool:
+    """Backend entities are the trust mechanism on the v2 tiers; None = tier unknown (offline), assume yes."""
+    return sku is None or str(sku).lower().endswith("v2")
+
+
+class OfflineReader:
+    """No Azure access: nothing is known about the instance, so a bundle rendered through it
+    carries the whole desired state (every key, the full fragment, every backend)."""
+
+    def sku(self):
+        return None
+
+    def current_map(self):
+        return {}
+
+    def current_keys(self):
+        return {}
+
+    def backend_hosts(self):
+        return {}
+
+    def current_fragment_text(self):
+        return ""
+
+    @staticmethod
+    def backend_name(n, host):
+        # not numbered: numbering needs the instance, and a clash would overwrite someone else's backend
+        return "securepath-sideband-" + "".join(ch for ch in host.split(".")[0].lower() if ch.isalnum())[:16]
+
+
+class RecordingWriter:
+    """Records the writes apply() would perform, in order, instead of performing them. Reads go to
+    the reader (an AzWriter for a difference against the instance, an OfflineReader for the whole
+    desired state). What render writes into a bundle is therefore exactly what apply would do."""
+
+    def __init__(self, reader):
+        self.reader = reader
+        self.ops = []
+
+    def sku(self):
+        return self.reader.sku()
+
+    def current_map(self):
+        return self.reader.current_map()
+
+    def current_keys(self):
+        return self.reader.current_keys()
+
+    def backend_hosts(self):
+        return self.reader.backend_hosts()
+
+    def current_fragment_text(self):
+        return self.reader.current_fragment_text()
+
+    def backend_name(self, n, host):
+        return self.reader.backend_name(n, host)
+
+    def write_key(self, name, value):
+        self.ops.append(("key", name, value))
+
+    def delete_key(self, name):
+        self.ops.append(("delete_key", name, None))
+
+    def write_fragment(self, text):
+        self.ops.append(("fragment", FRAGMENT_ID, text))
+
+    def create_backend(self, name, host):
+        self.ops.append(("backend", name, host))
 
 
 # ---------------------------------------------------------------- commands
@@ -295,7 +381,7 @@ def plan(writer, desired, log=print):
     for k, e in sorted(unchanged.items()):
         log(f"{'unchanged':<10}{k:<36}{e.get('app_id', ''):<40}{e.get('endpoint', '')}")
     missing_backends = []
-    if writer.sku().lower().endswith("v2"):
+    if _v2(writer.sku()):
         existing = writer.backend_hosts()
         for e in desired.values():
             if e["endpoint"] not in existing and e["endpoint"] not in missing_backends:
@@ -332,9 +418,170 @@ def apply(writer, desired, prune=False, log=print):
         n = len(existing)
         for h in missing_backends:
             n += 1
-            name = f"securepath-sideband-{n}"
+            name = writer.backend_name(n, h)
             writer.create_backend(name, h)
             log(f"backend created: {name} -> https://{h}")
+    return 0
+
+
+def _env_name(nv_name: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in nv_name.upper())
+
+
+def render_bundle(ops, plan_lines, out_dir, rg, apim, offline, prune, source, previous_fragment="", log=print):
+    """Write a reviewable change bundle: CHANGES.md, apply.sh, the fragment, the key file, the
+    backend bodies. Nothing is sent to Azure. Returns the list of files written."""
+    import datetime
+    import stat
+    os.makedirs(out_dir, exist_ok=True)
+    keys = [(n, v) for op, n, v in ops if op == "key"]
+    deletes = [n for op, n, _ in ops if op == "delete_key"]
+    fragments = [t for op, _, t in ops if op == "fragment"]
+    backends = [(n, h) for op, n, h in ops if op == "backend"]
+    written = []
+
+    def emit(name, text, secret=False):
+        path = os.path.join(out_dir, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        if secret:
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+        written.append(name)
+
+    if fragments:
+        emit("securepath-app-map.fragment.xml", fragments[-1])
+    if previous_fragment and ops:
+        emit("previous/securepath-app-map.fragment.xml", previous_fragment)
+    if keys:
+        emit("app-keys.env", "# SecurePath API keys, one per key Named Value. Secret: keep this file out of tickets and\n"
+             "# version control; delete it after apply.sh has run.\n"
+             + "".join(f"{_env_name(n)}='{v}'\n" for n, v in keys), secret=True)
+    for n, h in backends:
+        emit(f"backends/{n}.json", json.dumps(backend_body(h), indent=2) + "\n")
+
+    when = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    mode = ("full desired state — the instance was not read, so every entry, key and backend is included "
+            "and the generated map is replaced as a whole" if offline else
+            "difference against the instance — only what differs is written; the generated map is "
+            "replaced with the merged result")
+    if ops:
+        sh = [
+            "#!/usr/bin/env bash",
+            f"# SecurePath application map — apply bundle for {apim} ({rg}), generated {when} by",
+            "# tools/securepath-apim-sync.py render. Review CHANGES.md first. Every step is a PUT (idempotent):",
+            "# running this twice is safe. Needs: az logged in as API Management Service Contributor on the",
+            "# instance, python3. Run from any directory: bash apply.sh",
+            "set -e",
+            f'RG="{rg}"',
+            f'APIM="{apim}"',
+            'DIR="$(cd "$(dirname "$0")" && pwd)"',
+            'SUB=$(az account show --query id -o tsv)',
+            '[ -n "$SUB" ] || { echo "az is not logged in: run az login" >&2; exit 2; }',
+            'BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"',
+            f'V="api-version={API_VERSION}"',
+            "",
+        ]
+        if keys:
+            sh += [f"# 1. {len(keys)} secret Named Value(s) holding API keys (values come from app-keys.env, never from this file)",
+                   '. "$DIR/app-keys.env"']
+            for n, _ in keys:
+                sh.append(f'az rest --method PUT --uri "$BASE/namedValues/{n}?$V" --headers "Content-Type=application/json" '
+                          f'--body "$(python3 -c \'import json,sys;print(json.dumps({{"properties":{{"displayName":sys.argv[1],"value":sys.argv[2],"secret":True}}}}))\' "{n}" "${_env_name(n)}")" -o none')
+                sh.append(f'echo "named value written: {n}"')
+            sh.append("")
+        if fragments:
+            sh += ["# 2. the generated application map fragment (replaces the current generated map; hand-written",
+                   "#    entries live in the rdwr-app-map Named Value and are not touched)",
+                   'python3 -c \'import json,sys;print(json.dumps({"properties":{"format":"rawxml","value":open(sys.argv[1],encoding="utf-8").read(),"description":"Radware SecurePath generated application map (written by tools/securepath-apim-sync.py)"}}))\' "$DIR/securepath-app-map.fragment.xml" > "$DIR/fragment-body.json"',
+                   f'az rest --method PUT --uri "$BASE/policyFragments/{FRAGMENT_ID}?$V" --headers "Content-Type=application/json" --body @"$DIR/fragment-body.json" -o none',
+                   f'echo "fragment written: {FRAGMENT_ID}"', ""]
+        if backends:
+            sh += [f"# 3. {len(backends)} backend entit(y/ies): TLS trust for each inspection endpoint on Standard v2 / Premium v2.",
+                   "#    Other tiers use CA certificates (README Step 1, Path A) and skip this step.",
+                   'SKU=$(az apim show -g "$RG" -n "$APIM" --query sku.name -o tsv)',
+                   'case "$SKU" in',
+                   "  *V2|*v2)"]
+            for n, h in backends:
+                sh.append(f'    az rest --method PUT --uri "$BASE/backends/{n}?$V" --headers "Content-Type=application/json" --body @"$DIR/backends/{n}.json" -o none')
+                sh.append(f'    echo "backend written: {n} -> https://{h}"')
+            sh += ["    ;;", '  *) echo "tier $SKU: backend entities not needed (CA certificates, Step 1 Path A)" ;;', "esac", ""]
+        if deletes:
+            sh += [f"# 4. {len(deletes)} key Named Value(s) whose application is gone (--prune)"]
+            for n in deletes:
+                sh.append(f'az rest --method DELETE --uri "$BASE/namedValues/{n}?$V" --headers "If-Match=*" -o none')
+                sh.append(f'echo "named value removed: {n}"')
+            sh.append("")
+        sh += ["echo \"done. Verify: python3 tools/securepath-apim-sync.py check -g '$RG' -n '$APIM' --cloud-api-key ... --cloud-context ...\"", ""]
+        emit("apply.sh", "\n".join(sh))
+        os.chmod(os.path.join(out_dir, "apply.sh"), 0o755)
+
+    md = [f"# SecurePath application map — change bundle for `{apim}`", "",
+          f"Generated {when} by `tools/securepath-apim-sync.py render`. Nothing has been sent to Azure.", "",
+          f"- **Target:** API Management instance `{apim}`, resource group `{rg}`",
+          f"- **Source:** {source}",
+          f"- **Mode:** {mode}",
+          f"- **Prune:** {'yes — entries whose application is gone are removed' if prune else 'no — entries whose application is gone are kept'}",
+          "", "## Planned changes", "", "```"] + plan_lines + ["```", ""]
+    if not ops:
+        md += ["**In sync: nothing to write.** No `apply.sh` was generated.", ""]
+    else:
+        md += ["## What `apply.sh` does, in order", ""]
+        step = 1
+        if keys:
+            md.append(f"{step}. Writes {len(keys)} secret Named Value(s), one per application API key, values read from `app-keys.env`: "
+                      + ", ".join(f"`{n}`" for n, _ in keys)); step += 1
+        if fragments:
+            entries = len(parse_fragment(fragments[-1]))
+            md.append(f"{step}. Replaces the generated map fragment `{FRAGMENT_ID}` with `securepath-app-map.fragment.xml` "
+                      f"({entries} entr{'y' if entries == 1 else 'ies'}; API keys appear only as `{{{{named-value}}}}` references). "
+                      "The connector picks a rewritten fragment up within seconds; no policy is re-saved."); step += 1
+        if backends:
+            md.append(f"{step}. Creates {len(backends)} backend entit{'y' if len(backends) == 1 else 'ies'} on Standard v2 / Premium v2 "
+                      "(skipped on other tiers, which trust the endpoints through CA certificates): "
+                      + ", ".join(f"`{n}` → `https://{h}`" for n, h in backends)); step += 1
+        if deletes:
+            md.append(f"{step}. Removes {len(deletes)} key Named Value(s) whose application is gone: " + ", ".join(f"`{n}`" for n in deletes)); step += 1
+        md += ["", "## Files in this bundle", ""]
+        for w in written:
+            note = {"apply.sh": "the commands, in order — review, then run",
+                    "securepath-app-map.fragment.xml": "the fragment as it will be stored (no secrets)",
+                    "app-keys.env": "**secret** — the API keys; the only file that carries them",
+                    "previous/securepath-app-map.fragment.xml": "the fragment as it is now, for rollback"}.get(
+                w, "backend entity body" if w.startswith("backends/") else "")
+            md.append(f"- `{w}` — {note}")
+        md += ["", "## How to apply", "",
+               "```bash", "bash apply.sh", "```", "",
+               "Needs the Azure CLI logged in with **API Management Service Contributor** on the instance, and "
+               "`python3`. Every step is a PUT, so running it twice is safe.", "",
+               "## How to verify", "", "```bash",
+               f"python3 tools/securepath-apim-sync.py check -g {rg} -n {apim} --cloud-api-key ... --cloud-context ...",
+               f"python3 tools/securepath-apim-lint.py --live -g {rg} -n {apim}",
+               "```", "",
+               "`check` prints `in sync` (exit 0) once the instance matches the account. Then trace one request "
+               "for each application host with `tools/securepath-apim-trace.sh` (README Debugging).", ""]
+        if previous_fragment:
+            md += ["## Rollback", "",
+                   "`previous/securepath-app-map.fragment.xml` is the generated map as it was before this change. "
+                   "To put it back, run the fragment step of `apply.sh` (step 2) with that file instead.", ""]
+        md += ["## Secrets", "",
+               "`app-keys.env` holds the SecurePath API keys in clear text so that `apply.sh` and `CHANGES.md` do not. "
+               "Keep it out of tickets, chat and version control, and delete it once `apply.sh` has run — the keys "
+               "then live only in the secret Named Values.", ""]
+    emit("CHANGES.md", "\n".join(md))
+    for w in written:
+        log(f"wrote {os.path.join(out_dir, w)}")
+    return written
+
+
+def render(reader, desired, out_dir, rg, apim, offline, prune, source, log=print):
+    rec = RecordingWriter(reader)
+    lines = []
+    plan(rec, desired, log=lines.append)          # the review table, exactly as `plan` prints it
+    apply(rec, desired, prune, log=lambda *_: None)  # records the writes; nothing is sent
+    previous = "" if offline else (reader.current_fragment_text() or "")
+    render_bundle(rec.ops, lines, out_dir, rg, apim, offline, prune, source, previous_fragment=previous, log=log)
+    log("in sync: nothing to apply" if not rec.ops else f"bundle ready in {out_dir}: review CHANGES.md, then bash {os.path.join(out_dir, 'apply.sh')}")
     return 0
 
 
@@ -357,7 +604,7 @@ def export_parameters(desired, out_path, log=print):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Keep the SecurePath application map in step with your Radware Cloud account")
-    ap.add_argument("command", choices=["plan", "apply", "check", "export"])
+    ap.add_argument("command", choices=["plan", "apply", "check", "export", "render"])
     ap.add_argument("-g", "--resource-group")
     ap.add_argument("-n", "--apim")
     ap.add_argument("--cloud-api-key", help="Radware Cloud portal API key")
@@ -366,6 +613,8 @@ def main(argv=None):
     ap.add_argument("--prune", action="store_true", help="apply: remove map entries whose application is gone from the account")
     ap.add_argument("--include-provisioning", action="store_true", help="also include applications still provisioning")
     ap.add_argument("--out", default="securepath-appmap.parameters.json", help="export: parameter file to write")
+    ap.add_argument("--out-dir", default="securepath-apim-bundle", help="render: directory for the change bundle")
+    ap.add_argument("--offline", action="store_true", help="render: do not read the instance; bundle the whole desired state")
     a = ap.parse_args(argv)
     try:
         if a.from_file:
@@ -387,6 +636,10 @@ def main(argv=None):
             return export_parameters(desired, a.out)
         if not (a.resource_group and a.apim):
             ap.error(f"{a.command} needs -g RESOURCE_GROUP and -n APIM")
+        if a.command == "render":
+            source = f"file `{a.from_file}`" if a.from_file else f"Radware Cloud account (context `{a.cloud_context}`)"
+            reader = OfflineReader() if a.offline else AzWriter(a.resource_group, a.apim)
+            return render(reader, desired, a.out_dir, a.resource_group, a.apim, a.offline, a.prune, source)
         writer = AzWriter(a.resource_group, a.apim)
         if a.command == "plan":
             plan(writer, desired)

@@ -145,3 +145,79 @@ def test_export_writes_a_bicep_parameter_file(tmp_path):
     out = tmp_path / "p.json"
     assert sync.export_parameters(sync.project_cloud_apps(APPS), str(out), log=lambda *_: None) == 0
     assert json.loads(out.read_text())["parameters"]["appMap"]["value"]["www.example.test"]["endpoint"] == "bbbb.oop.radwarecloud.net"
+
+
+# ---------------------------------------------------------------- render (bundle instead of writing)
+
+def _read(d, name):
+    with open(os.path.join(d, name), encoding="utf-8") as f:
+        return f.read()
+
+
+def test_render_diff_bundle_matches_apply_and_carries_no_secret(tmp_path):
+    az = FakeAz(sku="StandardV2", backends=[("securepath-sideband-1", "https://aaaa.oop.radwarecloud.net")])
+    reader = sync.AzWriter("rg", "apim", run=az)
+    desired = sync.project_cloud_apps(APPS)
+    out = str(tmp_path / "bundle")
+    assert sync.render(reader, desired, out, "rg", "apim", offline=False, prune=False, source="file x", log=lambda *_: None) == 0
+    assert az.puts == [] and az.deletes == []  # nothing sent to Azure
+    files = sorted(os.listdir(out))
+    assert files == ["CHANGES.md", "app-keys.env", "apply.sh", "backends", "securepath-app-map.fragment.xml"]
+    sh = _read(out, "apply.sh")
+    for text in (sh, _read(out, "CHANGES.md"), _read(out, "securepath-app-map.fragment.xml")):
+        assert "SECRET-ONE" not in text and "SECRET-TWO" not in text
+    env = _read(out, "app-keys.env")
+    assert f"{sync._env_name(K1)}='SECRET-ONE'" in env and f"{sync._env_name(K2)}='SECRET-TWO'" in env
+    assert oct(os.stat(os.path.join(out, "app-keys.env")).st_mode & 0o777) == "0o600"
+    # same operations, same order, as apply: keys, fragment, backends (only the missing host)
+    assert sh.index(f"/namedValues/{K1}?") < sh.index(f"/namedValues/{K2}?") < sh.index("/policyFragments/securepath-app-map?") < sh.index("/backends/securepath-sideband-2?")
+    assert "/backends/securepath-sideband-1?" not in sh and os.listdir(os.path.join(out, "backends")) == ["securepath-sideband-2.json"]
+    assert json.loads(_read(out, "backends/securepath-sideband-2.json"))["properties"]["url"] == "https://bbbb.oop.radwarecloud.net"
+    assert "*V2|*v2)" in sh and "set -e" in sh
+    frag = _read(out, "securepath-app-map.fragment.xml")
+    assert "{{" + K1 + "}}" in frag and sync.parse_fragment(frag).keys() == desired.keys()
+
+
+def test_render_offline_names_backends_by_host_and_bundles_everything(tmp_path):
+    desired = sync.project_cloud_apps(APPS)
+    out = str(tmp_path / "b")
+    sync.render(sync.OfflineReader(), desired, out, "rg", "apim", offline=True, prune=False, source="file x", log=lambda *_: None)
+    sh = _read(out, "apply.sh")
+    assert "securepath-sideband-aaaa.json" in sh and "securepath-sideband-bbbb.json" in sh
+    assert "securepath-sideband-1" not in sh  # never numbered: numbering could clash with an existing backend
+    assert "full desired state" in _read(out, "CHANGES.md")
+    assert not os.path.exists(os.path.join(out, "previous"))
+
+
+def test_render_in_sync_writes_only_changes_md(tmp_path):
+    desired = sync.project_cloud_apps(APPS)
+    az = FakeAz(sku="StandardV2", fragment=sync.render_fragment(desired), keys={K1: "SECRET-ONE", K2: "SECRET-TWO"},
+                backends=[("b1", "https://aaaa.oop.radwarecloud.net"), ("b2", "https://bbbb.oop.radwarecloud.net")])
+    out = str(tmp_path / "c")
+    msgs = []
+    sync.render(sync.AzWriter("rg", "apim", run=az), desired, out, "rg", "apim", False, False, "file x", log=msgs.append)
+    assert os.listdir(out) == ["CHANGES.md"] and "In sync: nothing to write" in _read(out, "CHANGES.md")
+    assert any("nothing to apply" in m for m in msgs)
+
+
+def test_render_prune_emits_delete_and_previous_fragment(tmp_path):
+    desired = sync.project_cloud_apps(APPS)
+    stale = dict(desired); stale["old.example.test"] = {"app_id": "9999", "api_key": "k", "endpoint": "zzzz.oop.radwarecloud.net", "port": 443, "ssl": True}
+    old_frag = sync.render_fragment(stale)
+    az = FakeAz(sku="Developer", fragment=old_frag, keys={K1: "SECRET-ONE", K2: "SECRET-TWO", sync.key_nv_name("9999"): "k"})
+    out = str(tmp_path / "d")
+    sync.render(sync.AzWriter("rg", "apim", run=az), desired, out, "rg", "apim", False, True, "file x", log=lambda *_: None)
+    sh = _read(out, "apply.sh")
+    assert f"--method DELETE --uri \"$BASE/namedValues/{sync.key_nv_name('9999')}?" in sh
+    assert "/backends/" not in sh  # Developer tier: no backend entities planned
+    assert _read(out, "previous/securepath-app-map.fragment.xml").strip() == old_frag.strip()
+    assert "old.example.test" not in _read(out, "securepath-app-map.fragment.xml")
+    assert "## Rollback" in _read(out, "CHANGES.md")
+
+
+def test_cli_render_offline(tmp_path, capsys):
+    apps = tmp_path / "apps.json"
+    apps.write_text(json.dumps(APPS))
+    out = tmp_path / "bundle"
+    assert sync.main(["render", "-g", "rg", "-n", "apim", "--from-file", str(apps), "--offline", "--out-dir", str(out)]) == 0
+    assert (out / "apply.sh").exists() and "bundle ready" in capsys.readouterr().out

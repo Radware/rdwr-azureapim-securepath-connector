@@ -82,6 +82,7 @@ API key and your Application Protection ID; the Azure CLI logged in for everythi
     python3 tools/securepath-apim-sync.py apply  -g RG -n APIM --cloud-api-key KEY --cloud-context CTX [--prune]
     python3 tools/securepath-apim-sync.py check  -g RG -n APIM --cloud-api-key KEY --cloud-context CTX
     python3 tools/securepath-apim-sync.py export --cloud-api-key KEY --cloud-context CTX --out appmap.parameters.json
+    python3 tools/securepath-apim-sync.py render -g RG -n APIM --cloud-api-key KEY --cloud-context CTX --out-dir bundle [--offline] [--prune]
 
 | Command | Does | Exit |
 |---|---|---|
@@ -89,6 +90,33 @@ API key and your Application Protection ID; the Azure CLI logged in for everythi
 | `apply` | writes only the difference; `--prune` also removes entries whose application is gone | 0 |
 | `check` | for schedulers: 1 when the instance differs from the account | 0 / 1 |
 | `export` | writes the map as a Bicep parameter file | 0 |
+| `render` | writes what `apply` would do as a reviewable **change bundle** — commands, files and a change document — and sends nothing to Azure | 0 |
+
+### `render`: a bundle instead of a write
+
+For teams that do not let a tool write to Azure directly (change control, separation of duties, or
+the person with the Radware Cloud key is not the person with Azure rights), `render` produces the
+change as files:
+
+| File | Content |
+|---|---|
+| `CHANGES.md` | the change document: target, source, mode, the `plan` table, what `apply.sh` does step by step, how to apply, how to verify, rollback, where the secrets are |
+| `apply.sh` | the `az rest` commands `apply` would run, in the same order (key Named Values → fragment → backend entities on v2 tiers → removals with `--prune`). Bash; every step is a PUT, so it can be run twice |
+| `securepath-app-map.fragment.xml` | the generated fragment as it will be stored; API keys appear only as `{{rdwr-app-key-…}}` references |
+| `app-keys.env` | **the only file that carries API keys** (mode 600); `apply.sh` sources it. Keep it out of tickets and version control, delete it after applying |
+| `backends/<name>.json` | one body per backend entity to create |
+| `previous/securepath-app-map.fragment.xml` | the fragment as it is now, for rollback (difference mode only) |
+
+Two modes. **Difference** (default): the instance is read, and the bundle contains only what
+differs — exactly what `apply` would write. **`--offline`**: the instance is not read at all, so
+the tool needs no Azure login; the bundle carries the whole desired state (every key, the full
+fragment, every backend entity), backend entities are named after their host instead of numbered,
+and the generated map is replaced as a whole (hand-written entries in `rdwr-app-map` are never
+touched either way). `apply.sh` itself checks the tier before creating backend entities.
+
+Executed on a Standard v2 instance: a difference bundle applied with `bash apply.sh`, `check`
+reported `in sync`; an `--offline` bundle for the same account applied on top, `check` still
+`in sync`, a second `render` then produced only a `CHANGES.md` saying so.
 
 Applications are keyed by their domain (and the API Protection hostname when set). Entries you
 wrote by hand — an API id key, `*`, a `base_path` — are never touched. Only applications in

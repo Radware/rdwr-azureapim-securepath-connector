@@ -77,6 +77,14 @@ Two new Named Values (22 in total): `rdwr-app-map` and `rdwr-true-host-header`.
 
 ---
 
+### `securepath-apim-sync render`: a change bundle instead of a direct write
+
+- For change-controlled environments, `render` writes what `apply` would do as files: `CHANGES.md`
+  (the change document), `apply.sh` (the commands, in order, idempotent), the fragment as it will
+  be stored, the backend entity bodies, and the API keys in a separate `app-keys.env`. Nothing is
+  sent to Azure. `--offline` skips reading the instance so the tool needs no Azure login; the
+  bundle then carries the whole desired state. Executed end to end on a Standard v2 instance.
+
 ### Debugging: trace one request from the command line, and read it
 
 - **`tools/securepath-apim-trace.sh`** captures one API Management trace without the Portal —
