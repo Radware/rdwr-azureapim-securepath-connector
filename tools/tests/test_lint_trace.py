@@ -137,9 +137,9 @@ def test_T02_not_raised_when_jwt_runs_after_connector():
     assert codes(lint.lint_trace(t)) == []
 
 
-def test_oaktree_shape_v1_host_and_certificate_rejected():
+def test_field_shape_v1_host_and_certificate_rejected():
     # connector in the right place, endpoint Named Value holds the .v1 front-end host, no trust for it
-    t = trace([inspector("/OCPAPI/ocp/v1", "POST", "/api/x"), setvar("rdwrAppEpAddr", "c6de.v1.radwarecloud.net")]
+    t = trace([inspector("/orders", "POST", "/api/x"), setvar("rdwrAppEpAddr", "afa37f7d53ce4e76a4988c4955c2d7e5.v1.radwarecloud.net")]
               + sideband_failed() + diag("sideband_error_or_timeout")
               + [e("validate-jwt", {"message": "JWT validation succeeded."})])
     s = lint.summarize_trace(t)
