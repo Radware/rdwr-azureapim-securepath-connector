@@ -140,70 +140,150 @@
               return (DateTime.UtcNow - start).TotalSeconds.ToString("F3");
             }</value>
           </set-header>
-          <!-- Origin response headers (x-rdwr-o2h-*) — only set when non-empty -->
-          <set-header name="x-rdwr-o2h-content-type" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Content-Type", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-server" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Server", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-set-cookie" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Set-Cookie", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-cache-control" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Cache-Control", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-content-security-policy" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Content-Security-Policy", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-referrer-policy" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Referrer-Policy", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-strict-transport-security" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Strict-Transport-Security", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-access-control-allow-origin" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Origin", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-access-control-allow-credentials" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Credentials", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-access-control-expose-headers" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Access-Control-Expose-Headers", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-access-control-allow-methods" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Methods", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-permissions-policy" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Permissions-Policy", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-x-frame-options" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("X-Frame-Options", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-x-content-type-options" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("X-Content-Type-Options", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-x-backend-server" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("X-Backend-Server", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-x-runtime" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("X-Runtime", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-x-cf-powered-by" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("X-CF-Powered-By", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-x-aspnet-version" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("X-AspNet-Version", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
+          <!-- Origin response headers (x-rdwr-o2h-*): sent only when the origin sent the header (a null value inside send-one-way-request still emits an empty header, so each one is conditional) -->
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Content-Type", "")))">
+              <set-header name="x-rdwr-o2h-content-type" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Content-Type", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Server", "")))">
+              <set-header name="x-rdwr-o2h-server" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Server", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Set-Cookie", "")))">
+              <set-header name="x-rdwr-o2h-set-cookie" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Set-Cookie", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Cache-Control", "")))">
+              <set-header name="x-rdwr-o2h-cache-control" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Cache-Control", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Content-Security-Policy", "")))">
+              <set-header name="x-rdwr-o2h-content-security-policy" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Content-Security-Policy", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Referrer-Policy", "")))">
+              <set-header name="x-rdwr-o2h-referrer-policy" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Referrer-Policy", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Strict-Transport-Security", "")))">
+              <set-header name="x-rdwr-o2h-strict-transport-security" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Strict-Transport-Security", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Origin", "")))">
+              <set-header name="x-rdwr-o2h-access-control-allow-origin" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Origin", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Credentials", "")))">
+              <set-header name="x-rdwr-o2h-access-control-allow-credentials" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Credentials", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Access-Control-Expose-Headers", "")))">
+              <set-header name="x-rdwr-o2h-access-control-expose-headers" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Access-Control-Expose-Headers", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Methods", "")))">
+              <set-header name="x-rdwr-o2h-access-control-allow-methods" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Access-Control-Allow-Methods", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Permissions-Policy", "")))">
+              <set-header name="x-rdwr-o2h-permissions-policy" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Permissions-Policy", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("X-Frame-Options", "")))">
+              <set-header name="x-rdwr-o2h-x-frame-options" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("X-Frame-Options", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("X-Content-Type-Options", "")))">
+              <set-header name="x-rdwr-o2h-x-content-type-options" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("X-Content-Type-Options", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("X-Backend-Server", "")))">
+              <set-header name="x-rdwr-o2h-x-backend-server" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("X-Backend-Server", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("X-Runtime", "")))">
+              <set-header name="x-rdwr-o2h-x-runtime" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("X-Runtime", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("X-CF-Powered-By", "")))">
+              <set-header name="x-rdwr-o2h-x-cf-powered-by" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("X-CF-Powered-By", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("X-AspNet-Version", "")))">
+              <set-header name="x-rdwr-o2h-x-aspnet-version" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("X-AspNet-Version", ""))</value>
+              </set-header>
+            </when>
+          </choose>
           <set-header name="x-rdwr-o2h-rdwr-response" exists-action="override">
             <value>allowed</value>
           </set-header>
-          <set-header name="x-rdwr-o2h-transfer-encoding" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Transfer-Encoding", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
-          <set-header name="x-rdwr-o2h-content-encoding" exists-action="override">
-            <value>@{ var v = context.Response.Headers.GetValueOrDefault("Content-Encoding", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Transfer-Encoding", "")))">
+              <set-header name="x-rdwr-o2h-transfer-encoding" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Transfer-Encoding", ""))</value>
+              </set-header>
+            </when>
+          </choose>
+          <choose>
+            <when condition="@(!string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Content-Encoding", "")))">
+              <set-header name="x-rdwr-o2h-content-encoding" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Content-Encoding", ""))</value>
+              </set-header>
+            </when>
+          </choose>
           <!-- Body sample requested by SecurePath: content-type and content-transfer-encoding for the base64 body -->
           <set-header name="content-type" exists-action="override">
             <value>@{

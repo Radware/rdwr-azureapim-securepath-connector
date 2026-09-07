@@ -80,9 +80,13 @@
               return (DateTime.UtcNow - start).TotalSeconds.ToString("F3");
             }</value>
           </set-header>
-          <set-header name="x-rdwr-o2h-content-type" exists-action="override">
-            <value>@{ var v = context.Response != null ? context.Response.Headers.GetValueOrDefault("Content-Type", "") : ""; return string.IsNullOrEmpty(v) ? null : v; }</value>
-          </set-header>
+          <choose>
+            <when condition="@(context.Response != null && !string.IsNullOrEmpty(context.Response.Headers.GetValueOrDefault("Content-Type", "")))">
+              <set-header name="x-rdwr-o2h-content-type" exists-action="override">
+                <value>@(context.Response.Headers.GetValueOrDefault("Content-Type", ""))</value>
+              </set-header>
+            </when>
+          </choose>
           <set-header name="x-rdwr-o2h-rdwr-response" exists-action="override">
             <value>allowed</value>
           </set-header>
