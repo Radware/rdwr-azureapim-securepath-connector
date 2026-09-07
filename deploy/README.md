@@ -1,6 +1,6 @@
 # One-shot install with Bicep
 
-Installs the connector at **All APIs** scope on an existing API Management instance: the 23
+Installs the connector at **All APIs** scope on an existing API Management instance: the 24
 Named Values, the four policy fragments (including the empty default of the generated
 application map), the All APIs policy that references them, and the backend entity that
 establishes trust for the inspection endpoint on Standard v2 / Premium v2. Policies you already
@@ -28,7 +28,7 @@ az deployment group what-if -g "$RG" --template-file deploy/securepath-apim.bice
 ```
 
 `~ Modify` on a Named Value that already exists means the deployment will overwrite it. Six of
-the 23 names carry no `rdwr-` prefix (main README, Step 2a); check those before continuing. Secret
+the 24 names carry no `rdwr-` prefix (main README, Step 2a); check those before continuing. Secret
 Named Values (`rdwr-api-key`, `rdwr-app-map`) always show `NoChange` because `what-if` cannot read
 them; they are overwritten as well. The `apiKey` parameter can also be a Key Vault reference in the
 parameter file, so the key never sits in a repository or a pipeline log.
@@ -65,7 +65,7 @@ Expect `clean`. Then follow main README Step 5: a request carrying a reserved he
 ## Update the connector later
 
 Re-run the same `az deployment group create` from the new release, **with the same parameter
-values** (keep the parameter file): the template writes all 23 Named Values, so a value you tuned
+values** (keep the parameter file): the template writes all 24 Named Values, so a value you tuned
 by hand is reset to the template's unless it is a parameter. Run `what-if` first and read every
 `~ Modify`. If `tools/securepath-apim-sync.py` manages the generated application map, pass
 `manageAppMapFragment=false`, otherwise the deployment replaces the `securepath-app-map` fragment
@@ -84,7 +84,8 @@ with the empty default and every generated entry is lost until the next `apply`.
 | `createBackend` | `true` | backend entity for endpoint trust (Path B); set `false` on tiers where the CA is installed |
 | `appMap` | `{}` | several SecurePath applications on one instance: `{ "orders-api": { "app_id": "...", "api_key": "...", "endpoint": "...oop.radwarecloud.net" } }`, keyed by API id, hostname or `*`, optional `port`, `ssl`, `bot_manager`, `bot_block_statuses`, `base_path` per entry; a backend entity is created per distinct endpoint URL. For a handful of applications only (the Named Value holds about fifteen entries); see the main README, 3d |
 | `manageAppMapFragment` | `true` | set `false` when `tools/securepath-apim-sync.py` manages the generated map, so a re-deployment does not replace it with the empty default |
-| `trueHostHeader` | `##DISABLED##` | header carrying the client-facing hostname when Front Door or a CDN fronts the gateway (`X-Forwarded-Host`) |
+| `trueHostHeader` | `##DISABLED##` | header(s) carrying the client-facing hostname when Front Door or a CDN fronts the gateway, comma-separated and tried in order (`x-forwarded-host,forwarded`); main README 3d |
+| `hostFallback` | `gateway` | used when none of those headers yields a valid hostname: `gateway` or a literal hostname |
 | `customBotBlockStatuses` | `##DISABLED##` | Bot Manager: SecurePath status codes beyond the standard verdicts to relay to the client as a Bot Manager block (`429`, `429,418`, or `*`). Only with `botManagerEnabled`. See the main README, 3e |
 
 `securepath-apim.parameters.example.json` shows the parameter-file form of the same values.

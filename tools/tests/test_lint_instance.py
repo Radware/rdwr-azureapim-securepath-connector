@@ -314,3 +314,51 @@ def test_reader_follows_next_link_and_reads_only_connector_secrets(monkeypatch):
     nvs = r.named_values()
     assert nvs["rdwr-api-key"] == "k" and nvs["someone-elses-secret"] is None and nvs["rdwr-app-id"] == "x"
     assert az.listed == ["rdwr-api-key"]
+
+
+# ---------------------------------------------------------------- L03 at operation scope
+
+class OpReader(FakeReader):
+    """An instance whose APIs carry operation-level policies."""
+    ops = {}
+    op_policies = {}
+
+    def operations(self, api_id):
+        return list(self.ops.get(api_id, []))
+
+    def operation_policy(self, api_id, operation_id):
+        return self.op_policies.get((api_id, operation_id))
+
+
+def _op_reader(op_policy):
+    r = OpReader(glob=fx("clean_global.xml"), apis={"orders": None}, nvs=NV_OK)
+    r.ops = {"orders": ["get-item"]}
+    r.op_policies = {("orders", "get-item"): op_policy}
+    return r
+
+
+OP_NO_BASE = ('<policies><inbound><set-header name="X-Op" exists-action="override"><value>1</value></set-header></inbound>'
+              "<backend><base /></backend><outbound><base /></outbound><on-error><base /></on-error></policies>")
+OP_WITH_BASE = ('<policies><inbound><base /><set-header name="X-Op" exists-action="override"><value>1</value></set-header></inbound>'
+                "<backend><base /></backend><outbound><base /></outbound><on-error><base /></on-error></policies>")
+
+
+def test_operation_without_base_is_reported_only_when_asked():
+    r = _op_reader(OP_NO_BASE)
+    assert [f for f in lint.lint_instance(r) if f.code == "L03"] == []      # default: not checked
+    found = [f for f in lint.lint_instance(r, check_operations=True) if f.code == "L03"]
+    assert len(found) == 1
+    assert "operation get-item" in found[0].scope and "skips the connector entirely" in found[0].message
+
+
+def test_operation_with_base_is_clean():
+    r = _op_reader(OP_WITH_BASE)
+    assert [f for f in lint.lint_instance(r, check_operations=True) if f.code == "L03"] == []
+
+
+def test_operations_are_not_read_when_no_wider_scope_carries_the_connector():
+    """A connector installed only at API scope cannot be skipped by an operation policy."""
+    r = _op_reader(OP_NO_BASE)
+    r._glob = None
+    r._apis = {"orders": fx("clean_api.xml")}
+    assert [f for f in lint.lint_instance(r, check_operations=True) if f.code == "L03"] == []

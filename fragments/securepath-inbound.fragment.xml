@@ -88,25 +88,103 @@
          Cloud account by tools/securepath-apim-sync.py) or the default application (the
          three rdwr-app-* Named Values). No application means the request is served uninspected
          and says so (X-Rdwr-Diag, trace); it is never failed. -->
-    <set-variable name="rdwrTrueHostHeaderName" value="{{rdwr-true-host-header}}" />
-    <set-variable name="rdwrTrueHost" value="@{
-      string configured = ((string)context.Variables.GetValueOrDefault("rdwrTrueHostHeaderName", "") ?? "").Trim();
-      string lc = configured.ToLower();
-      string host = context.Request.OriginalUrl.Host ?? "";
-      bool off = string.IsNullOrEmpty(configured) || lc == "-" || lc == "disabled" || lc == "off" || lc == "false" || lc == "none" || lc == "~" || lc == "##disabled##";
+    <!-- ====== The client-facing hostname ======
+         SecurePath identifies an application by the hostname the CLIENT used, and that hostname
+         is what appears in its events and access log. When Front Door, a CDN or any proxy fronts
+         the gateway, the gateway receives the proxy's Host and the client's own hostname arrives
+         in a header. rdwr-true-host-header names that header — or several, tried in order, so a
+         topology change or a second front end does not need a policy change. Each candidate is
+         validated before it is trusted; the first usable one wins. If none yields a usable
+         hostname, rdwr-host-fallback decides: "gateway" (the host API Management received) or a
+         literal hostname of your own. The resolved value is used BOTH to select the application
+         (3d) and as the Host reported to SecurePath, so the two can never disagree. -->
+    <!-- Per-API override. One instance can front several APIs, each behind its own Front Door or
+         CDN, so these two settings can be overridden per API (or per product) WITHOUT installing
+         the connector more than once: that API's own policy sets rdwrTrueHostHeaderOverride (or
+         rdwrHostFallbackOverride) with a set-variable placed before its base element, which is
+         where the All APIs policy — and so this fragment — runs. Only set-variable belongs there;
+         anything that can end a request must stay after it. README 3d, "Different front ends on
+         one instance". Which SecurePath application an API uses comes from the application map
+         instead, keyed by API id or hostname. -->
+    <set-variable name="rdwrTrueHostHeaderName" value="@{
+      string ov = ((string)context.Variables.GetValueOrDefault("rdwrTrueHostHeaderOverride", "") ?? "").Trim();
+      return ov.Length > 0 ? ov : "{{rdwr-true-host-header}}";
+    }" />
+    <set-variable name="rdwrHostFallback" value="@{
+      string ov = ((string)context.Variables.GetValueOrDefault("rdwrHostFallbackOverride", "") ?? "").Trim();
+      return ov.Length > 0 ? ov : "{{rdwr-host-fallback}}";
+    }" />
+    <set-variable name="rdwrHostResolved" value="@{
+      // returns "<source>|<hostname>" — the source is the header that supplied it, or
+      // "gateway" / "fallback-value"; a hostname can never contain '|', so the split is safe.
+      string cfgList = ((string)context.Variables.GetValueOrDefault("rdwrTrueHostHeaderName", "") ?? "").Trim();
+      string fb = ((string)context.Variables.GetValueOrDefault("rdwrHostFallback", "") ?? "").Trim();
+      string gateway = (context.Request.OriginalUrl.Host ?? "").Trim().TrimEnd('.').ToLower();
+      string lc = cfgList.ToLower();
+      bool off = cfgList.Length == 0 || lc == "-" || lc == "disabled" || lc == "off" || lc == "false" || lc == "none" || lc == "~" || lc == "##disabled##";
+      string chosen = "";
+      string source = "";
       if (!off)
       {
-        string[] vals = context.Request.Headers.GetValueOrDefault(configured, default(string[]));
-        if (vals != null && vals.Length > 0 && !string.IsNullOrWhiteSpace(vals[0]))
+        foreach (string nameRaw in cfgList.Split(','))
         {
+          string name = nameRaw.Trim();
+          if (name.Length == 0) { continue; }
+          string[] vals = context.Request.Headers.GetValueOrDefault(name, default(string[]));
+          if (vals == null || vals.Length == 0 || string.IsNullOrWhiteSpace(vals[0])) { continue; }
+          // a forwarding header may carry a list; the client's own hostname is the first element
           string v = vals[0].Split(',')[0].Trim();
+          // reject a value that is not a bare hostname BEFORE the port is stripped: otherwise
+          // "https://evil.example.com/p" would be cut at the scheme's colon and become "https"
+          if (v.IndexOf('/') >= 0 || v.IndexOf('\\') >= 0 || v.IndexOf('?') >= 0
+              || v.IndexOf('@') >= 0 || v.IndexOf(' ') >= 0) { continue; }
+          if (name.ToLower() == "forwarded")
+          {
+            // RFC 7239: for=...;host=example.com;proto=https
+            string picked = "";
+            foreach (string partRaw in v.Split(';'))
+            {
+              string part = partRaw.Trim();
+              if (part.ToLower().StartsWith("host=")) { picked = part.Substring(5).Trim().Trim('"'); }
+            }
+            v = picked;
+          }
+          // drop the port, keeping an IPv6 literal intact
           if (v.StartsWith("[")) { int close = v.IndexOf(']'); if (close > 0) { v = v.Substring(0, close + 1); } }
           else { int colon = v.IndexOf(':'); if (colon > 0) { v = v.Substring(0, colon); } }
-          if (v.Length > 0) { host = v; }
+          v = v.Trim().TrimEnd('.').ToLower();
+          // a header is client-supplied: never forward something that is not a hostname
+          bool usable = v.Length > 0 && v.Length <= 253
+                        && v.IndexOf(' ') < 0 && v.IndexOf('/') < 0 && v.IndexOf('\\') < 0
+                        && v.IndexOf('?') < 0 && v.IndexOf('@') < 0 && v.IndexOf(',') < 0;
+          if (usable) { chosen = v; source = name.ToLower(); break; }
         }
       }
-      return host.ToLower();
+      if (chosen.Length == 0)
+      {
+        string fbl = fb.ToLower();
+        bool fbGateway = fb.Length == 0 || fbl == "gateway" || fbl == "-" || fbl == "disabled" || fbl == "off" || fbl == "false" || fbl == "none" || fbl == "~" || fbl == "##disabled##";
+        if (!fbGateway)
+        {
+          string v = fb.TrimEnd('.').ToLower();
+          bool usable = v.Length > 0 && v.Length <= 253
+                        && v.IndexOf(' ') < 0 && v.IndexOf('/') < 0 && v.IndexOf(':') < 0
+                        && v.IndexOf('?') < 0 && v.IndexOf('@') < 0 && v.IndexOf(',') < 0;
+          if (usable) { chosen = v; source = "fallback-value"; }
+        }
+        if (chosen.Length == 0) { chosen = gateway; source = "gateway"; }
+      }
+      return source + "|" + chosen;
     }" />
+    <set-variable name="rdwrTrueHostSource" value="@(((string)context.Variables["rdwrHostResolved"]).Split('|')[0])" />
+    <set-variable name="rdwrTrueHost" value="@(((string)context.Variables["rdwrHostResolved"]).Split('|')[1])" />
+    <choose>
+      <when condition="@(((string)context.Variables["rdwrTrueHostSource"]) != "gateway")">
+        <trace source="securepath" severity="information">
+          <message>@("client-facing host " + (string)context.Variables["rdwrTrueHost"] + " taken from " + (string)context.Variables["rdwrTrueHostSource"] + " (the host API Management received was " + (context.Request.OriginalUrl.Host ?? "") + ")")</message>
+        </trace>
+      </when>
+    </choose>
     <!-- The generated application map (fragment securepath-app-map, written by
          tools/securepath-apim-sync.py) is included by the POLICY, ahead of this fragment:
          API Management does not allow a fragment to include another fragment. It sets
@@ -1298,7 +1376,14 @@
                             }</value>
                           </set-header>
                           <set-header name="x-rdwr-o2h-rdwr-response" exists-action="override">
-                            <value>blocked</value>
+                            <!-- A redirect is SecurePath's own challenge (Bot Manager CAPTCHA)
+                                 relayed to the client: this field reports what the CONNECTOR
+                                 decided, and it did not block. Matches the reference connector,
+                                 whose redirect branches leave the disposition at "allowed".
+                                 Every R&D reference release (v1.1.0 and v1.1.1 alike) reports
+                                 "allowed" here; only the connector serving a denial itself is
+                                 "blocked". See GOTCHAS 2026-09-07. -->
+                            <value>allowed</value>
                           </set-header>
                           <set-body />
                         </send-one-way-request>

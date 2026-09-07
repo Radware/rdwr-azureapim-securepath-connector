@@ -1,8 +1,36 @@
 # Release Notes — Radware SecurePath Connector for Azure API Management
 
+### Existing policies, and the operations that could silently skip the connector
+
+The guide now answers the question a global install actually raises — *I have APIs that already
+carry their own `validate-jwt`; do I have to change them?* — where the person installing reads it
+(Step 4, Form 1): **no**, the connector runs first by virtue of the scope order, those policies are
+untouched, and SecurePath sees even the requests they reject. The single precondition, `<base />`,
+is stated there with the policy shape that needs no change.
+
+The install check can now also read **operation-level** policies (`--operations`): an operation
+whose own policy omits `<base />` skips the connector for that operation alone — no inspection and
+no reserved-header enforcement — and nothing else reports it. Debugging gains the matching symptom:
+traffic visible in API Management, including 401s, that never reaches SecurePath.
+
+### The client-facing hostname, and per-API settings
+
+`rdwr-true-host-header` accepts **several header names**, comma-separated and tried in order, so a
+primary and a spare can be listed (`x-forwarded-host,forwarded`, the latter understood in its
+RFC 7239 form) and a change of front end needs no policy change. A candidate is used only if it is
+a hostname: the first element of a chain is taken, a port is stripped, and a value carrying a
+scheme, path, query, spaces or `@` is rejected and the next candidate tried. New Named Value
+**`rdwr-host-fallback`** decides what is used when none matches — `gateway` (default, the host
+API Management received) or a hostname of your own. The resolved value is used both to select the
+application and as the `Host` reported to SecurePath, and the trace names which header supplied it.
+
+Both settings can be overridden **per API or product** without a second install, by setting
+`rdwrTrueHostHeaderOverride` / `rdwrHostFallbackOverride` before `<base />` in that API's own
+policy — for an instance whose APIs sit behind different front ends. README 3d.
+
 ### Named Values and version
 
-Three new Named Values (23 in total): `rdwr-app-map`, `rdwr-true-host-header` and
+Four new Named Values (24 in total): `rdwr-app-map`, `rdwr-true-host-header`, `rdwr-host-fallback` and
 `rdwr-custom-bot-block-statuses`. `x-rdwr-plugin-info` becomes `700-v1.4.0`.
 
 ### Upgrading from v1.3.x

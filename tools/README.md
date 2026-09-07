@@ -15,7 +15,7 @@ Exit code 0 means clean, 1 means findings, 2 means the instance or file could no
 |---|---|---|
 | L01 | The connector is not installed at any scope | Install the fragments (README Step 4) |
 | L02 | The connector is installed at two scopes | Every request is inspected twice; keep one scope |
-| L03 | An API or product policy has a section without `<base />` while the connector is at a wider scope | That API skips the connector entirely; add `<base />` first in that section |
+| L03 | An API or product policy has a section without `<base />` while the connector is at a wider scope | That API skips the connector entirely; add `<base />` first in that section | Also reported for an operation's own policy when `--operations` is given: an operation without `<base />` skips the connector entirely.
 | L04 | A policy that can reject the request (`validate-jwt`, `check-header`, `ip-filter`, `rate-limit`, `quota`, `return-response`, `validate-*`) runs before the connector | Requests it rejects are never inspected; move the include line directly after `<base />` |
 | L05 | A `set-variable` has no value | Left behind by a manual merge; restore it, or use the fragments |
 | L06 | Only some of the three fragments are referenced | Add the missing `include-fragment` lines |

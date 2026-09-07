@@ -11,17 +11,27 @@ def frag(name):
 
 
 def test_true_host_replaces_every_originalurl_host_use():
+    """The host API Management received may be read ONLY where the client-facing host is being
+    resolved (as the gateway fallback, and in the trace line that reports the choice). Everywhere
+    else — the sideband Host, the application map, the response-phase logs — must use the
+    resolved rdwrTrueHost, or the two can disagree."""
     for name in ("inbound", "outbound", "onerror"):
         t = frag(name)
         uses = [m.start() for m in re.finditer(r"context\.Request\.OriginalUrl\.Host", t)]
-        # inbound keeps exactly one use: the definition of rdwrTrueHost
-        assert len(uses) == (1 if name == "inbound" else 0), (name, len(uses))
+        if name != "inbound":
+            assert uses == [], (name, len(uses))
+            assert "rdwrTrueHost" in t
+            continue
+        start = t.index('name="rdwrHostResolved"')
+        end = t.index('name="rdwrTrueHost"', start)
+        end = t.index("</choose>", end)  # the trace line that names the source
+        assert all(start < u < end for u in uses), [u for u in uses if not (start < u < end)]
         assert "rdwrTrueHost" in t
 
 
 def test_inbound_declares_new_named_values():
     t = frag("inbound")
-    for nv in ("rdwr-app-map", "rdwr-true-host-header"):
+    for nv in ("rdwr-app-map", "rdwr-true-host-header", "rdwr-host-fallback", "rdwr-custom-bot-block-statuses"):
         assert "{{" + nv + "}}" in t, nv
 
 

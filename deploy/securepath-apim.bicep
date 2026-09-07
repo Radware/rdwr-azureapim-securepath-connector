@@ -44,8 +44,11 @@ param createBackend bool = true
 @description('Optional map of API id or hostname (or "*") to {app_id, api_key, endpoint[, port, ssl, bot_manager, bot_block_statuses, base_path]} for instances serving several SecurePath applications. Empty means the three values above apply to every API. See README "Protecting APIs that belong to different SecurePath applications".')
 param appMap object = {}
 
-@description('Request header carrying the client-facing hostname when a CDN or Front Door fronts the gateway (for example X-Forwarded-Host). ##DISABLED## uses the host the gateway received.')
+@description('Header(s) carrying the client-facing hostname when a CDN or Front Door fronts the gateway, comma-separated and tried in order (for example "x-forwarded-host,forwarded"). ##DISABLED## uses the host the gateway received. Only set this when that proxy is the sole path to the gateway.')
 param trueHostHeader string = '##DISABLED##'
+
+@description('Used when none of the trueHostHeader headers yields a valid hostname: "gateway" (the host API Management received) or a literal hostname of your own.')
+param hostFallback string = 'gateway'
 
 @description('Bot Manager: SecurePath status codes, beyond the standard verdicts, that the connector relays to the client as a Bot Manager block response, for example "429" or "429,418"; "*" for any such status; ##DISABLED## off. Used only when botManagerEnabled is true; a 5xx is never relayed. See README 3e.')
 param customBotBlockStatuses string = '##DISABLED##'
@@ -79,6 +82,7 @@ var namedValues = [
   { name: 'rdwr-inline-trusted-sources', value: '##DISABLED##', secret: false }
   { name: 'rdwr-inline-headers-enabled', value: 'false', secret: false }
   { name: 'rdwr-true-host-header', value: trueHostHeader, secret: false }
+  { name: 'rdwr-host-fallback', value: hostFallback, secret: false }
   { name: 'rdwr-custom-bot-block-statuses', value: customBotBlockStatuses, secret: false }
 ]
 

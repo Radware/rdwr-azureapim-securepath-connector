@@ -44,8 +44,8 @@ REQUIRED_NAMED_VALUES = (
     "static-inspect-if-query-string-exists", "chunked-request-allowed-content-types",
     "rdwr-inline-trusted-sources", "rdwr-inline-headers-enabled",
     # v1.4.0
-    "rdwr-app-map", "rdwr-true-host-header", "rdwr-custom-bot-block-statuses")
-NEW_IN_140 = {"rdwr-app-map", "rdwr-true-host-header", "rdwr-custom-bot-block-statuses"}
+    "rdwr-app-map", "rdwr-true-host-header", "rdwr-host-fallback", "rdwr-custom-bot-block-statuses")
+NEW_IN_140 = {"rdwr-app-map", "rdwr-true-host-header", "rdwr-host-fallback", "rdwr-custom-bot-block-statuses"}
 # the fragments shipped next to this tool (package layout: tools/ and fragments/ side by side)
 SHIPPED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fragments")
 SHIPPED_FRAGMENTS = ("securepath-inbound", "securepath-outbound", "securepath-onerror")
@@ -194,6 +194,8 @@ class Reader:
     def named_values(self) -> Dict[str, Optional[str]]: raise NotImplementedError
     def backends(self) -> List[str]: raise NotImplementedError
     def fragment(self, fragment_id: str) -> Optional[str]: return None  # text, or None when absent
+    def operations(self, api_id: str) -> List[str]: return []
+    def operation_policy(self, api_id: str, operation_id: str) -> Optional[str]: return None
 
 
 class AzReader(Reader):
@@ -277,6 +279,12 @@ class AzReader(Reader):
     def product_policy(self, product_id):
         return self._policy(f"/products/{product_id}")
 
+    def operations(self, api_id):
+        return [o["name"] for o in self._list(f"/apis/{api_id}/operations")]
+
+    def operation_policy(self, api_id, operation_id):
+        return self._policy(f"/apis/{api_id}/operations/{operation_id}")
+
     def named_values(self):
         # Secret values are read only for the connector's own Named Values; other workloads'
         # secrets on the instance are listed by name and never read.
@@ -359,6 +367,32 @@ def check_shipped_fragments(reader: Reader, uses_fragments: bool) -> List[Findin
     return out
 
 
+def check_host_settings(nvs: Dict[str, Optional[str]]) -> List[Finding]:
+    """L15: rdwr-true-host-header must be one or more header NAMES (not values), and
+    rdwr-host-fallback must be "gateway" or a hostname. A wrong value here sends the wrong
+    hostname to SecurePath, which is how an application is identified."""
+    out: List[Finding] = []
+    raw = (nvs.get("rdwr-true-host-header") or "").strip()
+    if raw and raw.lower() not in DISABLE_TOKENS:
+        for name in [n.strip() for n in raw.split(",")]:
+            if not name:
+                continue
+            bad = [c for c in " :/?@." if c in name]
+            if bad or len(name) > 64:
+                out.append(Finding("L15", "named-values", None,
+                                   f"rdwr-true-host-header entry '{name}' is not a header name",
+                                   "list header NAMES, comma-separated and tried in order, for example "
+                                   "x-forwarded-host,forwarded — not a hostname and not a value"))
+    fb = (nvs.get("rdwr-host-fallback") or "").strip()
+    if fb and fb.lower() not in DISABLE_TOKENS and fb.lower() != "gateway":
+        bad = [c for c in " :/?@," if c in fb]
+        if bad or len(fb) > 253:
+            out.append(Finding("L15", "named-values", None,
+                               f"rdwr-host-fallback '{fb}' is neither 'gateway' nor a hostname",
+                               "use gateway (the host API Management received) or a literal hostname such as shop.example.com"))
+    return out
+
+
 def check_bot_block_statuses(value: str, bot_manager: str, where: str) -> List[Finding]:
     """L13: rdwr-custom-bot-block-statuses (or a map entry's bot_block_statuses) must be a disable
     token, "*", or a comma-separated list of status codes; 200/301/302/403 have no effect there,
@@ -393,7 +427,7 @@ def check_bot_block_statuses(value: str, bot_manager: str, where: str) -> List[F
     return out
 
 
-def lint_instance(reader: Reader) -> List[Finding]:
+def lint_instance(reader: Reader, check_operations: bool = False) -> List[Finding]:
     findings: List[Finding] = []
     docs: List[Tuple[str, str, Optional[str]]] = [("global", "global", reader.global_policy())]
     docs += [("product", f"product:{p}", reader.product_policy(p)) for p in reader.products()]
@@ -487,6 +521,26 @@ def lint_instance(reader: Reader) -> List[Finding]:
             except ValueError as e:
                 findings.append(Finding("L10", "fragments", None, f"the generated map is not valid JSON ({e})",
                                         "run securepath-apim-sync apply again"))
+    # L03 at OPERATION scope. An operation policy without <base /> skips the API's policy AND the
+    # wider scopes, so a single operation can silently lose the connector — no inspection and no
+    # reserved-header enforcement (measured on a live instance, 2026-09-07). Off by default: it
+    # costs one call per operation, which is slow on an instance with hundreds of them.
+    if check_operations and (global_has or any(sc == "product" for sc, _ in with_connector)):
+        for api_id in reader.apis():
+            for op_id in reader.operations(api_id):
+                text = reader.operation_policy(api_id, op_id)
+                if not text:
+                    continue
+                sections = split_sections(text)
+                for name in ("inbound", "outbound", "on-error"):
+                    start, body = sections.get(name, (None, None))
+                    if body is None:
+                        continue
+                    if not any(_BASE_RE.search(ln) for ln in body):
+                        findings.append(Finding(
+                            "L03", f"api {api_id} / operation {op_id}", start,
+                            f"<{name}> has no <base />; this operation skips the connector entirely",
+                            f"add <base /> as the first element of <{name}> in this operation's policy"))
     findings.extend(check_shipped_fragments(reader, uses_fragments))
     app_map_raw = nvs.get("rdwr-app-map")
     app_map = {}
@@ -531,6 +585,7 @@ def lint_instance(reader: Reader) -> List[Finding]:
                     f"no backend entity matches endpoint {host}; on v2 tiers the inspection call fails "
                     f"TLS validation and traffic is served uninspected",
                     "create the backend entity for this endpoint (README Step 1, Path B)"))
+    findings.extend(check_host_settings(nvs))
     if "rdwr-custom-bot-block-statuses" in nvs:
         findings.extend(check_bot_block_statuses(nvs.get("rdwr-custom-bot-block-statuses", ""), nvs.get("rdwr-bot-manager-enabled", ""), "rdwr-custom-bot-block-statuses"))
     for key, entry in (app_map.items() if isinstance(app_map, dict) else []):
@@ -590,6 +645,7 @@ def summarize_trace(trace: dict) -> dict:
          "connector_ran": False, "connector_form": None, "before_connector": [],
          "bypassed": False, "sideband_url": None, "sideband_error": None, "sideband_status": None,
          "verdict_status": None, "oop_request_status": None, "diag": None, "enforced": None, "note": None, "wrong_api_key": False,
+         "client_facing_host": None, "client_facing_host_source": None,
          "oop_log": None, "response_log": None, "origin_status": None}
     seen = False
     for sec, src, text, data in _trace_entries(trace):
@@ -616,6 +672,10 @@ def summarize_trace(trace: dict) -> dict:
                     s["verdict_status"] = v
                 elif n == "oopRequestStatusHeader":
                     s["oop_request_status"] = v
+                elif n == "rdwrTrueHost":
+                    s["client_facing_host"] = v
+                elif n == "rdwrTrueHostSource":
+                    s["client_facing_host_source"] = v
                 elif n == "rdwrOopLog":
                     s["oop_log"] = v
                 elif n == "radwareDiag" and v:
@@ -798,6 +858,8 @@ def format_trace_summary(s: dict) -> str:
         "Trace summary",
         f"  trace file id:          {s['trace_id'] or '-'}",
         f"  API / operation:        {s['api'] or '-'} / {s['operation'] or '-'}",
+        f"  client-facing host:     {s['client_facing_host'] or '-'}"
+        + (f"  (from {s['client_facing_host_source']})" if s.get("client_facing_host_source") else ""),
         f"  connector ran:          {'yes (' + s['connector_form'] + ')' if s['connector_ran'] else 'NO'}",
         f"  policies before it:     {', '.join(s['before_connector']) if s['before_connector'] else 'none'}",
         f"  inspection call:        {call}",
@@ -819,6 +881,8 @@ def main(argv=None) -> int:
     ap.add_argument("--label", default=None, help="label for --file findings")
     ap.add_argument("-g", "--resource-group")
     ap.add_argument("-n", "--apim")
+    ap.add_argument("--operations", action="store_true",
+                    help="--live: also check every operation's own policy for <base /> (one call per operation)")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     summary = None
@@ -845,7 +909,7 @@ def main(argv=None) -> int:
         else:
             if not (a.resource_group and a.apim):
                 ap.error("--live needs -g RESOURCE_GROUP and -n APIM")
-            findings = lint_instance(AzReader(a.resource_group, a.apim))
+            findings = lint_instance(AzReader(a.resource_group, a.apim), check_operations=a.operations)
     except (OSError, RuntimeError, ValueError) as e:
         print(f"could not read: {e}", file=sys.stderr)
         return 2
@@ -859,6 +923,9 @@ def main(argv=None) -> int:
         for f in findings:
             print(f)
         print("clean" if not findings else f"{len(findings)} finding(s)")
+        if a.live and not a.operations:
+            print("operation-scope policies were not checked; add --operations to include them "
+                  "(one call per operation, so it is slower on a large instance)")
     return 1 if findings else 0
 
 

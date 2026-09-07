@@ -76,7 +76,7 @@ use:
 | 1 | Establish TLS trust | Until this is in place, every inspection call fails and traffic is served **uninspected**. On some tiers it takes 15+ minutes to provision, so start it early. |
 | 2 | Pre-flight checks | Two things can silently damage an existing configuration or silently disable protection. Both are checked before anything is created. |
 | 3 | Create the Named Values | The policy resolves them when it is saved. If one is missing, Step 4 is rejected outright. |
-| 4 | Install the connector | Needs an existing API and all 23 Named Values already in place. Choose an install form — see below. |
+| 4 | Install the connector | Needs an existing API and all 24 Named Values already in place. Choose an install form — see below. |
 | 5 | Verify | Only meaningful once Step 1 has finished provisioning. Running it earlier reports a false failure. |
 
 ### Permissions you need
@@ -271,7 +271,7 @@ This lists any that already exist, with their current values, **before** anythin
 RG="your-resource-group"
 APIM="your-apim-instance"
 
-RDWR_NAMES="rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled rdwr-app-map rdwr-true-host-header rdwr-custom-bot-block-statuses"
+RDWR_NAMES="rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled rdwr-app-map rdwr-true-host-header rdwr-custom-bot-block-statuses rdwr-host-fallback"
 EXISTING=$(az apim nv list -g "$RG" --service-name "$APIM" --query "[].name" -o tsv)
 FOUND=0
 for n in $RDWR_NAMES; do
@@ -320,13 +320,19 @@ echo "apis that would skip the connector: $MISSING"
 Any `SKIPPED` line must be fixed by adding `<base />` as the first element of that API's
 `<inbound>` section, or that API stays unprotected.
 
+**Operation-level policies are checked separately.** An individual operation can carry its own
+policy, and if that policy omits `<base />` the connector is skipped for that one operation —
+measured: no inspection, and the connector's own reserved-header `403` stops working there too.
+The block above reads API policies only; after the install, run the check in 5e with
+`--operations` to cover every operation as well.
+
 ---
 ---
 
 # ▶ STEP 3 — Create the Named Values
 
-**What this does:** creates the 23 settings the policy reads — the 3 application values in 3a and
-the 20 configuration values in 3b. All 23 must exist before Step 4, or the install is rejected.
+**What this does:** creates the 24 settings the policy reads — the 3 application values in 3a and
+the 21 configuration values in 3b. All 24 must exist before Step 4, or the install is rejected.
 
 ## 3a — Your three application values
 
@@ -345,7 +351,7 @@ az apim nv create -g "$RG" --service-name "$APIM" \
   --named-value-id rdwr-api-key --display-name rdwr-api-key --secret true --value "$API_KEY"
 ```
 
-## 3b — The 20 configuration values
+## 3b — The 21 configuration values
 
 `RDWR_NV` below is a temporary **shell variable** used to build the list. It has nothing to do with
 API Management Named Values, and clearing it affects nothing in Azure.
@@ -375,6 +381,7 @@ RDWR_NV=(
   "rdwr-inline-headers-enabled=false"
   "rdwr-app-map=##DISABLED##"
   "rdwr-true-host-header=##DISABLED##"
+  "rdwr-host-fallback=gateway"
   "rdwr-custom-bot-block-statuses=##DISABLED##"
 )
 for kv in "${RDWR_NV[@]}"; do
@@ -404,8 +411,10 @@ below, which means "off":
   `X-Forwarded-For`. The connector takes the first address in it, and only if it is a valid IP
   address. Set it **only** when that proxy is the sole path to the gateway: a client that can reach
   the gateway directly can write that header and choose the IP SecurePath sees.
-- **`rdwr-true-host-header`** — the header carrying the client-facing hostname behind Front Door
-  or a CDN (3d). Same rule: only when the proxy is the sole path to the gateway.
+- **`rdwr-true-host-header`** — the header, or headers, carrying the client-facing hostname behind
+  Front Door or a CDN (3d). Same rule: only when the proxy is the sole path to the gateway.
+  `rdwr-host-fallback` decides what to use when none of them yields a usable hostname — `gateway`
+  (the host API Management received) or a hostname of your own.
 - **`rdwr-inline-trusted-sources`** — the allow-list of source IPs that may bypass inspection
   (traffic already inspected upstream). `rdwr-inline-headers-enabled=true` additionally requires
   the bypass signature headers on such requests; it never works alone — headers can be forged,
@@ -421,7 +430,7 @@ Re-running this block over an earlier attempt simply overwrites each value; no e
 RG="your-resource-group"
 APIM="your-apim-instance"
 
-EXPECTED="rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled rdwr-app-map rdwr-true-host-header rdwr-custom-bot-block-statuses"
+EXPECTED="rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled rdwr-app-map rdwr-true-host-header rdwr-custom-bot-block-statuses rdwr-host-fallback"
 HAVE=$(az apim nv list -g "$RG" --service-name "$APIM" --query "[].name" -o tsv)
 for n in $EXPECTED; do
   echo "$HAVE" | grep -qx "$n" || echo "MISSING: $n"
@@ -492,15 +501,78 @@ to `##DISABLED##` there is no default: an unmatched request is **served without 
 and the connector says so — it adds `X-Rdwr-Diag: no_app_mapping` to the request it forwards to
 your backend and writes a trace line — so an unprotected API is visible, never silent.
 
-**The client-facing hostname.** By default this is the host the gateway received. When Azure
-Front Door, a CDN or any proxy sits in front of the gateway, the gateway receives *its own*
-hostname and the hostname the client used arrives in a header — `X-Forwarded-Host` for Front
-Door. Set `rdwr-true-host-header` to that header name. The connector then uses it both to select
-the application and as the `Host` it reports to SecurePath, so events show the domain your users
-see (the same idea as `rdwr-true-client-ip-header`). Leave it `##DISABLED##` when clients reach
-the gateway directly — and enable it only when the proxy is the sole path to the gateway (Front
-Door with a `check-header` on `X-Azure-FDID`, an `ip-filter` for the proxy's ranges, or a private
-gateway). Otherwise a client can set that header itself and pick which application inspects it.
+### The client-facing hostname
+
+**Why it matters.** The hostname is how SecurePath identifies your application: it is what appears
+in its events and access log, and what the connector matches against the application map. When
+Azure Front Door, a CDN or any proxy sits in front of the gateway, **the gateway does not receive
+that hostname** — it receives the proxy's, typically `<your-instance>.azure-api.net`, while the
+hostname your users typed arrives in a header (`X-Forwarded-Host` for Front Door, which can also be
+configured to forward the original `Host` instead).
+
+**How the connector decides.** In order:
+
+1. Each header named in `rdwr-true-host-header`, in the order you list them, comma-separated. The
+   first one that yields a usable hostname wins, so you can list a primary and a spare
+   (`x-forwarded-host,forwarded`) and survive a change of front end without touching the policy.
+   `forwarded` is understood in its RFC 7239 form (`for=…;host=example.com;proto=https`).
+2. If none does, `rdwr-host-fallback`: `gateway` (default — the host API Management received) or a
+   literal hostname you choose, for the case where neither the header nor the gateway host is the
+   identity you onboarded.
+
+A candidate is used only if it looks like a hostname. The first element of a comma-separated chain
+is taken, a port is stripped (IPv6 literals included), and a value carrying a scheme, a path, a
+query, spaces or an `@` is rejected and the next candidate is tried — a client-supplied header
+never becomes the identity of your application by accident. The resolved value is used **both** to
+select the application and as the `Host` reported to SecurePath, so the two can never disagree, and
+the trace names which header supplied it (`client-facing host … taken from …`).
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-true-host-header --value "x-forwarded-host,forwarded"
+```
+
+**Which hostname should identify the application?** The one your users see — the domain the
+application is onboarded under in the Radware Cloud portal. That is normally the client-facing
+hostname, which is why the header above exists. If instead you onboarded the application under the
+gateway's own hostname, leave `rdwr-true-host-header` disabled and the gateway host is used. The
+setting exists because only you know which of the two your Radware Cloud application, its policies
+and any API schema were built around.
+
+> **Enable it only when the proxy is the sole path to the gateway** — Front Door with a
+> `check-header` on `X-Azure-FDID`, an `ip-filter` for the proxy's ranges, or a private gateway.
+> Otherwise a client that can reach the gateway directly can set the header itself and choose which
+> application inspects it. This is the same rule as `rdwr-true-client-ip-header`.
+
+### Different front ends on one instance
+
+One API Management instance often fronts several APIs, each behind its own Front Door profile.
+Both settings above can be overridden **per API** (or per product) without installing the connector
+more than once: in that API's own policy, set the variable **before `<base />`**, which is where the
+All APIs policy — and so the connector — runs.
+
+```xml
+<policies>
+  <inbound>
+    <set-variable name="rdwrTrueHostHeaderOverride" value="x-original-host" />
+    <base />
+  </inbound>
+  <backend><base /></backend>
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>
+```
+
+`rdwrHostFallbackOverride` works the same way. Only `set-variable` belongs before `<base />`:
+anything that can end a request — `validate-jwt`, `ip-filter`, `rate-limit`, `return-response` —
+must stay after it, or it rejects requests before the connector ever inspects them (Step 4, and the
+install check reports it as `L04`).
+
+Which SecurePath **application** an API uses is not set this way — it comes from the application
+map below, keyed by API id, which also carries that application's endpoint, credentials and per-app
+options.
 
 ### The application map
 
@@ -757,6 +829,54 @@ There is no `<base />` at this scope: the All APIs policy has no parent to inher
 instance already has an All APIs policy of its own, keep its content and add the four include
 lines to it instead (the app-map and inbound lines first in `<inbound>`), as in Form 2.
 
+### What happens to APIs that already have policies
+
+**Nothing. You do not edit them.**
+
+Take the common case: 100 operations across your APIs, and 10 of them carry a `validate-jwt`
+policy. You install the connector once, at All APIs scope. Those 10 keep working exactly as they
+did, and SecurePath inspects every request — including the ones the JWT rejects.
+
+That is because API Management runs the scopes in a fixed order, and the connector is in the first
+one:
+
+```
+All APIs (the connector)  →  Product  →  Your API  →  Your operation
+```
+
+Each of your policies hands control down at its `<base />` element. So an API policy that looks
+like this needs **no change at all**:
+
+```xml
+<policies>
+  <inbound>
+    <base />                     <!-- the connector runs here, first -->
+    <validate-jwt header-name="Authorization" failed-validation-httpcode="401">
+      <!-- your existing configuration, untouched -->
+    </validate-jwt>
+  </inbound>
+  <backend><base /></backend>
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>
+```
+
+**The one thing to check: every policy must keep `<base />`.** A policy that omits it skips the
+All APIs scope entirely — the connector never runs for that API or that operation, and nothing
+reports it. Step 2b checks your API policies; add `--operations` to the install check (5e) to
+include operation-level policies as well.
+
+**When you do need to touch an API:** only if its policy has no `<base />`, or if something that
+can end a request — `validate-jwt`, `check-header`, `ip-filter`, `rate-limit`, `quota`,
+`return-response`, `validate-*` — sits **before** `<base />`. Move `<base />` to the top of the
+section. Anything after it is fine, and that is where your policies normally already are.
+
+> **Why the order matters.** API Management evaluates a section top to bottom and stops at the
+> first policy that ends the request. If your `validate-jwt` runs before the connector, every
+> request it rejects is gone before SecurePath sees it: those requests appear in API Management
+> as `401`, and never appear in the Radware Cloud portal at all. Nothing errors — the gap is
+> silent. The install check reports this as `L04`.
+
 Updating the connector later means replacing the fragments; every scope that references them
 picks up the change. `securepath-app-map` is the one fragment the sync tool rewrites (Step 3d);
 a connector update leaves it as it is. A fragment cannot be deleted while a policy still references it; API
@@ -795,11 +915,15 @@ your own**:
 </policies>
 ```
 
-**The position matters.** A `validate-jwt`, `check-header`, `ip-filter`, `rate-limit`, `quota`
-or `return-response` placed above the connector ends the request before the connector runs, and
-SecurePath never sees the requests those policies reject, which are usually the ones you most
-want it to see. `tools/securepath-apim-lint.py --file your-policy.xml` reports this as L04
+**The position matters.** A `validate-jwt`, `check-header`, `ip-filter`, `rate-limit`, `quota`,
+`return-response` or `validate-*` placed above the connector ends the request before the connector
+runs, and SecurePath never sees the requests those policies reject, which are usually the ones you
+most want it to see. `tools/securepath-apim-lint.py --file your-policy.xml` reports this as L04
 before you upload.
+
+One exception is deliberate: a `check-header` on `X-Azure-FDID` placed above the connector drops
+requests that did not come through your Front Door, before anything else looks at them. If you do
+that on purpose, expect `L04` to name it.
 
 To edit from the CLI, fetch the current policy, edit it, and upload it with `format` set to
 `rawxml`. For an API (for a product, replace `apis/$API_ID` with `products/your-product-id`):
@@ -850,6 +974,11 @@ has no policy of its own. If the API already has a policy, use Form 2 instead.
 
 If the save is rejected, the error names the missing Named Value or the offending line. Go back to
 Step 3c.
+
+**If you keep your own policies in this document**, they must sit **after** the connector's inbound
+block, not before it — the same rule as Form 2. A `validate-jwt` placed above the connector hides
+every request it rejects from SecurePath. Run `python3 tools/securepath-apim-lint.py --file
+your-document.xml` before uploading; it reports that as `L04` with the line number.
 
 **Azure CLI** — run from the directory containing the policy XML:
 
@@ -963,7 +1092,7 @@ curl -s -o /dev/null -D - "https://$APIM.azure-api.net/your/real/operation/path"
 | *(header absent)* | yes | Inspection completed with an allow verdict. Blocks and redirects never reach the backend; they are visible in the trace. |
 | `uzmcr_allow` | yes | Allowed by the Bot Manager mobile exception (SecurePath sent `uzmcr`). |
 | `multipart_headers_only` | yes | A multipart body above `rdwr-multipart-max-size-bytes` was inspected headers-only. |
-| `sideband_error_or_timeout` | **no** | The inspection call failed or timed out — Issue 1, Issue 8. |
+| `sideband_error_or_timeout` | **no** | The inspection call failed or timed out — Issue 1, Issue 9. |
 | `sideband_error_failopen_<status>` | **no** | SecurePath answered a 5xx (for example `sideband_error_failopen_503`). |
 | `wrong_api_key_redirect` | **no** | The Application ID / API key pair was not recognised — Issue 3. |
 | `unexpected_status_<status>` | **no** | SecurePath answered a status outside the verdicts (for example `unexpected_status_429`) — 3e. |
@@ -992,6 +1121,9 @@ APIM="your-apim-instance"
 
 python3 tools/securepath-apim-lint.py --live -g "$RG" -n "$APIM"
 ```
+
+Add `--operations` to check every operation's own policy as well — one call per operation, so it
+is slower, but it is the only way to catch an operation that silently skips the connector.
 
 `clean` means the connector is installed at exactly one scope, every API and product policy
 inherits it, nothing of yours runs ahead of it, and the Named Values and (on v2 tiers) the backend
@@ -1171,7 +1303,7 @@ they appear in the **Inbound** section:
 | `Entering policy fragment 'securepath-inbound'` (fragments) or `set-variable ... rdwrAppEpAddr` (Form 3) | The connector ran on this request. **Absent: the connector is not in this API's policy path** — not installed at a covering scope, or the API's own policy lacks `<base />`. | Step 4, Step 2b |
 | Any `validate-jwt`, `check-header`, `ip-filter`, `rate-limit`, `return-response` **above** that line | Your policy runs first. Whatever it rejects is never seen by SecurePath. (A `check-header` on `X-Azure-FDID` ahead of the connector is a deliberate choice: direct-to-gateway probes are dropped before inspection.) | Step 4: move the include lines directly after `<base />` |
 | `request to 'https://<host>/...'` inside `send-request` | Where the inspection call went. **The host must end in `.oop.radwarecloud.net`.** A host ending `.v1.radwarecloud.net` is the application's front-end address: the Named Value is wrong. | Step 3a, 3c |
-| `... resulted in error, error ignored: <reason>` | The inspection call failed and the request was served uninspected. The reason names the cause: a certificate rejection (trust, Step 1 — for the host actually called), a timeout (network path to the endpoint), a hostname that does not resolve (typo). | Issue 1, Issue 8 |
+| `... resulted in error, error ignored: <reason>` | The inspection call failed and the request was served uninspected. The reason names the cause: a certificate rejection (trust, Step 1 — for the host actually called), a timeout (network path to the endpoint), a hostname that does not resolve (typo). | Issue 1, Issue 9 |
 | `send-request` response with status `301`/`302` and a `location` containing `wrong-api-key` | SecurePath did not recognise the Application ID / API key pair. | Step 3a, Issue 3 |
 | `set-variable rwStatus = 200` and `oopRequestStatusHeader = allowed` | Inspection completed, verdict allow. `rwStatus = 403` is a block. `rwStatus >= 500` is a SecurePath-side error and the request is served uninspected. | — |
 | `set-header X-Rdwr-Diag: <value>` | The request was served **without** a completed inspection; the value says why (table in 5c). This header goes to your backend, so its access log is an ongoing health signal. | 5c |
@@ -1218,13 +1350,25 @@ API behaves normally while serving traffic uninspected.
 
 See 5d, then check the trace for `error ignored`.
 
-## Issue 3 — Everything works, nothing appears in the Radware Cloud portal
+## Issue 3 — Traffic shows in API Management but never reaches SecurePath
+
+Requests appear in API Management — including `401`s from your own `validate-jwt` — but the
+Radware Cloud portal shows nothing for them, and no error appears anywhere.
+
+Two causes, both silent:
+
+| Cause | How to confirm | Fix |
+|---|---|---|
+| A policy of yours runs **before** the connector and ends the request | Trace one request (Option A): the readout says `'validate-jwt' ran and the connector was never reached` (`T01`), or names the policy in `T02` | Move `<base />` to the top of the section, or the connector's include lines directly after it (Step 4) |
+| A policy omits `<base />` | Step 2b for APIs; the install check with `--operations` for operations | Add `<base />` as the first element of the section |
+
+## Issue 4 — Everything works, nothing appears in the Radware Cloud portal
 
 Usually the wrong `rdwr-app-id`. It is a bare identifier with no dots. Run the check in Step 3c.
 Then check the trace for a redirect toward `wrong-api-key`, which is returned when the credentials
 cannot be matched to an application.
 
-## Issue 4 — Every request returns 500
+## Issue 5 — Every request returns 500
 
 A Named Value holds a value the policy cannot parse. These must be exact:
 
@@ -1236,18 +1380,18 @@ A Named Value holds a value the policy cannot parse. These must be exact:
 The policy saves successfully with a bad value and fails at request time, so this appears right
 after a Named Value edit rather than after a policy change.
 
-## Issue 5 — The policy upload is rejected
+## Issue 6 — The policy upload is rejected
 
 *"Named Value not found"* means one of the 22 is missing. Run Step 3c, which names it.
 
 If the upload failed with a validation error instead, confirm the request used `format: rawxml`.
 
-## Issue 6 — 404 on your test request
+## Issue 7 — 404 on your test request
 
 The URL matched no API Management operation, so the policy never ran. Use a path from
 `az apim api operation list`.
 
-## Issue 7 — Unexpected 403 on traffic that should pass
+## Issue 8 — Unexpected 403 on traffic that should pass
 
 The request carried a reserved header. The connector rejects any request presenting
 `x-rdwr-app-id`, `x-rdwr-api-key`, `x-rdwr-connector-ip`, `x-rdwr-partial-body`, `x-rdwr-cdn-ip`,
@@ -1256,13 +1400,13 @@ them is attempting to impersonate the connector.
 
 If an upstream proxy or CDN adds any of these, strip them before the request reaches API Management.
 
-## Issue 8 — Requests are slow
+## Issue 9 — Requests are slow
 
 Each request waits for the inspection call, bounded by `rdwr-app-ep-timeout-seconds` (default `10`).
 If the endpoint is unreachable, every request waits out that timeout before being forwarded. Check
 the trace for `error ignored`.
 
-## Issue 9 — Nothing happened when you pasted a command block
+## Issue 10 — Nothing happened when you pasted a command block
 
 Your shell stopped partway through, most likely on a syntax error, and the remaining commands never
 ran. Re-run the block, then run Step 3c to see what was actually created. If you are pasting into a
@@ -1339,7 +1483,7 @@ az rest --method PUT --uri "$URI" --headers "Content-Type=application/json" --bo
 
 ## In every case
 
-The 23 Named Values and the backend entities are inert once the connector is removed. Delete them
+The 24 Named Values and the backend entities are inert once the connector is removed. Delete them
 after the fragments are gone (API Management refuses while a fragment references them) — and check
 first whether any of the six non-`rdwr-` names were already yours before installation (Step 2a
 lists them).
