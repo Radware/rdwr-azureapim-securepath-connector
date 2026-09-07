@@ -1868,6 +1868,8 @@
               <set-header name="x-rdwr-o2v-body-bytes-sent" exists-action="override">
                 <value>@{
                   try {
+                    long declared;
+                    if (long.TryParse(context.Response.Headers.GetValueOrDefault("Content-Length", ""), out declared)) { return declared.ToString(); }
                     var body = context.Response.Body.As<byte[]>(preserveContent: true);
                     return (body != null ? body.Length : 0).ToString();
                   } catch { return "0"; }
@@ -1880,6 +1882,8 @@
                   try {
                     var body = context.Response.Body.As<byte[]>(preserveContent: true);
                     int bodyLen = body != null ? body.Length : 0;
+                    long declared;
+                    if (long.TryParse(context.Response.Headers.GetValueOrDefault("Content-Length", ""), out declared)) { bodyLen = (int)declared; }
                     int headerBytes = 0;
                     if (context.Response.Headers != null) {
                       foreach (var h in context.Response.Headers) {
@@ -2169,6 +2173,8 @@
               <set-header name="x-rdwr-o2v-body-bytes-sent" exists-action="override">
                 <value>@{
                   try {
+                    long declared;
+                    if (long.TryParse(context.Response.Headers.GetValueOrDefault("Content-Length", ""), out declared)) { return declared.ToString(); }
                     var body = context.Response.Body.As<byte[]>(preserveContent: true);
                     return (body != null ? body.Length : 0).ToString();
                   } catch { return "0"; }
@@ -2179,6 +2185,8 @@
                   try {
                     var body = context.Response.Body.As<byte[]>(preserveContent: true);
                     int bodyLen = body != null ? body.Length : 0;
+                    long declared;
+                    if (long.TryParse(context.Response.Headers.GetValueOrDefault("Content-Length", ""), out declared)) { bodyLen = (int)declared; }
                     int headerBytes = 0;
                     if (context.Response.Headers != null) {
                       foreach (var h in context.Response.Headers) {
