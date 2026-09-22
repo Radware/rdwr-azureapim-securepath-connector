@@ -1,6 +1,6 @@
 # Radware SecurePath Connector for Azure API Management
 
-**Connector v1.4.0** (`x-rdwr-plugin-info` 700-v1.4.0), released 2026-09-07. Changes since v1.3.4
+**Connector v1.4.0** (`x-rdwr-plugin-info` 700-v1.4.0), released 2026-09-22. Changes since v1.3.4
 are in `release-notes.md`; existing installs, see "Upgrading from v1.3.x" there.
 
 This guide takes you from an existing API Management instance to SecurePath inspecting your API
@@ -374,7 +374,7 @@ RDWR_NV=(
   "plugin-version-info=700-v1.4.0"
   "static-extensions-enabled=true"
   "static-list-of-methods-not-to-inspect=GET,HEAD"
-  "static-list-of-bypassed-extensions=png,jpg,css,js,gif,ico,svg,woff,woff2"
+  "static-list-of-bypassed-extensions=png,jpg,css,js,jpeg,gif,ico,ttf,svg,woff,woff2,svc,swf,otf,eot,webp,avif"
   "static-inspect-if-query-string-exists=true"
   "chunked-request-allowed-content-types=application/json,application/x-www-form-urlencoded"
   "rdwr-inline-trusted-sources=##DISABLED##"
@@ -731,11 +731,12 @@ status. The response-phase log marks the request `blocked`, so it appears as suc
 
 - The setting is used only when `rdwr-bot-manager-enabled` is `true`; otherwise it is ignored.
 - `200`, `301`, `302` and `403` in the list have no effect: they are standard verdicts and are
-  handled before the list is consulted.
+  handled before the list is consulted. The trace says so (an information line naming them).
 - A `5xx` from SecurePath is an endpoint problem, never a Bot Manager decision. It always fails open.
 - A value that is not a list of status codes (a typo, say) disables the setting for that request;
-  the request then fails open like any unlisted status. The install check (5e) reports all four
-  situations as `L13`.
+  the request then fails open like any unlisted status. The trace says so: an error line quotes
+  the value and reports it as ignored, and the fail-open line for an unlisted status repeats it.
+  The install check (5e) reports all four situations as `L13`.
 - With several applications on one instance (3d), an application-map entry may carry its own
   `bot_block_statuses`; it overrides this Named Value for that application.
 
@@ -1090,7 +1091,7 @@ curl -s -o /dev/null -D - "https://$APIM.azure-api.net/your/real/operation/path"
 | Value | Inspected? | Meaning |
 |---|---|---|
 | *(header absent)* | yes | Inspection completed with an allow verdict. Blocks and redirects never reach the backend; they are visible in the trace. |
-| `uzmcr_allow` | yes | Allowed by the Bot Manager mobile exception (SecurePath sent `uzmcr`). |
+| `uzmcr_allow` | yes | Allowed by the Bot Manager mobile exception (SecurePath sent `uzmcr`). The trace carries an error line with SecurePath's status, its request-status header and the `x-rdwr-oop-id`, because this is the one path where a verdict other than allow is passed to the backend. |
 | `multipart_headers_only` | yes | A multipart body above `rdwr-multipart-max-size-bytes` was inspected headers-only. |
 | `sideband_error_or_timeout` | **no** | The inspection call failed or timed out — Issue 1, Issue 9. |
 | `sideband_error_failopen_<status>` | **no** | SecurePath answered a 5xx (for example `sideband_error_failopen_503`). |

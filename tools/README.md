@@ -18,7 +18,7 @@ Exit code 0 means clean, 1 means findings, 2 means the instance or file could no
 | L03 | An API or product policy has a section without `<base />` while the connector is at a wider scope | That API skips the connector entirely; add `<base />` first in that section | Also reported for an operation's own policy when `--operations` is given: an operation without `<base />` skips the connector entirely.
 | L04 | A policy that can reject the request (`validate-jwt`, `check-header`, `ip-filter`, `rate-limit`, `quota`, `return-response`, `validate-*`) runs before the connector | Requests it rejects are never inspected; move the include line directly after `<base />` |
 | L05 | A `set-variable` has no value | Left behind by a manual merge; restore it, or use the fragments |
-| L06 | Only some of the three fragments are referenced | Add the missing `include-fragment` lines |
+| L06 | Only some of the three section fragments (`securepath-inbound`, `securepath-outbound`, `securepath-onerror`) are referenced | Add the missing `include-fragment` lines (the application-map fragment is covered by L11) |
 | L07 | A required Named Value is missing | README Step 3 |
 | L08 | `rdwr-app-id` contains a dot, or `rdwr-app-ep-addr` is not an `.oop.radwarecloud.net` host | README Step 3a |
 | L09 | Standard v2 / Premium v2: an inspection endpoint has no matching backend entity | README Step 1, Path B; without it traffic is served uninspected |

@@ -85,3 +85,68 @@ def test_inbound_reads_the_generated_map_but_never_includes_a_fragment():
 def test_default_app_map_fragment_is_disabled():
     t = frag("app-map")
     assert 'name="rdwrAppMapGenerated" value="##DISABLED##"' in t
+
+
+def test_chunked_is_detected_as_a_token():
+    """Transfer-Encoding is a comma-separated, case-insensitive list ("gzip, chunked", "Chunked");
+    the connector must tokenise it."""
+    t = frag("inbound")
+    assert 'name="origTransferChunked"' in t
+    assert '.Trim() == "chunked"' in t
+    # the old first-value, exact-match compares (multipart branch and chunked branch)
+    assert 'GetValueOrDefault("origTransferEncoding", "")).ToLower() == "chunked"' not in t
+    assert 'Variables["origTransferEncoding"]) == "chunked"' not in t
+    assert "?.FirstOrDefault()?.ToLower()" not in t.split('name="origTransferEncoding"')[1].split("/>")[0]
+    assert t.count('<send-request mode="copy"') == 2
+
+
+def test_no_policy_touches_transfer_encoding():
+    """API Management rejects a set-header on Transfer-Encoding at save time ("Header name is
+    invalid or restricted from modification", rig 2026-09-22); the gateway frames the inspection
+    call's body itself. A fragment carrying one registers as a silent no-op (the old fragment
+    stays live), so guard it here."""
+    for name in ("inbound", "outbound", "onerror"):
+        t = frag(name)
+        assert re.search(r'<set-header name="transfer-encoding"', t, re.I) is None, name
+
+
+def test_uzmcr_passthrough_is_traced():
+    t = frag("inbound")
+    i = t.index('value="@("uzmcr_allow")"')
+    branch = t[i:t.index("</when>", i)]
+    assert '<trace source="securepath" severity="error">' in branch
+    for must in ("rwStatus", "oopRequestStatusHeader", "rdwrOopId"):
+        assert must in branch, must
+
+
+def test_custom_bot_block_status_list_is_validated_and_reported():
+    t = frag("inbound")
+    assert 'name="rdwrCustomBotBlockStatusesProblem"' in t
+    assert 'return "invalid"' in t and '"no_effect:"' in t
+    assert "ignored for this request (README 3e)" in t
+    assert "which has no effect there" in t
+    # the fail-open line for an unlisted status names the ignored setting
+    i = t.index("unexpected_status_")
+    assert "is not a status-code list, so it was ignored" in t[i:t.index("</trace>", i)]
+
+
+def test_partial_body_header_is_gated_not_nulled():
+    """A null <value> inside send-request still emits an EMPTY header (rig 2026-09-22: every
+    non-truncated inspection call carried 'x-rdwr-partial-body:'); the set-header must be inside
+    a <when> on setPartialBodyHeader, the way the outbound fragment gates its x-rdwr-o2h-* headers."""
+    t = frag("inbound")
+    assert 'return isPartial ? "true" : null;' not in t
+    n = t.count('<set-header name="X-Rdwr-Partial-Body"')
+    assert n == 2
+    gate = '<when condition="@((bool)context.Variables.GetValueOrDefault("setPartialBodyHeader", false))">'
+    for i in [m for m in range(len(t)) if t.startswith('<set-header name="X-Rdwr-Partial-Body"', m)]:
+        assert gate in t[i - 400:i], "X-Rdwr-Partial-Body set-header is not gated"
+
+
+def test_true_host_rejects_control_characters():
+    t = frag("inbound")
+    start = t.index('name="rdwrHostResolved"')
+    end = t.index('name="rdwrTrueHostSource"', start)
+    body = t[start:end]
+    assert "(char)0x20" in body and "(char)0x7f" in body
+    assert "bool usable = !ctl &&" in body

@@ -1,54 +1,16 @@
 # Release Notes — Radware SecurePath Connector for Azure API Management
 
-### Existing policies, and the operations that could silently skip the connector
+## v1.4.0 (2026-09-22)
 
-The guide now answers the question a global install actually raises — *I have APIs that already
-carry their own `validate-jwt`; do I have to change them?* — where the person installing reads it
-(Step 4, Form 1): **no**, the connector runs first by virtue of the scope order, those policies are
-untouched, and SecurePath sees even the requests they reject. The single precondition, `<base />`,
-is stated there with the policy shape that needs no change.
-
-The install check can now also read **operation-level** policies (`--operations`): an operation
-whose own policy omits `<base />` skips the connector for that operation alone — no inspection and
-no reserved-header enforcement — and nothing else reports it. Debugging gains the matching symptom:
-traffic visible in API Management, including 401s, that never reaches SecurePath.
-
-### The client-facing hostname, and per-API settings
-
-`rdwr-true-host-header` accepts **several header names**, comma-separated and tried in order, so a
-primary and a spare can be listed (`x-forwarded-host,forwarded`, the latter understood in its
-RFC 7239 form) and a change of front end needs no policy change. A candidate is used only if it is
-a hostname: the first element of a chain is taken, a port is stripped, and a value carrying a
-scheme, path, query, spaces or `@` is rejected and the next candidate tried. New Named Value
-**`rdwr-host-fallback`** decides what is used when none matches — `gateway` (default, the host
-API Management received) or a hostname of your own. The resolved value is used both to select the
-application and as the `Host` reported to SecurePath, and the trace names which header supplied it.
-
-Both settings can be overridden **per API or product** without a second install, by setting
-`rdwrTrueHostHeaderOverride` / `rdwrHostFallbackOverride` before `<base />` in that API's own
-policy — for an instance whose APIs sit behind different front ends. README 3d.
-
-### Named Values and version
-
-Four new Named Values (24 in total): `rdwr-app-map`, `rdwr-true-host-header`, `rdwr-host-fallback` and
-`rdwr-custom-bot-block-statuses`. `x-rdwr-plugin-info` becomes `700-v1.4.0`.
-
-### Upgrading from v1.3.x
-
-1. Create the three new Named Values (README 3b) and set `plugin-version-info` to `700-v1.4.0`.
-2. Register the four v1.4.0 fragments (README Step 4, Form 1, first block). Two are new
-   (`securepath-app-map`, `securepath-onerror`); the other two replace the v1.3.4 ones in place.
-3. If you installed v1.3.4 Form C (two fragments referenced from a policy), add the two missing
-   include lines — `securepath-app-map` immediately before `securepath-inbound`, and
-   `securepath-onerror` in `<on-error>` (README Form 2).
-4. If you installed v1.3.4 Form A or B (a policy document), replace it with the fragment install
-   (Form 1 or 2) or with `rdwr-azureapim-securepath-connector-v1.4.xml` (Form 3).
-5. Run `python3 tools/securepath-apim-lint.py --live` (README 5e) and trace one request
-   (README Debugging, Option A).
-
----
-
-## v1.4.0 (2026-09-07)
+**The policy changed in this release; every install is updated by re-registering the fragments
+(or replacing the document) and creating four Named Values** — see "Upgrading from v1.3.x" at
+the end of this section. What is new: one API Management instance can protect several SecurePath
+applications; the hostname the client used behind Azure Front Door or a CDN is resolved, used to
+select the application and reported to SecurePath; the default install is four policy fragments
+at the All APIs scope, with a Bicep template, an install check, an application-sync tool and a
+trace tool; and requests your own policies reject, chunked requests in every spelling, custom Bot
+Manager block responses and unknown SecurePath statuses are handled as described below.
+`x-rdwr-plugin-info` becomes `700-v1.4.0`.
 
 ### Several SecurePath applications on one instance
 
@@ -73,28 +35,44 @@ non-zero on drift for a scheduler, `--prune` removes applications that are gone,
 a Bicep parameter file. The gateway itself never polls the Radware Cloud; selection stays on the
 request path, reading the map.
 
-### The client-facing hostname
+### The client-facing hostname, and per-API settings
 
 `rdwr-true-host-header` names the request header that carries the hostname the client used when
 Azure Front Door, a CDN or a proxy sits in front of the gateway (for example `X-Forwarded-Host`).
 That hostname selects the application and is the `Host` reported to SecurePath.
 
-### A configuration problem no longer fails requests
+`rdwr-true-host-header` accepts **several header names**, comma-separated and tried in order, so a
+primary and a spare can be listed (`x-forwarded-host,forwarded`, the latter understood in its
+RFC 7239 form) and a change of front end needs no policy change. A candidate is used only if it is
+a hostname: the first element of a chain is taken, a port is stripped, and a value carrying a
+scheme, path, query, spaces or `@` is rejected and the next candidate tried. New Named Value
+**`rdwr-host-fallback`** decides what is used when none matches — `gateway` (default, the host
+API Management received) or a hostname of your own. The resolved value is used both to select the
+application and as the `Host` reported to SecurePath, and the trace names which header supplied it.
 
-An incomplete configuration, an unmatched request with no default application, or an invalid
-map used to be able to end a request with a 500. Such requests are now served without
-inspection and marked with `X-Rdwr-Diag` (`config_incomplete`, `no_app_mapping`,
-`app_map_invalid`) and a trace line, so the condition is visible without affecting traffic.
+Both settings can be overridden **per API or product** without a second install, by setting
+`rdwrTrueHostHeaderOverride` / `rdwrHostFallbackOverride` before `<base />` in that API's own
+policy — for an instance whose APIs sit behind different front ends. README 3d.
 
-### Two behaviours aligned with the other SecurePath connectors
+### Fragments at All APIs scope are the default install
 
-- A SecurePath response with a status the connector does not know (for example 401 or 418) is no
-  longer relayed to the client. The request is served without a verdict, marked with
-  `X-Rdwr-Diag: unexpected_status_<code>` and a trace line, which is what the other SecurePath
-  connectors do — unless the status is listed in `rdwr-custom-bot-block-statuses` (below).
-- The `uzmcr` header (the Bot Manager mobile flow) is honoured as an allow signal whether or not
-  Bot Manager is enabled, and relayed to the client — with the Bot Manager cookies — only when
-  `rdwr-bot-manager-enabled` is true, as the SecurePath specification requires.
+The connector installed at the All APIs scope runs before every API's own policy, so nothing has
+to be ordered by hand and no existing policy is edited. `deploy/securepath-apim.bicep` installs
+everything in one deployment. The whole-document form is now generated from the fragments
+(`rdwr-azureapim-securepath-connector-v1.4.xml`); the v1.3 documents are no longer shipped.
+
+### Existing policies, and the operations that could silently skip the connector
+
+The guide now answers the question a global install actually raises — *I have APIs that already
+carry their own `validate-jwt`; do I have to change them?* — where the person installing reads it
+(Step 4, Form 1): **no**, the connector runs first by virtue of the scope order, those policies are
+untouched, and SecurePath sees even the requests they reject. The single precondition, `<base />`,
+is stated there with the policy shape that needs no change.
+
+The install check can now also read **operation-level** policies (`--operations`): an operation
+whose own policy omits `<base />` skips the connector for that operation alone — no inspection and
+no reserved-header enforcement — and nothing else reports it. Debugging gains the matching symptom:
+traffic visible in API Management, including 401s, that never reaches SecurePath.
 
 ### Requests rejected by your own policies now get a response-phase record
 
@@ -105,13 +83,6 @@ section and the record for that request had no response status. All four fragmen
 `securepath-app-map`, `securepath-inbound`, `securepath-outbound`, `securepath-onerror` — are
 referenced together, the app-map one immediately before the inbound one; the install forms and the
 Bicep template do this for you.
-
-### Fragments at All APIs scope are the default install
-
-The connector installed at the All APIs scope runs before every API's own policy, so nothing has
-to be ordered by hand and no existing policy is edited. `deploy/securepath-apim.bicep` installs
-everything in one deployment. The whole-document form is now generated from the fragments
-(`rdwr-azureapim-securepath-connector-v1.4.xml`); the v1.3 documents are no longer shipped.
 
 ### `tools/securepath-apim-lint.py`
 
@@ -133,8 +104,75 @@ invalid custom Bot Manager status list.
   `Vary`, and the Bot Manager cookies; the response-phase log marks it `blocked`. A missing body is
   replaced by the connector's block page with that status. Standard verdicts are unaffected, a
   `5xx` is never relayed, an invalid list is ignored (and reported by the install check as `L13`),
-  and an application-map entry may override the list with `bot_block_statuses`. Matches the
-  NGINX connector's `rdwr_custom_bot_block_statuses`. README 3e.
+  and an application-map entry may override the list with `bot_block_statuses`. The setting has the
+  same meaning as `rdwr_custom_bot_block_statuses` in the Radware SecurePath connector for NGINX.
+  README 3e.
+
+### A configuration problem no longer fails requests
+
+An incomplete configuration, an unmatched request with no default application, or an invalid
+map used to be able to end a request with a 500. Such requests are now served without
+inspection and marked with `X-Rdwr-Diag` (`config_incomplete`, `no_app_mapping`,
+`app_map_invalid`) and a trace line, so the condition is visible without affecting traffic.
+
+### Two behaviours aligned with the other SecurePath connectors
+
+- A SecurePath response with a status the connector does not know (for example 401 or 418) is no
+  longer relayed to the client. The request is served without a verdict, marked with
+  `X-Rdwr-Diag: unexpected_status_<code>` and a trace line, which is what the other SecurePath
+  connectors do — unless the status is listed in `rdwr-custom-bot-block-statuses` (below).
+- The `uzmcr` header (the Bot Manager mobile flow) is honoured as an allow signal whether or not
+  Bot Manager is enabled, and relayed to the client — with the Bot Manager cookies — only when
+  `rdwr-bot-manager-enabled` is true, as the SecurePath specification requires.
+
+### Chunked requests are recognised in every spelling
+
+`Transfer-Encoding` is a list of codings and is case-insensitive, so `Chunked` and `gzip, chunked`
+mean the same as `chunked`. The connector now recognises all of them: the body of such a request
+is read only when its content type is listed in `chunked-request-allowed-content-types`, and
+`rdwr-body-max-size-bytes` applies, exactly as for a request sent as `chunked`. Previously only the
+exact value `chunked` was recognised and the other spellings were copied to the inspection call
+whole. The inspection call does not carry the client's `Transfer-Encoding` header: API Management
+frames the inspection call's body itself.
+
+### `x-rdwr-partial-body` only when the body was truncated
+
+The inspection call carries `x-rdwr-partial-body: true` only when the body sample was truncated
+to `rdwr-partial-body-size-bytes`. Previously an inspection call whose body was not truncated
+carried the header with an empty value.
+
+### A header no longer sent
+
+The inspection call no longer carries `x-rdwr-host`. SecurePath identifies the application by the
+`Host` header on the sideband call, which the connector sets to the resolved client-facing hostname
+described above; `x-rdwr-host` is not part of the SecurePath header set and was not read. There is
+nothing to configure, and no change to how requests are inspected or enforced.
+
+### Default static-extension list
+
+The default for `static-list-of-bypassed-extensions` (README 3b and the Bicep template) is now the
+same list as the other SecurePath connectors:
+`png,jpg,css,js,jpeg,gif,ico,ttf,svg,woff,woff2,svc,swf,otf,eot,webp,avif`. An existing Named
+Value keeps whatever you set; update it if you want the fuller list.
+
+### More said in the trace
+
+- **Bot Manager mobile flow.** When SecurePath answers with the `uzmcr` header, the request is
+  passed to the backend although the verdict was not an allow (this is the mobile SDK challenge).
+  The trace now carries an error line with SecurePath's status, its request-status header and the
+  `x-rdwr-oop-id`, so the one path that forwards a non-allow verdict is visible.
+- **`rdwr-custom-bot-block-statuses`.** A value that is neither `*` nor a list of status codes is
+  reported in the trace as ignored (an error line quoting the value), and the fail-open line for an
+  unlisted status repeats it, instead of a generic "not a verdict" line. `200`, `301`, `302` or
+  `403` in the list are reported as having no effect (an information line). Both are reported on
+  every request, since the policy has no memory between requests; the install check (`L13`)
+  reports them once.
+
+### Hostname header hygiene
+
+A candidate value for the client-facing hostname (`rdwr-true-host-header`, README 3d) that
+contains a control character is rejected like any other value that is not a hostname, and the
+next candidate or the fallback is used.
 
 ### Robustness and hygiene
 
@@ -177,6 +215,26 @@ invalid custom Bot Manager status list.
   most common field failure (the `.v1` front-end host in `rdwr-app-ep-addr`, which the backend
   entity for the `.oop` host cannot cover), and adds a line-by-line table for reading a raw trace.
   Both readouts were produced on a Standard v2 instance against a live SecurePath application.
+
+### Named Values and version
+
+Four new Named Values (24 in total): `rdwr-app-map`, `rdwr-true-host-header`, `rdwr-host-fallback` and
+`rdwr-custom-bot-block-statuses`. `x-rdwr-plugin-info` becomes `700-v1.4.0`.
+
+### Upgrading from v1.3.x
+
+1. Create the four new Named Values (README 3b) and set `plugin-version-info` to `700-v1.4.0`.
+   `static-list-of-bypassed-extensions` keeps whatever value it has; set it to the new default
+   (README 3b) if you want the fuller list.
+2. Register the four v1.4.0 fragments (README Step 4, Form 1, first block). Two are new
+   (`securepath-app-map`, `securepath-onerror`); the other two replace the v1.3.4 ones in place.
+3. If you installed v1.3.4 Form C (two fragments referenced from a policy), add the two missing
+   include lines — `securepath-app-map` immediately before `securepath-inbound`, and
+   `securepath-onerror` in `<on-error>` (README Form 2).
+4. If you installed v1.3.4 Form A or B (a policy document), replace it with the fragment install
+   (Form 1 or 2) or with `rdwr-azureapim-securepath-connector-v1.4.xml` (Form 3).
+5. Run `python3 tools/securepath-apim-lint.py --live` (README 5e) and trace one request
+   (README Debugging, Option A).
 
 ## v1.3.4 (2026-08-16)
 
@@ -334,7 +392,7 @@ Same XML policy file (`rdwr-azureapim-securepath-connector-v1.3.xml`). No new Na
 
 ### Features
 - **XML policy-based architecture.** No custom C# code; all SecurePath logic is implemented as Azure APIM XML policies.
-- **Complete inspection call header assembly.** All mandatory `x-rdwr-*` headers (`x-rdwr-app-id`, `x-rdwr-api-key`, `x-rdwr-connector-ip`, `x-rdwr-true-client-ip`, `x-rdwr-host`, `x-rdwr-connector-port`, `x-rdwr-connector-scheme`, `x-rdwr-plugin-info`, `x-rdwr-connector-proto`, `x-rdwr-connector-stage`).
+- **Complete inspection call header assembly.** The mandatory `x-rdwr-*` headers (`x-rdwr-app-id`, `x-rdwr-api-key`, `x-rdwr-connector-ip`, `x-rdwr-connector-port`, `x-rdwr-connector-scheme`, `x-rdwr-plugin-info`), together with `x-rdwr-connector-proto`, `x-rdwr-connector-stage` and `x-rdwr-partial-body`. The client `Host` is preserved on the sideband call rather than rewritten to the SecurePath endpoint: SecurePath identifies the application by that `Host`.
 - **Verdict enforcement.** Allow, block (HTML and JSON), 301/302 redirect, challenge, true-bypass.
 - **Bot Manager integration.** Bot Manager cookie and header propagation on all verdict paths.
 - **Response-phase logging (v2).** Fire-and-forget log POST via `send-one-way-request`, correlated by `x-rdwr-oop-id`. Captures origin response metadata; body sample includes a base64-encoded body sample.
@@ -383,7 +441,7 @@ Initial release. Basic inspection call and verdict enforcement.
 
 | Version    | Date       | Status      | Highlights                                                       |
 |------------|------------|-------------|------------------------------------------------------------------|
-| **v1.4.0** | 2026-09-07 | **Current** | Several applications on one instance, generated map and sync tool, on-error log, custom Bot Manager block responses, install check, trace tool |
+| **v1.4.0** | 2026-09-22 | **Current** | Several applications on one instance, client-facing hostname, generated map and sync tool, on-error log, custom Bot Manager block responses, install check, trace tool |
 | v1.3.4     | 2026-08-16 | Superseded  | Three install forms, pre-flight checks (documentation and packaging; policy unchanged) |
 | v1.3.3     | 2026-08-14 | Superseded  | Certificate files shipped in the package (documentation and packaging) |
 | v1.3.2     | 2026-05-03 | Superseded  | `x-rdwr-o2v-bytes-sent` reports total wire bytes (status line + headers + body) |

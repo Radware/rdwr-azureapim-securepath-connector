@@ -76,7 +76,7 @@ var namedValues = [
   { name: 'plugin-version-info', value: '700-v1.4.0', secret: false }
   { name: 'static-extensions-enabled', value: 'true', secret: false }
   { name: 'static-list-of-methods-not-to-inspect', value: 'GET,HEAD', secret: false }
-  { name: 'static-list-of-bypassed-extensions', value: 'png,jpg,css,js,gif,ico,svg,woff,woff2', secret: false }
+  { name: 'static-list-of-bypassed-extensions', value: 'png,jpg,css,js,jpeg,gif,ico,ttf,svg,woff,woff2,svc,swf,otf,eot,webp,avif', secret: false }
   { name: 'static-inspect-if-query-string-exists', value: 'true', secret: false }
   { name: 'chunked-request-allowed-content-types', value: 'application/json,application/x-www-form-urlencoded', secret: false }
   { name: 'rdwr-inline-trusted-sources', value: '##DISABLED##', secret: false }

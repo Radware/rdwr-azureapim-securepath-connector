@@ -80,7 +80,14 @@ def test_one_line_all_apis_policy_is_recognised():
     assert lint.lint_document(doc, "global", "global") == []
 
 def test_manual_merge_shape_yields_l04_and_l05():
-    f = lint.lint_document(fx("merged_jwt_first.xml"), "api", "merged")
+    doc = fx("merged_jwt_first.xml")
+    f = lint.lint_document(doc, "api", "merged")
     assert codes(f) == ["L04", "L05"]
     l04 = [x for x in f if x.code == "L04"][0]
-    assert l04.line == 4 and "validate-jwt" in l04.message
+    # The fixture is GENERATED (tools/tests/make_fixtures.py) from the shipped document,
+    # so its line numbers move whenever the document does. Assert the finding POINTS AT
+    # the <validate-jwt> element rather than at a hardcoded line number: a number that
+    # has to be edited on every regeneration is how the fixture drifted out of date in
+    # the first place.
+    assert "validate-jwt" in doc.splitlines()[l04.line - 1]
+    assert "validate-jwt" in l04.message

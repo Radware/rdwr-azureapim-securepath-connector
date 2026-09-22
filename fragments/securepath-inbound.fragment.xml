@@ -153,8 +153,11 @@
           if (v.StartsWith("[")) { int close = v.IndexOf(']'); if (close > 0) { v = v.Substring(0, close + 1); } }
           else { int colon = v.IndexOf(':'); if (colon > 0) { v = v.Substring(0, colon); } }
           v = v.Trim().TrimEnd('.').ToLower();
-          // a header is client-supplied: never forward something that is not a hostname
-          bool usable = v.Length > 0 && v.Length <= 253
+          // a header is client-supplied: never forward something that is not a hostname, and
+          // never let a control character (CR, LF, TAB, DEL, ...) reach a header or a trace line
+          bool ctl = false;
+          for (int ci = 0; ci < v.Length; ci++) { if (v[ci] < (char)0x20 || v[ci] == (char)0x7f) { ctl = true; break; } }
+          bool usable = !ctl && v.Length > 0 && v.Length <= 253
                         && v.IndexOf(' ') < 0 && v.IndexOf('/') < 0 && v.IndexOf('\\') < 0
                         && v.IndexOf('?') < 0 && v.IndexOf('@') < 0 && v.IndexOf(',') < 0;
           if (usable) { chosen = v; source = name.ToLower(); break; }
@@ -254,6 +257,36 @@
         <set-variable name="rdwrBotManagerEnabled" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); return e["bot_manager"] != null ? (bool)e["bot_manager"] : (bool)context.Variables["rdwrBotManagerEnabled"]; }" />
         <set-variable name="rdwrCustomBotBlockStatuses" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); string v = (string)e["bot_block_statuses"]; return string.IsNullOrEmpty(v) ? (string)context.Variables["rdwrCustomBotBlockStatuses"] : v.Trim(); }" />
         <set-variable name="rdwrApiBasePath" value="@{ JObject e = JObject.Parse((string)context.Variables["rdwrAppSelection"]); string bp = (string)e["base_path"]; return string.IsNullOrEmpty(bp) ? (string)context.Variables["rdwrApiBasePath"] : bp.TrimEnd('/'); }" />
+      </when>
+    </choose>
+    <!-- rdwr-custom-bot-block-statuses (or the map entry's bot_block_statuses) is checked once per
+         request, now that the application is known. A value that is neither "*" nor a list of
+         status codes is ignored for the request and reported; 200/301/302/403 in the list are
+         reported as having no effect (standard verdicts are handled before the list is consulted). -->
+    <set-variable name="rdwrCustomBotBlockStatusesProblem" value="@{
+      string raw = ((string)context.Variables.GetValueOrDefault("rdwrCustomBotBlockStatuses", "") ?? "").Trim();
+      string lc = raw.ToLower();
+      if (raw == "" || lc == "-" || lc == "disabled" || lc == "off" || lc == "false" || lc == "none" || lc == "~" || lc == "##disabled##" || raw == "*") { return ""; }
+      var noEffect = new System.Collections.Generic.List<string>();
+      foreach (var part in raw.Split(',')) {
+        string p = part.Trim();
+        if (p == "") { continue; }
+        int code;
+        if (!int.TryParse(p, out code)) { return "invalid"; }
+        if (code == 200 || code == 301 || code == 302 || code == 403) { noEffect.Add(p); }
+      }
+      return noEffect.Count > 0 ? "no_effect:" + string.Join(",", noEffect) : "";
+    }" />
+    <choose>
+      <when condition="@(((string)context.Variables["rdwrCustomBotBlockStatusesProblem"]) == "invalid")">
+        <trace source="securepath" severity="error">
+          <message>@("rdwr-custom-bot-block-statuses value '" + ((string)context.Variables.GetValueOrDefault("rdwrCustomBotBlockStatuses", "") ?? "").Trim() + "' is neither \"*\" nor a comma-separated list of status codes; ignored for this request (README 3e)")</message>
+        </trace>
+      </when>
+      <when condition="@(((string)context.Variables["rdwrCustomBotBlockStatusesProblem"]).StartsWith("no_effect:"))">
+        <trace source="securepath" severity="information">
+          <message>@("rdwr-custom-bot-block-statuses lists " + ((string)context.Variables["rdwrCustomBotBlockStatusesProblem"]).Substring(10) + ", which has no effect there: standard verdicts are handled before this list is consulted (README 3e)")</message>
+        </trace>
       </when>
     </choose>
     <set-variable name="rdwrConfigProblem" value="@{
@@ -572,7 +605,20 @@
         <set-variable name="setPartialBodyHeader" value="@(false)" />
         <set-variable name="multipartHeadersOnly" value="@(false)" />
         <set-variable name="origContentLengthStr" value="@(context.Request.Headers.GetValueOrDefault("Content-Length", default(string[]))?.FirstOrDefault())" />
-        <set-variable name="origTransferEncoding" value="@(context.Request.Headers.GetValueOrDefault("Transfer-Encoding", default(string[]))?.FirstOrDefault()?.ToLower() ?? "")" />
+        <!-- Transfer-Encoding is a comma-separated list of codings, case-insensitive, and the header
+             may arrive more than once; "chunked" counts in any position ("gzip, chunked", "Chunked"). -->
+        <set-variable name="origTransferEncoding" value="@{
+          string[] vals = context.Request.Headers.GetValueOrDefault("Transfer-Encoding", default(string[]));
+          return vals == null ? "" : string.Join(",", vals).ToLower();
+        }" />
+        <set-variable name="origTransferChunked" value="@{
+          bool chunked = false;
+          foreach (var raw in ((string)context.Variables.GetValueOrDefault("origTransferEncoding", "")).Split(','))
+          {
+            if ((raw ?? "").Trim() == "chunked") { chunked = true; break; }
+          }
+          return chunked;
+        }" />
         <set-variable name="origContentType" value="@(context.Request.Headers.GetValueOrDefault("Content-Type", default(string[]))?.FirstOrDefault() ?? "")" />
         <set-variable name="origContentEncoding" value="@(context.Request.Headers.GetValueOrDefault("Content-Encoding", default(string[]))?.FirstOrDefault()?.ToLower() ?? "")" />
         <set-variable name="readBodyFlag" value="@(false)" />
@@ -606,7 +652,7 @@
                 <set-variable name="radwareReqBodyBytes" value="@(new byte[0])" />
                 <set-variable name="radwareReqBodyLengthBytes" value="@(0L)" />
               </when>
-              <when condition="@(((string)context.Variables.GetValueOrDefault("origTransferEncoding", "")).ToLower() == "chunked")">
+              <when condition="@((bool)context.Variables.GetValueOrDefault("origTransferChunked", false))">
                 <!-- Unknown size multipart with chunked TE: avoid buffering entire body -->
                 <set-variable name="radwareOverrideBody" value="@(true)" />
                 <set-variable name="multipartHeadersOnly" value="@(true)" />
@@ -629,7 +675,7 @@
               </when>
             </choose>
           </when>
-          <when condition="@(((string)context.Variables["origTransferEncoding"]) == "chunked")">
+          <when condition="@((bool)context.Variables.GetValueOrDefault("origTransferChunked", false))">
             <set-variable name="contentTypeShort" value="@{
               string ct = (string)context.Variables["origContentType"];
               string result = ""; 
@@ -759,10 +805,10 @@
               <set-header name="Host" exists-action="override">
                 <value>@((string)context.Variables["rdwrTrueHost"])</value>
               </set-header>
-              <set-header name="X-Rdwr-Host" exists-action="override">
-                <value>@((string)context.Variables["rdwrTrueHost"])</value>
-              </set-header>
               <set-header name="Expect" exists-action="delete" />
+              <!-- Transfer-Encoding is not set or deleted here: API Management restricts that header
+                   from policy modification (a set-header on it is rejected at save) and frames the
+                   inspection call's body itself. -->
               <set-header name="X-Rdwr-App-Id" exists-action="override">
                 <value>@((string)context.Variables["rdwrAppId"])</value>
               </set-header>
@@ -781,12 +827,15 @@
               <set-header name="X-Rdwr-Plugin-Info" exists-action="override">
                 <value>@((string)context.Variables["pluginInfo"])</value>
               </set-header>
-              <set-header name="X-Rdwr-Partial-Body" exists-action="override">
-                <value>@{
-                  var isPartial = (bool)context.Variables.GetValueOrDefault("setPartialBodyHeader", false);
-                  return isPartial ? "true" : null;
-                }</value>
-              </set-header>
+              <!-- Sent only when the body was truncated: a null value inside send-request still
+                   emits an empty header, so the set-header itself is conditional -->
+              <choose>
+                <when condition="@((bool)context.Variables.GetValueOrDefault("setPartialBodyHeader", false))">
+                  <set-header name="X-Rdwr-Partial-Body" exists-action="override">
+                    <value>true</value>
+                  </set-header>
+                </when>
+              </choose>
               <set-header name="X-Rdwr-Connector-Proto" exists-action="override">
                 <value>2</value>
               </set-header>
@@ -802,10 +851,10 @@
               <set-header name="Host" exists-action="override">
                 <value>@((string)context.Variables["rdwrTrueHost"])</value>
               </set-header>
-              <set-header name="X-Rdwr-Host" exists-action="override">
-                <value>@((string)context.Variables["rdwrTrueHost"])</value>
-              </set-header>
               <set-header name="Expect" exists-action="delete" />
+              <!-- Transfer-Encoding is not set or deleted here: API Management restricts that header
+                   from policy modification (a set-header on it is rejected at save) and frames the
+                   inspection call's body itself. -->
               <set-header name="X-Rdwr-App-Id" exists-action="override">
                 <value>@((string)context.Variables["rdwrAppId"])</value>
               </set-header>
@@ -824,12 +873,15 @@
               <set-header name="X-Rdwr-Plugin-Info" exists-action="override">
                 <value>@((string)context.Variables["pluginInfo"])</value>
               </set-header>
-              <set-header name="X-Rdwr-Partial-Body" exists-action="override">
-                <value>@{
-                  var isPartial = (bool)context.Variables.GetValueOrDefault("setPartialBodyHeader", false);
-                  return isPartial ? "true" : null;
-                }</value>
-              </set-header>
+              <!-- Sent only when the body was truncated: a null value inside send-request still
+                   emits an empty header, so the set-header itself is conditional -->
+              <choose>
+                <when condition="@((bool)context.Variables.GetValueOrDefault("setPartialBodyHeader", false))">
+                  <set-header name="X-Rdwr-Partial-Body" exists-action="override">
+                    <value>true</value>
+                  </set-header>
+                </when>
+              </choose>
               <set-header name="X-Rdwr-Connector-Proto" exists-action="override">
                 <value>2</value>
               </set-header>
@@ -1170,9 +1222,14 @@
                   </when>
                   <!-- Allowed explicitly -->
                   <when condition="@((string)context.Variables["oopRequestStatusHeader"] == "allowed")" />
-                  <!-- Bot Manager mobile exception: allow if uzmcr header present -->
+                  <!-- Bot Manager mobile exception: allow if uzmcr header present. This is the one
+                       path where a verdict other than allow is passed to the origin (the mobile SDK
+                       challenge travels in the uzmcr header), so it is traced. -->
                   <when condition="@((bool)context.Variables.GetValueOrDefault("uzmcrHeaderPresent", false))">
                     <set-variable name="radwareDiag" value="@("uzmcr_allow")" />
+                    <trace source="securepath" severity="error">
+                      <message>@("Bot Manager mobile flow: SecurePath answered " + ((int)context.Variables["rwStatus"]).ToString() + " with request-status '" + (string)context.Variables.GetValueOrDefault("oopRequestStatusHeader", "") + "'; passed to the origin because the uzmcr header is present; oop-id " + ((((string)context.Variables.GetValueOrDefault("rdwrOopId", "")) == "") ? "-" : (string)context.Variables.GetValueOrDefault("rdwrOopId", "")))</message>
+                    </trace>
                   </when>
                   <!-- implicit block -->
                   <otherwise>
@@ -1378,11 +1435,9 @@
                           <set-header name="x-rdwr-o2h-rdwr-response" exists-action="override">
                             <!-- A redirect is SecurePath's own challenge (Bot Manager CAPTCHA)
                                  relayed to the client: this field reports what the CONNECTOR
-                                 decided, and it did not block. Matches the reference connector,
-                                 whose redirect branches leave the disposition at "allowed".
-                                 Every R&D reference release (v1.1.0 and v1.1.1 alike) reports
-                                 "allowed" here; only the connector serving a denial itself is
-                                 "blocked". See GOTCHAS 2026-09-07. -->
+                                 decided, and it did not block. A redirect leaves this field at
+                                 "allowed", as in the other SecurePath connectors; only a
+                                 connector serving a denial itself reports "blocked". -->
                             <value>allowed</value>
                           </set-header>
                           <set-body />
@@ -1590,8 +1645,8 @@
               <!-- Any other status (401, 418, 429, ...): not a verdict the connector knows.
                    With Bot Manager enabled and the status listed in rdwr-custom-bot-block-statuses
                    (or "*"), it is a custom Bot Manager block response: relayed to the client as it
-                   came, logged as blocked (README 3e). Otherwise, like the reference connector, the
-                   request goes to the origin (fail open) and the connector says so; the response
+                   came, logged as blocked (README 3e). Otherwise, as in the other SecurePath connectors,
+                   the request goes to the origin (fail open) and the connector says so; the response
                    phase is then logged by the outbound fragment as usual. A 5xx never reaches this
                    branch as a block. -->
               <otherwise>
@@ -1804,7 +1859,7 @@
                   <otherwise>
                     <set-variable name="radwareDiag" value="@($"unexpected_status_{(int)context.Variables["rwStatus"]}")" />
                     <trace source="securepath" severity="error">
-                      <message>@("SecurePath answered " + ((int)context.Variables["rwStatus"]).ToString() + ", which is not a verdict; request served without a verdict (fail open)")</message>
+                      <message>@("SecurePath answered " + ((int)context.Variables["rwStatus"]).ToString() + ", which is not a verdict; request served without a verdict (fail open)" + (((bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false) && ((string)context.Variables.GetValueOrDefault("rdwrCustomBotBlockStatusesProblem", "")) == "invalid") ? "; rdwr-custom-bot-block-statuses is set but is not a status-code list, so it was ignored" : ""))</message>
                     </trace>
                   </otherwise>
                 </choose>
