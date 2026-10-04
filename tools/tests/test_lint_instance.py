@@ -99,6 +99,28 @@ def test_l08_app_id_with_dot_and_wrong_endpoint():
     assert codes(lint.lint_instance(r)) == ["L08", "L08"]
 
 
+def test_l08_endpoint_with_scheme_port_or_path():
+    """A scheme, port or path in rdwr-app-ep-addr ends in .oop.radwarecloud.net just the same, so the
+    old check passed it; the connector serves every request uninspected with it (config_incomplete)."""
+    for bad in ("https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net",
+                "afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net:443",
+                "afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net/"):
+        nvs = dict(NV_OK)
+        nvs["rdwr-app-ep-addr"] = bad
+        f = lint.lint_instance(FakeReader(glob=fx("clean_global.xml"), nvs=nvs))
+        assert "L08" in codes(f) and any("not a bare host name" in x.message for x in f), (bad, codes(f))
+
+
+def test_l10_map_entry_port_out_of_range_and_endpoint_with_scheme():
+    nvs = dict(NV_OK)
+    nvs["rdwr-app-map"] = ("{'orders': {'app_id': 'a', 'api_key': 'k', 'endpoint': 'afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net', 'port': 70000},"
+                           " 'shop': {'app_id': 'a', 'api_key': 'k', 'endpoint': 'https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net'}}")
+    f = lint.lint_instance(FakeReader(glob=fx("clean_global.xml"), nvs=nvs))
+    msgs = [x.message for x in f if x.code == "L10"]
+    assert any("'orders' port is 70000" in m for m in msgs), msgs
+    assert any("'shop' endpoint" in m and "not a bare host name" in m for m in msgs), msgs
+
+
 def test_l09_v2_tier_without_backend_for_endpoint():
     r = FakeReader(sku="StandardV2", glob=fx("clean_global.xml"), backends=["https://other.oop.radwarecloud.net"])
     assert codes(lint.lint_instance(r)) == ["L09"]

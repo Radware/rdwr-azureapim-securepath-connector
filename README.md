@@ -1,7 +1,9 @@
 # Radware SecurePath Connector for Azure API Management
 
-**Connector v1.4.0** (`x-rdwr-plugin-info` 700-v1.4.0), released 2026-09-22. Changes since v1.3.4
-are in `release-notes.md`; existing installs, see "Upgrading from v1.3.x" there.
+**Connector v1.5.0** (`x-rdwr-plugin-info` 700-v1.5.0), released 2026-10-04. Changes since v1.4.0
+are in `release-notes.md`; existing installs, see "Upgrading from v1.4.0" (or "Upgrading from v1.3.x")
+there. **A v1.4.0 install must be upgraded**: API Management no longer accepts part of the v1.4.0
+policy, and the upgrade has an order to follow.
 
 This guide takes you from an existing API Management instance to SecurePath inspecting your API
 traffic.
@@ -97,9 +99,11 @@ The built-in role that covers all of them is **API Management Service Contributo
 fragments (the application map, inbound, outbound and on-error). Referenced from the All APIs scope, they run before every API's own policy: API
 Management evaluates the All APIs policy first and hands over to the API's policy at its
 `<base />` element. So the connector sees every request, including the ones your own
-`validate-jwt`, `ip-filter` or `rate-limit` policies go on to reject. Nothing in your existing
-policies is edited. `deploy/` installs this form in one command; Step 4 shows the CLI and
-Portal equivalents.
+`validate-jwt`, `ip-filter` or `rate-limit` policies go on to reject, and the ones API Management
+answers itself before any policy (no matching operation, missing subscription key). Nothing in your existing
+policies is edited. `deploy/` provisions the Named Values, backend entity and All APIs policy in one command once
+the fragments are registered (it cannot embed the inbound fragment — too large for a Bicep template);
+Step 4 shows the CLI and Portal equivalents.
 
 Two things follow from that, and both are checked for you by `tools/securepath-apim-lint.py`:
 
@@ -124,7 +128,7 @@ XML. If you would rather not install `jq`, the Azure Portal paths need no local 
 | File | What it is |
 |---|---|
 | `fragments/securepath-app-map.fragment.xml`, `-inbound`, `-outbound`, `-onerror` | the connector, as four policy fragments (Forms 1 and 2) |
-| `rdwr-azureapim-securepath-connector-v1.4.xml` | the same connector as one policy document, generated from the fragments (Form 3) |
+| `rdwr-azureapim-securepath-connector-v1.5.xml` | the same connector as one policy document, generated from the fragments (Form 3) |
 | `deploy/securepath-apim.bicep`, `deploy/README.md` | one-command install of Form 1 |
 | `tools/securepath-apim-lint.py`, `securepath-apim-sync.py`, `securepath-apim-trace.sh`, `tools/README.md` | the install check, the application sync, the trace tool |
 | `certs/rdwr-root-ca.pem`, `certs/rdwr-intermediate-ca.pem`, `certs/rdwr-ca-chain.pem`, `certs/README.md` | the Radware certificate authority, for Step 1 Path A |
@@ -147,8 +151,11 @@ az apim api list -g "$RG" --service-name "$APIM" --query "[].{name:name,path:pat
 
 The first table gives your tier. The second lists your APIs — the `name` column is your `API_ID`.
 
-- Tier is **Developer, Basic, Standard or Premium** → Step 1, **Path A**
-- Tier is **Standard v2 or Premium v2** → Step 1, **Path B**
+- Tier is **Developer, Basic, Standard or Premium** → Step 1, **Path A**. The gateway validates the
+  inspection endpoint's certificate against the Radware certificate authority you install.
+- Tier is **Standard v2 or Premium v2** → Step 1, **Path B**. These tiers cannot install a
+  certificate authority, so the gateway does **not** validate the inspection endpoint's certificate
+  (the connection is still encrypted); Path B explains what that means.
 - Tier is **Consumption** → not currently supported; contact Radware
 
 ---
@@ -164,8 +171,8 @@ trust by default.
 
 ## Path A — Developer, Basic, Standard, Premium
 
-These tiers have a service-level CA certificate store. Azure CLI cannot upload to it, so use the
-Portal (below), or PowerShell or ARM/Bicep (`certs/README.md`).
+These tiers have a service-level CA certificate store. `az apim` has no command for it: use the
+Portal (below), or the `az rest` request in `certs/README.md`.
 
 1. Rename `certs/rdwr-root-ca.pem` to `rdwr-root-ca.cer`, and `certs/rdwr-intermediate-ca.pem` to
    `rdwr-intermediate-ca.cer`. PEM and CER are the same Base64 X.509 format — the upload dialog
@@ -246,6 +253,10 @@ az rest --method GET \
 > only to the URL named in the backend entity; no other traffic through your gateway is affected.
 > If full certificate validation is a requirement, use a Developer, Basic, Standard or Premium
 > tier instance, where Path A validates the chain.
+>
+> **Do not create this backend entity on a Developer, Basic, Standard or Premium tier.** It turns
+> validation off for that URL on those tiers as well: with it, the inspection call succeeds without
+> the Radware certificate authority installed, which is exactly the check Path A provides.
 
 ---
 ---
@@ -258,34 +269,37 @@ silently disable protection. Run both before creating anything.
 ## 2a — Named Value collisions
 
 Named Values share one namespace across the whole instance, and **`az apim nv create` overwrites an
-existing name without warning or error**. Six of the 22 names the connector uses carry no
+existing name without warning or error**. Six of the 24 names the connector uses carry no
 `rdwr-` prefix and are generic enough to already exist:
 
 `plugin-version-info`, `static-extensions-enabled`, `static-list-of-methods-not-to-inspect`,
 `static-list-of-bypassed-extensions`, `static-inspect-if-query-string-exists`,
 `chunked-request-allowed-content-types`
 
-This lists any that already exist, with their current values, **before** anything is written:
+This lists any that already exist, with their current values, **before** anything is written. It
+runs the same in bash and zsh (the default shell on macOS), and in Azure Cloud Shell:
 
 ```bash
 RG="your-resource-group"
 APIM="your-apim-instance"
 
-RDWR_NAMES="rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled rdwr-app-map rdwr-true-host-header rdwr-custom-bot-block-statuses rdwr-host-fallback"
 EXISTING=$(az apim nv list -g "$RG" --service-name "$APIM" --query "[].name" -o tsv)
+CHECKED=0
 FOUND=0
-for n in $RDWR_NAMES; do
+for n in rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled rdwr-app-map rdwr-true-host-header rdwr-custom-bot-block-statuses rdwr-host-fallback; do
+  CHECKED=$((CHECKED+1))
   if echo "$EXISTING" | grep -qx "$n"; then
     V=$(az apim nv show -g "$RG" --service-name "$APIM" --named-value-id "$n" --query value -o tsv 2>/dev/null)
     echo "COLLISION: $n currently holds: ${V:-secret}"
     FOUND=$((FOUND+1))
   fi
 done
-echo "collisions: $FOUND"
+echo "names checked: $CHECKED, collisions: $FOUND"
 ```
 
-`collisions: 0` means Step 3 is safe to run. Anything else belongs to another workload or to a
-previous install — decide what that value is for before you overwrite it.
+`names checked: 24, collisions: 0` means Step 3 is safe to run. Any other number of names checked
+means the block did not run as written. A collision belongs to another workload or to a previous
+install — decide what that value is for before you overwrite it.
 
 ## 2b — Policies missing `<base />`
 
@@ -371,12 +385,12 @@ RDWR_NV=(
   "rdwr-true-client-ip-header=##DISABLED##"
   "rdwr-api-base-path=/"
   "rdwr-bot-manager-enabled=false"
-  "plugin-version-info=700-v1.4.0"
+  "plugin-version-info=700-v1.5.0"
   "static-extensions-enabled=true"
   "static-list-of-methods-not-to-inspect=GET,HEAD"
   "static-list-of-bypassed-extensions=png,jpg,css,js,jpeg,gif,ico,ttf,svg,woff,woff2,svc,swf,otf,eot,webp,avif"
   "static-inspect-if-query-string-exists=true"
-  "chunked-request-allowed-content-types=application/json,application/x-www-form-urlencoded"
+  "chunked-request-allowed-content-types=application/json,application/x-www-form-urlencoded,text/plain,application/soap+xml,text/xml,application/xml,xml/text"
   "rdwr-inline-trusted-sources=##DISABLED##"
   "rdwr-inline-headers-enabled=false"
   "rdwr-app-map=##DISABLED##"
@@ -396,6 +410,16 @@ unset RDWR_NV
 
 Set each to the value shown unless you have a specific reason to change it. These are values the
 policy uses literally, not fallbacks applied if you skip them.
+
+**Request bodies.** A body with a declared length up to `rdwr-body-max-size-bytes` is sent for
+inspection — whole up to `rdwr-partial-body-size-bytes`, otherwise its first
+`rdwr-partial-body-size-bytes` with `x-rdwr-partial-body: true`; a larger one is inspected
+headers-only. A multipart body above `rdwr-multipart-max-size-bytes` is inspected headers-only. A
+**chunked** body (no declared length) is read only when its content type is listed in
+`chunked-request-allowed-content-types`; the default lists the common API body types (JSON, form,
+plain text, XML, SOAP). `multipart/form-data` is not in the default on purpose: API Management can
+only read a body whole, so reading a chunked upload of unknown size holds all of it in the gateway.
+Add it if your chunked uploads are small and you want their contents inspected.
 
 Set `rdwr-bot-manager-enabled` to `true` if Bot Manager is enabled on your SecurePath application.
 If Bot Manager answers bots with a custom status (a `429` with a "slow down" page, say), list that
@@ -430,9 +454,8 @@ Re-running this block over an earlier attempt simply overwrites each value; no e
 RG="your-resource-group"
 APIM="your-apim-instance"
 
-EXPECTED="rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled rdwr-app-map rdwr-true-host-header rdwr-custom-bot-block-statuses rdwr-host-fallback"
 HAVE=$(az apim nv list -g "$RG" --service-name "$APIM" --query "[].name" -o tsv)
-for n in $EXPECTED; do
+for n in rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled rdwr-app-map rdwr-true-host-header rdwr-custom-bot-block-statuses rdwr-host-fallback; do
   echo "$HAVE" | grep -qx "$n" || echo "MISSING: $n"
 done
 ID=$(az apim nv show -g "$RG" --service-name "$APIM" --named-value-id rdwr-app-id --query value -o tsv)
@@ -442,6 +465,7 @@ case "$ID" in
   *)   echo "OK: rdwr-app-id looks like an Application ID" ;;
 esac
 case "$EP" in
+  *://*|*/*|*:*) echo "WRONG: rdwr-app-ep-addr must be the host name alone, without https://, a port or a path" ;;
   *.oop.radwarecloud.net) echo "OK: rdwr-app-ep-addr looks like an inspection endpoint" ;;
   *) echo "WRONG: rdwr-app-ep-addr should end in .oop.radwarecloud.net" ;;
 esac
@@ -450,7 +474,7 @@ esac
 Only `OK:` lines means you are ready for Step 4. Any `MISSING:` line will cause the policy upload to
 be rejected.
 
-> **Your other Named Values are none of our business.** This check looks only for the 22 names above
+> **Your other Named Values are none of our business.** This check looks only for the 24 names above
 > and ignores everything else on your instance. If you see unrelated Named Values in the portal,
 > leave them alone — the connector neither reads nor modifies them.
 
@@ -470,7 +494,7 @@ STRAY="0"
 az apim nv show -g "$RG" --service-name "$APIM" --named-value-id "$STRAY"
 ```
 
-Only if the value it prints is clearly paste debris, and the name is not one of the 22 above,
+Only if the value it prints is clearly paste debris, and the name is not one of the 24 above,
 remove it:
 
 ```bash
@@ -790,7 +814,7 @@ APIM="your-apim-instance"
 
 SUB=$(az account show --query id -o tsv)
 BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
-printf '{"properties":{"format":"rawxml","value":"<policies><inbound><include-fragment fragment-id=\\"securepath-app-map\\" /><include-fragment fragment-id=\\"securepath-inbound\\" /></inbound><backend><forward-request /></backend><outbound><include-fragment fragment-id=\\"securepath-outbound\\" /></outbound><on-error><include-fragment fragment-id=\\"securepath-onerror\\" /></on-error></policies>"}}' > rdwr-global-policy.json &&
+printf '{"properties":{"format":"rawxml","value":"<policies><inbound><include-fragment fragment-id=\\"securepath-app-map\\" /><include-fragment fragment-id=\\"securepath-inbound\\" /></inbound><backend><forward-request /></backend><outbound><include-fragment fragment-id=\\"securepath-outbound\\" /></outbound><on-error><include-fragment fragment-id=\\"securepath-onerror\\" /><choose><when condition=\\"@((bool)context.Variables.GetValueOrDefault(\\"rdwrUnrouted\\", false))\\"><include-fragment fragment-id=\\"securepath-app-map\\" /><include-fragment fragment-id=\\"securepath-inbound\\" /><include-fragment fragment-id=\\"securepath-outbound\\" /></when></choose></on-error></policies>"}}' > rdwr-global-policy.json &&
 az rest --method PUT --uri "$BASE/policies/policy?api-version=2024-05-01" \
         --headers "Content-Type=application/json" --body @rdwr-global-policy.json -o none > /dev/null &&
 echo "installed at All APIs scope"
@@ -822,13 +846,22 @@ code editor and replace the document with:
   </outbound>
   <on-error>
     <include-fragment fragment-id="securepath-onerror" />
+    <choose>
+      <when condition="@((bool)context.Variables.GetValueOrDefault("rdwrUnrouted", false))">
+        <include-fragment fragment-id="securepath-app-map" />
+        <include-fragment fragment-id="securepath-inbound" />
+        <include-fragment fragment-id="securepath-outbound" />
+      </when>
+    </choose>
   </on-error>
 </policies>
 ```
 
 There is no `<base />` at this scope: the All APIs policy has no parent to inherit from. If the
-instance already has an All APIs policy of its own, keep its content and add the four include
-lines to it instead (the app-map and inbound lines first in `<inbound>`), as in Form 2.
+instance already has an All APIs policy of its own, keep its content and add the connector's lines
+to it instead (the app-map and inbound lines first in `<inbound>`, the on-error lines first in
+`<on-error>`), as in Form 2. The `<on-error>` block is what inspects the requests API Management
+answers itself; see [Requests API Management answers itself](#requests-api-management-answers-itself).
 
 ### What happens to APIs that already have policies
 
@@ -878,10 +911,48 @@ section. Anything after it is fine, and that is where your policies normally alr
 > as `401`, and never appear in the Radware Cloud portal at all. Nothing errors — the gap is
 > silent. The install check reports this as `L04`.
 
+### Requests API Management answers itself
+
+API Management answers some requests before any policy runs: a method or path that matches no
+operation (`404 Resource not found`, including a path that matches no API at all), and a missing
+or invalid subscription key (`401`). None of them reaches your backend. API Management still runs
+the `<on-error>` section for them, and the connector's `<on-error>` block uses it:
+
+- the request is inspected and appears in the Radware Cloud portal like any other;
+- when SecurePath blocks it, the client receives the block response instead of the 404 or 401;
+- when SecurePath allows it, the client receives API Management's own response, unchanged;
+- the response-phase log records the status API Management returned.
+
+Where it applies:
+
+- **All APIs scope (Form 1):** every request the gateway receives, including paths that match no
+  API.
+- **An API or product policy (Form 2):** that API's own requests — a wrong method or an unknown
+  path under it, or a missing key for it. A path that matches no API reaches the All APIs scope
+  only.
+- **The Form 3 document:** not included. It carries the connector inline and cannot reference the
+  fragments from `<on-error>`; use Form 1 or Form 2 to inspect these requests.
+
+Things to know:
+
+- Every API and product policy keeps `<base />` in `<on-error>` as well. A policy without it skips
+  the All APIs `<on-error>` block for its rejected requests; the install check reports it as `L03`.
+- These requests wait for the inspection call like any other, within
+  `rdwr-app-ep-timeout-seconds`. If SecurePath cannot be reached, API Management's response is
+  returned and the trace says the request was not inspected.
+- A health probe that targets a path with no operation (for example a load balancer's `HEAD /`)
+  is inspected too. Point the probe at an operation if you do not want probes sent to SecurePath.
+
 Updating the connector later means replacing the fragments; every scope that references them
 picks up the change. `securepath-app-map` is the one fragment the sync tool rewrites (Step 3d);
 a connector update leaves it as it is. A fragment cannot be deleted while a policy still references it; API
 Management refuses and names the referencing policy.
+
+API Management validates every policy that uses a fragment whenever the fragment changes, together
+with the other fragments that policy uses. When the fragments on the instance no longer pass its
+validation (the v1.4.0 fragments since October 2026), a replacement is refused with *"is valid but
+breaks a policy it's used in"*: remove the connector's lines from that policy first, replace the
+fragments, then put the lines back. `release-notes.md`, "Upgrading from v1.4.0", gives the order.
 
 ---
 
@@ -889,8 +960,10 @@ Management refuses and names the referencing policy.
 
 Register the fragments with the **first** block of Form 1 (or the Portal steps) — not the second,
 which would install the connector at All APIs scope. Then open the policy for the API or product
-and add the four `include-fragment` lines **immediately after `<base />`, before any policy of
-your own**:
+and add the connector's lines **immediately after `<base />`, before any policy of your own** —
+two in `<inbound>`, one in `<outbound>`, and the `<on-error>` block, which inspects the requests
+API Management answers itself for this API (see
+[Requests API Management answers itself](#requests-api-management-answers-itself)):
 
 ```xml
 <policies>
@@ -911,6 +984,13 @@ your own**:
   <on-error>
     <base />
     <include-fragment fragment-id="securepath-onerror" />
+    <choose>
+      <when condition="@((bool)context.Variables.GetValueOrDefault("rdwrUnrouted", false))">
+        <include-fragment fragment-id="securepath-app-map" />
+        <include-fragment fragment-id="securepath-inbound" />
+        <include-fragment fragment-id="securepath-outbound" />
+      </when>
+    </choose>
     <!-- your existing on-error policies -->
   </on-error>
 </policies>
@@ -970,7 +1050,7 @@ has no policy of its own. If the API already has a policy, use Form 2 instead.
    editor shows the whole document, not only the inbound section.
 4. If the editor already contains policies of your own, **stop and use Form 2 instead** — continuing
    will discard them. Otherwise replace the contents with
-   `rdwr-azureapim-securepath-connector-v1.4.xml`.
+   `rdwr-azureapim-securepath-connector-v1.5.xml`.
 5. **Save.**
 
 If the save is rejected, the error names the missing Named Value or the offending line. Go back to
@@ -992,7 +1072,7 @@ SUB=$(az account show --query id -o tsv)
 URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/$API_ID/policies/policy?api-version=2024-05-01"
 
 jq -Rs '{properties: {format: "rawxml", value: .}}' \
-   rdwr-azureapim-securepath-connector-v1.4.xml > rdwr-policy-body.json &&
+   rdwr-azureapim-securepath-connector-v1.5.xml > rdwr-policy-body.json &&
 az rest --method PUT --uri "$URI" \
         --headers "Content-Type=application/json" \
         --body @rdwr-policy-body.json
@@ -1004,7 +1084,7 @@ bash form above was):
 ```powershell
 $ctx = New-AzApiManagementContext -ResourceGroupName "your-resource-group" -ServiceName "your-apim-instance"
 Set-AzApiManagementPolicy -Context $ctx -ApiId "your-api-resource-name" `
-    -PolicyFilePath ".\rdwr-azureapim-securepath-connector-v1.4.xml" `
+    -PolicyFilePath ".\rdwr-azureapim-securepath-connector-v1.5.xml" `
     -Format "application/vnd.ms-azure-apim.policy.raw+xml"
 ```
 
@@ -1092,13 +1172,14 @@ curl -s -o /dev/null -D - "https://$APIM.azure-api.net/your/real/operation/path"
 |---|---|---|
 | *(header absent)* | yes | Inspection completed with an allow verdict. Blocks and redirects never reach the backend; they are visible in the trace. |
 | `uzmcr_allow` | yes | Allowed by the Bot Manager mobile exception (SecurePath sent `uzmcr`). The trace carries an error line with SecurePath's status, its request-status header and the `x-rdwr-oop-id`, because this is the one path where a verdict other than allow is passed to the backend. |
-| `multipart_headers_only` | yes | A multipart body above `rdwr-multipart-max-size-bytes` was inspected headers-only. |
+| `multipart_headers_only` | yes | A multipart body above `rdwr-multipart-max-size-bytes`, or a chunked multipart body while `multipart/form-data` is not in `chunked-request-allowed-content-types`, was inspected headers-only. |
 | `sideband_error_or_timeout` | **no** | The inspection call failed or timed out — Issue 1, Issue 9. |
 | `sideband_error_failopen_<status>` | **no** | SecurePath answered a 5xx (for example `sideband_error_failopen_503`). |
 | `wrong_api_key_redirect` | **no** | The Application ID / API key pair was not recognised — Issue 3. |
 | `unexpected_status_<status>` | **no** | SecurePath answered a status outside the verdicts (for example `unexpected_status_429`) — 3e. |
+| `unusable_redirect_<status>` | **no** | SecurePath answered `301` or `302` without a usable `Location` header; there was nowhere to redirect the client. |
 | `no_app_mapping` | **no** | No application-map entry matched and there is no default application — 3d. |
-| `config_incomplete` | **no** | The selected application lacks an Application ID, API key or endpoint — 3a, 3d. |
+| `config_incomplete` | **no** | The selected application lacks an Application ID, API key or endpoint, or its endpoint is not a bare host name (no `https://`, port or path) — 3a, 3d. The trace line names the endpoint. |
 | `app_map_invalid` | **no** | `rdwr-app-map` or the generated map is not valid, or an entry is mistyped — 3d; the install check names the entry. |
 
 ## 5d — About testing with an attack pattern
@@ -1383,14 +1464,22 @@ after a Named Value edit rather than after a policy change.
 
 ## Issue 6 — The policy upload is rejected
 
-*"Named Value not found"* means one of the 22 is missing. Run Step 3c, which names it.
+*"Named Value not found"* means one of the 24 is missing. Run Step 3c, which names it.
 
 If the upload failed with a validation error instead, confirm the request used `format: rawxml`.
 
+A Named Value change or a fragment upload refused with *"breaks policy fragments"* (or *"breaks a
+policy it's used in"*) and *"The element 'send-request' has invalid child element 'choose'"* means
+the instance still runs the v1.4.0 fragments, which API Management no longer accepts. Upgrade to
+this release in the order given in `release-notes.md`, "Upgrading from v1.4.0".
+
 ## Issue 7 — 404 on your test request
 
-The URL matched no API Management operation, so the policy never ran. Use a path from
-`az apim api operation list`.
+The URL matched no API Management operation, and API Management answered it with
+`404 Resource not found` before any policy. Installed at All APIs scope (Form 1) the connector
+still inspects such a request from `<on-error>` (see
+[Requests API Management answers itself](#requests-api-management-answers-itself)); to test the
+connector with a request that reaches your backend, use a path from `az apim api operation list`.
 
 ## Issue 8 — Unexpected 403 on traffic that should pass
 
@@ -1407,6 +1496,10 @@ Each request waits for the inspection call, bounded by `rdwr-app-ep-timeout-seco
 If the endpoint is unreachable, every request waits out that timeout before being forwarded. Check
 the trace for `error ignored`.
 
+The timeout covers SecurePath's answer up to its headers. An allow or a fail-open needs nothing
+more, so it never waits longer. A block also reads the page or JSON that SecurePath sends with it;
+if SecurePath delivers that body slowly, the blocked request waits for it.
+
 ## Issue 10 — Nothing happened when you pasted a command block
 
 Your shell stopped partway through, most likely on a syntax error, and the remaining commands never
@@ -1422,7 +1515,8 @@ How you remove it depends on which form you installed.
 
 ## If you installed fragments (Form 1 or 2)
 
-Delete the four `include-fragment` lines from the policy you added them to. Inspection stops
+Delete the connector's lines from the policy you added them to — the `include-fragment` lines
+and the `<choose>` block in `<on-error>`. Inspection stops
 immediately and the rest of that policy is unaffected. For Form 1 installed from the CLI, that is
 the All APIs policy: the block under "If you installed the retired All-APIs policy document"
 below resets it to the default.

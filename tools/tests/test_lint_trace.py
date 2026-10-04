@@ -195,6 +195,14 @@ def test_T07_no_app_mapping():
     assert codes(f) == ["T07"] and "no application map entry" in f[0].message
 
 
+def test_T07_unusable_redirect():
+    t = trace([inspector(), enter_fragment()] + sideband_sent(status=302, headers={})
+              + [setvar("rwStatus", 302)] + diag("unusable_redirect_302"))
+    f = lint.lint_trace(t)
+    assert codes(f) == ["T07"] and "without a usable Location" in f[0].message
+    assert lint._is_fail_open("unusable_redirect_302")  # the readout's verdict line says "served uninspected"
+
+
 def test_bypass_by_rule_is_not_a_finding():
     t = trace([inspector(), enter_fragment(), setvar("shouldBypassRadware", True), leave_fragment()])
     assert lint.lint_trace(t) == []

@@ -20,13 +20,14 @@ Exit code 0 means clean, 1 means findings, 2 means the instance or file could no
 | L05 | A `set-variable` has no value | Left behind by a manual merge; restore it, or use the fragments |
 | L06 | Only some of the three section fragments (`securepath-inbound`, `securepath-outbound`, `securepath-onerror`) are referenced | Add the missing `include-fragment` lines (the application-map fragment is covered by L11) |
 | L07 | A required Named Value is missing | README Step 3 |
-| L08 | `rdwr-app-id` contains a dot, or `rdwr-app-ep-addr` is not an `.oop.radwarecloud.net` host | README Step 3a |
+| L08 | `rdwr-app-id` contains a dot, or `rdwr-app-ep-addr` is not an `.oop.radwarecloud.net` host, or is not a bare host name (a scheme, port or path in it makes the connector serve every request uninspected) | README Step 3a |
 | L09 | Standard v2 / Premium v2: an inspection endpoint has no matching backend entity | README Step 1, Path B; without it traffic is served uninspected |
-| L10 | `rdwr-app-map` is present but not valid | Single-quoted JSON; each entry needs `app_id`, `api_key`, `endpoint`; `base_path` starts with `/` |
+| L10 | `rdwr-app-map` is present but not valid | Single-quoted JSON; each entry needs `app_id`, `api_key`, `endpoint` (a bare host name); `port` from 1 to 65535; `base_path` starts with `/` |
 | L11 | The generated-map fragment `securepath-app-map` is missing, malformed, or not referenced immediately before `securepath-inbound` | Register `fragments/securepath-app-map.fragment.xml` and put its `include-fragment` line right before the inbound one (a fragment cannot include a fragment; the policy must) |
 | L12 | A generated-map entry references a key Named Value (`rdwr-app-key-…`) that does not exist | Run `securepath-apim-sync apply`; it writes the key Named Values before the fragment |
 | L13 | `rdwr-custom-bot-block-statuses` (or a map entry's `bot_block_statuses`) is not a status-code list, lists a standard verdict (200/301/302/403) or a 5xx, or is set while Bot Manager is disabled | See README 3e; the setting is ignored in each of those cases |
 | L14 | A connector fragment on the instance differs from the file shipped in this package, or is referenced but not registered | Re-register it from `fragments/` and run the check again. A fragment registration is asynchronous: the CLI reports success before validation, so a rejected upload silently keeps the previous fragment |
+| L16 | A fragment install's `<on-error>` does not carry the block that inspects the requests API Management answers itself (no matching operation, missing subscription key), or has `securepath-inbound` before `securepath-onerror` there | Those requests never reach SecurePath; add the `<choose>` block on `rdwrUnrouted` right after the `securepath-onerror` line (README Step 4, Requests API Management answers itself) |
 
 Run it after every install and whenever a policy on the instance changes.
 

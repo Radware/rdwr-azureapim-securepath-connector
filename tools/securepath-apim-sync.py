@@ -54,7 +54,7 @@ _spec.loader.exec_module(lint)
 
 API_VERSION = lint.API_VERSION
 CLOUD_API_BASE = "https://api.radwarecloud.app"
-USER_AGENT = "SecurePath-APIM-connector/1.4.0"
+USER_AGENT = "SecurePath-APIM-connector/1.5.0"
 FIELDS = ("app_id", "api_key", "endpoint", "port", "ssl")
 
 

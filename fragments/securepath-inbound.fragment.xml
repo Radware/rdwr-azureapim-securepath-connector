@@ -1,4 +1,8 @@
 <fragment>
+    <!-- First element on purpose: tells the on-error section that inspection started for this
+         request, so a request rejected later (after inspection) is never inspected twice. -->
+    <set-variable name="rdwrInboundEntered" value="@(true)" />
+
     <!-- X-Rdwr-Diag is the connector's own signal to the backend; a client may not forge it -->
     <set-header name="X-Rdwr-Diag" exists-action="delete" />
 
@@ -10,23 +14,23 @@
     <set-variable name="rdwrAppEpPortStr" value="{{rdwr-app-ep-port}}" />
     <set-variable name="rdwrAppEpSslStr" value="{{rdwr-app-ep-ssl}}" />
     <set-variable name="rdwrAppEpTimeoutStr" value="{{rdwr-app-ep-timeout-seconds}}" />
-    <set-variable name="rdwrAppEpPort" value="@{ int v; return int.TryParse(((string)context.Variables["rdwrAppEpPortStr"]).Trim(), out v) ? v : 443; }" />
+    <set-variable name="rdwrAppEpPort" value="@{ int v; return int.TryParse(((string)context.Variables["rdwrAppEpPortStr"]).Trim(), out v) && v >= 1 && v <= 65535 ? v : 443; }" />
     <set-variable name="rdwrAppEpSsl" value="@{ bool v; return bool.TryParse(((string)context.Variables["rdwrAppEpSslStr"]).Trim(), out v) ? v : true; }" />
-    <set-variable name="rdwrAppEpTimeout" value="@{ int v; return int.TryParse(((string)context.Variables["rdwrAppEpTimeoutStr"]).Trim(), out v) ? v : 10; }" />
+    <set-variable name="rdwrAppEpTimeout" value="@{ int v; return int.TryParse(((string)context.Variables["rdwrAppEpTimeoutStr"]).Trim(), out v) && v >= 1 ? v : 10; }" />
     <set-variable name="rdwrAppId" value="{{rdwr-app-id}}" />
     <set-variable name="rdwrApiKey" value="{{rdwr-api-key}}" />
     <set-variable name="rdwrTrueClientIpHeaderNameFromNV" value="{{rdwr-true-client-ip-header}}" />
     <set-variable name="rdwrBodyMaxSizeStr" value="{{rdwr-body-max-size-bytes}}" />
     <set-variable name="rdwrPartialBodySizeStr" value="{{rdwr-partial-body-size-bytes}}" />
-    <set-variable name="rdwrBodyMaxSize" value="@{ long v; return long.TryParse(((string)context.Variables["rdwrBodyMaxSizeStr"]).Trim(), out v) ? v : 100000L; }" />
-    <set-variable name="rdwrPartialBodySize" value="@{ long v; return long.TryParse(((string)context.Variables["rdwrPartialBodySizeStr"]).Trim(), out v) ? v : 10240L; }" />
+    <set-variable name="rdwrBodyMaxSize" value="@{ long v; return long.TryParse(((string)context.Variables["rdwrBodyMaxSizeStr"]).Trim(), out v) && v >= 0 ? v : 100000L; }" />
+    <set-variable name="rdwrPartialBodySize" value="@{ long v; return long.TryParse(((string)context.Variables["rdwrPartialBodySizeStr"]).Trim(), out v) && v >= 0 ? v : 10240L; }" />
     <set-variable name="rdwrApiBasePath" value="@{
       var nv = "{{rdwr-api-base-path}}";
       return string.IsNullOrEmpty(nv) || nv.Contains("{{") ? "" : nv.TrimEnd('/');
     }" />
     <set-variable name="rdwrMultipartMaxSizeStr" value="{{rdwr-multipart-max-size-bytes}}" />
     <set-variable name="staticExtensionsEnabledStr" value="{{static-extensions-enabled}}" />
-    <set-variable name="rdwrMultipartMaxSize" value="@{ long v; return long.TryParse(((string)context.Variables["rdwrMultipartMaxSizeStr"]).Trim(), out v) ? v : 100000L; }" />
+    <set-variable name="rdwrMultipartMaxSize" value="@{ long v; return long.TryParse(((string)context.Variables["rdwrMultipartMaxSizeStr"]).Trim(), out v) && v >= 0 ? v : 100000L; }" />
     <set-variable name="staticExtensionsEnabled" value="@{ bool v; return bool.TryParse(((string)context.Variables["staticExtensionsEnabledStr"]).Trim(), out v) ? v : true; }" />
     <set-variable name="staticMethodsNoInspect" value="{{static-list-of-methods-not-to-inspect}}" />
     <set-variable name="staticBypassedExts" value="{{static-list-of-bypassed-extensions}}" />
@@ -35,12 +39,12 @@
     <set-variable name="rdwrConfigInvalid" value="@{
       var bad = new System.Collections.Generic.List<string>();
       int i; long l; bool b;
-      if (!int.TryParse(((string)context.Variables["rdwrAppEpPortStr"]).Trim(), out i)) { bad.Add("rdwr-app-ep-port"); }
+      if (!int.TryParse(((string)context.Variables["rdwrAppEpPortStr"]).Trim(), out i) || i < 1 || i > 65535) { bad.Add("rdwr-app-ep-port"); }
       if (!bool.TryParse(((string)context.Variables["rdwrAppEpSslStr"]).Trim(), out b)) { bad.Add("rdwr-app-ep-ssl"); }
-      if (!int.TryParse(((string)context.Variables["rdwrAppEpTimeoutStr"]).Trim(), out i)) { bad.Add("rdwr-app-ep-timeout-seconds"); }
-      if (!long.TryParse(((string)context.Variables["rdwrBodyMaxSizeStr"]).Trim(), out l)) { bad.Add("rdwr-body-max-size-bytes"); }
-      if (!long.TryParse(((string)context.Variables["rdwrPartialBodySizeStr"]).Trim(), out l)) { bad.Add("rdwr-partial-body-size-bytes"); }
-      if (!long.TryParse(((string)context.Variables["rdwrMultipartMaxSizeStr"]).Trim(), out l)) { bad.Add("rdwr-multipart-max-size-bytes"); }
+      if (!int.TryParse(((string)context.Variables["rdwrAppEpTimeoutStr"]).Trim(), out i) || i < 1) { bad.Add("rdwr-app-ep-timeout-seconds"); }
+      if (!long.TryParse(((string)context.Variables["rdwrBodyMaxSizeStr"]).Trim(), out l) || l < 0) { bad.Add("rdwr-body-max-size-bytes"); }
+      if (!long.TryParse(((string)context.Variables["rdwrPartialBodySizeStr"]).Trim(), out l) || l < 0) { bad.Add("rdwr-partial-body-size-bytes"); }
+      if (!long.TryParse(((string)context.Variables["rdwrMultipartMaxSizeStr"]).Trim(), out l) || l < 0) { bad.Add("rdwr-multipart-max-size-bytes"); }
       if (!bool.TryParse(((string)context.Variables["staticExtensionsEnabledStr"]).Trim(), out b)) { bad.Add("static-extensions-enabled"); }
       if (!bool.TryParse(((string)context.Variables["staticInspectWithQueryStr"]).Trim(), out b)) { bad.Add("static-inspect-if-query-string-exists"); }
       return string.Join(",", bad);
@@ -237,7 +241,10 @@
         foreach (string f in new[] { "app_id", "api_key", "endpoint", "base_path", "bot_block_statuses" }) {
           if (e[f] != null && e[f].Type != JTokenType.String) { return "##INVALID##"; }
         }
-        if (e["port"] != null && e["port"].Type != JTokenType.Integer) { return "##INVALID##"; }
+        // a port that is not a TCP port would make the inspection URL invalid, and an invalid URL
+        // fails the request instead of failing open (a value too large for long throws here and is
+        // caught below)
+        if (e["port"] != null && (e["port"].Type != JTokenType.Integer || (long)e["port"] < 1 || (long)e["port"] > 65535)) { return "##INVALID##"; }
         foreach (string f in new[] { "ssl", "bot_manager" }) {
           if (e[f] != null && e[f].Type != JTokenType.Boolean) { return "##INVALID##"; }
         }
@@ -301,6 +308,19 @@
       bool epOff = ep == "" || ep == "-" || ep == "disabled" || ep == "off" || ep == "false" || ep == "none" || ep == "~" || ep == "##disabled##";
       if (sel == "" && src != "none" && (idOff || keyOff || epOff)) { return "no_app_mapping"; }
       if (idOff || keyOff || epOff) { return "config_incomplete"; }
+      // The endpoint must be a bare host name or address: a scheme, port or path in it ("https://...",
+      // "...:443", ".../") would make the inspection URL invalid, which fails the request instead of
+      // failing open. Control characters in the credentials would make their headers invalid.
+      bool v6 = ep.Length > 2 && ep[0] == '[' && ep[ep.Length - 1] == ']';
+      bool epOk = ep.Length <= 253;
+      for (int i = v6 ? 1 : 0; i < (v6 ? ep.Length - 1 : ep.Length) && epOk; i++) {
+        char c = ep[i];
+        epOk = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || (v6 ? c == ':' : c == '-');
+      }
+      if (!epOk) { return "config_incomplete"; }
+      string rawId = (string)context.Variables.GetValueOrDefault("rdwrAppId", "") ?? "";
+      string rawKey = (string)context.Variables.GetValueOrDefault("rdwrApiKey", "") ?? "";
+      foreach (char c in rawId + rawKey) { if (c < (char)0x20 || c == (char)0x7f) { return "config_incomplete"; } }
       return "";
     }" />
     <choose>
@@ -312,7 +332,14 @@
           return string.IsNullOrEmpty(prior) ? problem : problem + ";" + prior;
         }" />
         <trace source="securepath" severity="error">
-          <message>@("SecurePath not applied (" + (string)context.Variables["rdwrConfigProblem"] + ") host=" + (string)context.Variables.GetValueOrDefault("rdwrTrueHost", "") + " api=" + ((context.Api != null && context.Api.Id != null) ? context.Api.Id : "") + "; request served uninspected")</message>
+          <message>@{
+            string ep = ((string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", "") ?? "");
+            var clean = new System.Text.StringBuilder();
+            foreach (char c in (ep.Length > 100 ? ep.Substring(0, 100) : ep)) { clean.Append(c < (char)0x20 || c == (char)0x7f ? '?' : c); }
+            return "SecurePath not applied (" + (string)context.Variables["rdwrConfigProblem"] + ") host=" + (string)context.Variables.GetValueOrDefault("rdwrTrueHost", "")
+              + " api=" + ((context.Api != null && context.Api.Id != null) ? context.Api.Id : "") + " endpoint='" + clean.ToString()
+              + "' (a bare host name, no scheme, port or path; credentials without control characters); request served uninspected";
+          }</message>
         </trace>
       </when>
     </choose>
@@ -533,7 +560,7 @@
     <!-- ====== Static bypass ====== -->
     <choose>
       <when condition="@(context.Variables.GetValueOrDefault("staticExtensionsEnabled", false))">
-        <set-variable name="reqPathForExt" value="@(context.Request.Url.Path.ToLower())" />
+        <set-variable name="reqPathForExt" value="@(context.Request.OriginalUrl.Path ?? "")" />
         <set-variable name="reqMethod" value="@(context.Request.Method.ToUpper())" />
         <set-variable name="reqQuery" value="@(context.Request.Url.QueryString)" />
         <set-variable name="fileExt" value="@{
@@ -541,10 +568,18 @@
           string extension = "";
           if (!string.IsNullOrEmpty(path))
           {
-            int lastDot = path.LastIndexOf('.');
-            if (lastDot != -1 && lastDot < path.Length - 1)
+            // A last path segment that carries a path parameter (";") is never a static asset: many
+            // application servers drop ";..." before routing, so "/admin;.js" reaches the application
+            // as "/admin" -- a page, not a script -- and must be inspected (matches the NGINX reference).
+            int lastSlash = path.LastIndexOf('/');
+            string lastSeg = lastSlash >= 0 ? path.Substring(lastSlash + 1) : path;
+            if (lastSeg.IndexOf(';') < 0)
             {
-              extension = path.Substring(lastDot + 1);
+              int lastDot = path.LastIndexOf('.');
+              if (lastDot != -1 && lastDot < path.Length - 1)
+              {
+                extension = path.Substring(lastDot + 1);   // case preserved -> compared case-sensitively
+              }
             }
           }
           return extension;
@@ -565,7 +600,9 @@
 
         <!-- isBypassCandidateExtension (no LINQ .Contains) -->
         <set-variable name="isBypassCandidateExtension" value="@{
-          string list = ((string)context.Variables.GetValueOrDefault("staticBypassedExts","")).ToLower();
+          // case-sensitive comparison, like the NGINX reference: the list is authored lowercase,
+          // so an uppercase extension such as ".PNG" is NOT treated as static and is inspected
+          string list = (string)context.Variables.GetValueOrDefault("staticBypassedExts","");
           string ext  = (string)context.Variables.GetValueOrDefault("fileExt","");
           bool found = false;
           if (!string.IsNullOrEmpty(ext))
@@ -626,40 +663,31 @@
           string ct = (string)context.Variables.GetValueOrDefault("origContentType", "");
           return !string.IsNullOrEmpty(ct) && ct.ToLower().StartsWith("multipart/");
         }" />
+        <set-variable name="multipartContentLength" value="@{
+          string lenStr = (string)context.Variables.GetValueOrDefault("origContentLengthStr", "");
+          long parsed;
+          return (!string.IsNullOrEmpty(lenStr) && long.TryParse(lenStr, out parsed)) ? parsed : -1L;
+        }" />
         <choose>
           <!-- Gzip guard REMOVED (v1.2.1): Body.As<byte[]>(preserveContent:true) correctly forwards gzip bodies.
                Azure's HTTP pipeline rewrites gzip header metadata (timestamp, XFL, OS bytes) but the DEFLATE
                stream and decompressed content are identical. SP receives the full body for inspection.
                Previously this guard sent 0 bytes to SP, losing all body inspection capability.
                Verified empirically: NGINX sends 76 bytes, APIM sends 76 bytes, decompressed content matches. -->
-          <!-- Multipart is treated as opaque: skip partial reads -->
-          <when condition="@((bool)context.Variables.GetValueOrDefault("isMultipart", false))">
-            <set-variable name="readBodyFlag" value="@(false)" />
-            <set-variable name="multipartContentLength" value="@{
-              string lenStr = (string)context.Variables.GetValueOrDefault("origContentLengthStr", "");
-              long parsed;
-              if (!string.IsNullOrEmpty(lenStr) && long.TryParse(lenStr, out parsed))
-              {
-                return parsed;
-              }
-              return -1L;
-            }" />
-            <choose>
-              <when condition="@((long)context.Variables.GetValueOrDefault("multipartContentLength", -1L) > context.Variables.GetValueOrDefault("rdwrMultipartMaxSize", long.MaxValue))">
-                <!-- Too large multipart: send headers only to the inspection endpoint -->
-                <set-variable name="radwareOverrideBody" value="@(true)" />
-                <set-variable name="multipartHeadersOnly" value="@(true)" />
-                <set-variable name="radwareReqBodyBytes" value="@(new byte[0])" />
-                <set-variable name="radwareReqBodyLengthBytes" value="@(0L)" />
-              </when>
-              <when condition="@((bool)context.Variables.GetValueOrDefault("origTransferChunked", false))">
-                <!-- Unknown size multipart with chunked TE: avoid buffering entire body -->
-                <set-variable name="radwareOverrideBody" value="@(true)" />
-                <set-variable name="multipartHeadersOnly" value="@(true)" />
-                <set-variable name="radwareReqBodyBytes" value="@(new byte[0])" />
-                <set-variable name="radwareReqBodyLengthBytes" value="@(0L)" />
-              </when>
-            </choose>
+          <!-- Multipart follows the same rules as every other body (a declared length up to
+               rdwr-body-max-size-bytes is read and sent whole up to rdwr-partial-body-size-bytes, or
+               truncated to it with x-rdwr-partial-body), with two multipart-specific rules:
+               a declared length above rdwr-multipart-max-size-bytes is inspected headers-only, and a
+               CHUNKED multipart body is read only when multipart/form-data is listed in
+               chunked-request-allowed-content-types. API Management can only read a body whole (it
+               has no prefix read), so reading an upload of unknown size buffers all of it in the
+               gateway; that is why chunked multipart is opt-in and headers-only by default. -->
+          <when condition="@((bool)context.Variables.GetValueOrDefault("isMultipart", false) && (long)context.Variables.GetValueOrDefault("multipartContentLength", -1L) > context.Variables.GetValueOrDefault("rdwrMultipartMaxSize", long.MaxValue))">
+            <!-- Declared multipart above rdwr-multipart-max-size-bytes: send headers only -->
+            <set-variable name="radwareOverrideBody" value="@(true)" />
+            <set-variable name="multipartHeadersOnly" value="@(true)" />
+            <set-variable name="radwareReqBodyBytes" value="@(new byte[0])" />
+            <set-variable name="radwareReqBodyLengthBytes" value="@(0L)" />
           </when>
           <when condition="@(!string.IsNullOrEmpty((string)context.Variables["origContentLengthStr"]))">
             <set-variable name="origContentLength" value="@{ long v; return long.TryParse((string)context.Variables["origContentLengthStr"], out v) ? v : 0L; }" />
@@ -702,10 +730,12 @@
                 <set-variable name="readBodyFlag" value="@(true)" />
               </when>
               <otherwise>
-                <!-- disallow chunked content types not on allowlist -->
+                <!-- chunked content type not on the list: headers only (for multipart this is the
+                     default, reported as multipart_headers_only) -->
                 <set-variable name="radwareOverrideBody" value="@(true)" />
                 <set-variable name="radwareReqBodyBytes" value="@(new byte[0])" />
                 <set-variable name="radwareReqBodyLengthBytes" value="@(0L)" />
+                <set-variable name="multipartHeadersOnly" value="@((bool)context.Variables.GetValueOrDefault("isMultipart", false))" />
               </otherwise>
             </choose>
           </when>
@@ -771,7 +801,7 @@
         <set-variable name="urlScheme" value="@(context.Variables.GetValueOrDefault("rdwrAppEpSsl", true) ? "https" : "http")" />
         <set-variable name="urlHost" value="@((string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", "localhost"))" />
         <set-variable name="urlPortValue" value="@(context.Variables.GetValueOrDefault("rdwrAppEpPort", 443))" />
-        <set-variable name="urlPathAndQueryToUse" value="@{
+        <set-variable name="rdwrTargetRaw" value="@{
           var path = context.Request.OriginalUrl.Path ?? "";
           // Strip API base-path prefix so SP sees the real client path
           var basePath = (string)context.Variables.GetValueOrDefault("rdwrApiBasePath", "");
@@ -793,10 +823,316 @@
               path = path.Substring(0, idx);
             }
           }
+          // Escape a bare '%' in the PATH only (one not starting a %XX escape): the endpoint answers
+          // 400 to it, which the connector treats as fail-open. Only what the endpoint refuses is
+          // escaped; the query is sent raw, and the request to the backend is never changed.
+          var pfix = new System.Text.StringBuilder(path.Length + 8);
+          for (int pi = 0; pi < path.Length; pi++) {
+            char pc = path[pi];
+            if (pc == '%') {
+              bool okEsc = pi + 2 < path.Length
+                && ((path[pi+1] >= '0' && path[pi+1] <= '9') || (path[pi+1] >= 'a' && path[pi+1] <= 'f') || (path[pi+1] >= 'A' && path[pi+1] <= 'F'))
+                && ((path[pi+2] >= '0' && path[pi+2] <= '9') || (path[pi+2] >= 'a' && path[pi+2] <= 'f') || (path[pi+2] >= 'A' && path[pi+2] <= 'F'));
+              pfix.Append(okEsc ? "%" : "%25");
+            } else { pfix.Append(pc); }
+          }
+          path = pfix.ToString();
+          // path and query are kept exactly as the client sent them (no decode/re-encode) so the
+          // inspection request line is no longer than the one API Management admitted
           var qs = context.Request.OriginalUrl.QueryString;
-          return path + (string.IsNullOrEmpty(qs) ? "" : qs);
+          return path + "\u0001" + (string.IsNullOrEmpty(qs) ? "" : qs);
+        }" />
+        <!-- Fit the request line (OI-36): the endpoint refuses a request line over 8192 bytes (414,
+             which the connector treats as fail-open). API Management's own URL limit usually refuses
+             a longer one first, but operators raise it, so the inspection copy's target is capped:
+             sent whole when it fits, otherwise the path plus as much of the query as fits without
+             splitting a %-escape. The path is never cut (a path alone over the limit is left for the
+             endpoint to answer). The request to the backend is untouched; rdwrTargetDropped is the
+             number of query bytes not sent for inspection. The raw target carries a \u0001 between
+             path and query (a byte that cannot occur in a URL) so the two are separated without
+             re-parsing. -->
+        <set-variable name="rdwrTargetDropped" value="@{
+          string raw = (string)context.Variables["rdwrTargetRaw"];
+          int sep = raw.IndexOf('\u0001');
+          string path = raw.Substring(0, sep);
+          string qs = raw.Substring(sep + 1);
+          int budget = 8192 - (context.Request.Method ?? "GET").Length - 1 - 11;  // "METHOD target HTTP/1.1\r\n"
+          int full = path.Length + qs.Length;
+          if (full <= budget) { return 0; }
+          int keepQs = budget - path.Length;
+          if (keepQs < 0) { keepQs = 0; }                       // path alone is over budget: left whole
+          if (keepQs > 0 && keepQs < qs.Length) {
+            // do not split a %-escape: if the cut lands within %XX, back up to before the %
+            for (int k = 0; k < 2 && keepQs > 0; k++) {
+              int pc = qs.LastIndexOf('%', keepQs - 1);
+              if (pc >= 0 && pc > keepQs - 3) { keepQs = pc; } else { break; }
+            }
+          }
+          return qs.Length - keepQs;
+        }" />
+        <set-variable name="rdwrTargetTruncated" value="@((int)context.Variables.GetValueOrDefault("rdwrTargetDropped", 0) > 0)" />
+        <set-variable name="urlPathAndQueryToUse" value="@{
+          string raw = (string)context.Variables["rdwrTargetRaw"];
+          int sep = raw.IndexOf('\u0001');
+          string path = raw.Substring(0, sep);
+          string qs = raw.Substring(sep + 1);
+          int dropped = (int)context.Variables.GetValueOrDefault("rdwrTargetDropped", 0);
+          if (dropped <= 0) { return path + qs; }
+          return path + qs.Substring(0, qs.Length - dropped);
         }" />
 
+        <!-- ====== Fit the inspection copy to the SecurePath endpoint's request limits (OI-36) ======
+             The SecurePath endpoint answers 503 to an inspection request over 100 header lines, 400
+             to one with a header line over about 8 KB or a header block it cannot buffer, and 414 to
+             a request line over 8192 bytes; the connector treats all three as an endpoint problem and
+             fails open, so a client padding headers or the query could get an attack past a block
+             verdict. API Management admits far more, and longer, than the endpoint and adds its own
+             and the platform's headers, so the inspection copy is fitted to the header limits here
+             (the request line is fitted where the URL is built, above). The kept list is the headers
+             an application needs, the configured client-IP header and the connector's own; other
+             client and platform headers are left out, a single line over about 8 KB first, then from
+             the end of the alphabet to reach 100 lines, then the largest first to reach 16384 bytes.
+             The method, path, query, body and everything sent to the backend are untouched.
+             rdwrFitDrop holds the names left out; rdwrFitDropPad pads it to a fixed length so the
+             delete-slots in each send-request can reference it by index (send-request takes no
+             choose). -->
+        <set-variable name="rdwrFitDrop" value="@{
+          var kept = new System.Collections.Generic.HashSet<string>(new string[] {
+            "host","cookie","user-agent","referer","origin","authorization","content-type","content-length",
+            "accept","accept-language","accept-encoding","x-forwarded-for","forwarded","x-real-ip","x-requested-with" });
+          string cipHdr = ((string)context.Variables.GetValueOrDefault("configuredHeaderNameForClientIp","##DISABLED##") ?? "").Trim().ToLower();
+          if (cipHdr.Length > 0 && cipHdr != "##disabled##") { kept.Add(cipHdr); }
+          int lines = 8;  // the connector eight x-rdwr-* lines, always sent
+          // API Management refuses to modify these request headers (set-header throws), and it
+          // frames/strips the connection-management ones on the outgoing inspection call itself,
+          // so they are neither counted against the endpoint limits nor ever placed in the drop
+          // list (a delete-slot on one would turn a normal request into a 500).
+          var restricted = new System.Collections.Generic.HashSet<string>(new string[] {
+            "connection","content-length","keep-alive","transfer-encoding","upgrade","te","trailer",
+            "proxy-connection","proxy-authenticate","proxy-authorization","expect" });
+          long bytes = 0;
+          foreach (var kv in new System.Collections.Generic.Dictionary<string,string> {
+            {"x-rdwr-app-id",(string)context.Variables.GetValueOrDefault("rdwrAppId","") ?? ""},
+            {"x-rdwr-api-key",(string)context.Variables.GetValueOrDefault("rdwrApiKey","") ?? ""},
+            {"x-rdwr-connector-ip",(string)context.Variables.GetValueOrDefault("clientIpToSend","") ?? ""},
+            {"x-rdwr-connector-port",context.Request.OriginalUrl.Port.ToString()},
+            {"x-rdwr-connector-scheme",context.Request.OriginalUrl.Scheme ?? ""},
+            {"x-rdwr-plugin-info",(string)context.Variables.GetValueOrDefault("pluginInfo","") ?? ""},
+            {"x-rdwr-connector-proto","2"},{"x-rdwr-connector-stage","request"} }) {
+            bytes += kv.Key.Length + (kv.Value ?? "").Length + 4;
+          }
+          var sizeByName = new System.Collections.Generic.Dictionary<string,int>();
+          var optional = new System.Collections.Generic.List<string>();
+          foreach (var kv in context.Request.Headers) {
+            string n = (kv.Key ?? "").ToLower();
+            if (n.StartsWith("x-rdwr-")) { continue; }  // the connector sets its own; a client cannot (reserved-header 403)
+            if (restricted.Contains(n)) { continue; }   // API Management manages/strips these; never drop them
+            string v = string.Join(",", kv.Value ?? new string[0]);
+            int b = n.Length + v.Length + 4;
+            lines += 1; bytes += b;
+            if (!kept.Contains(n)) { sizeByName[n] = b; optional.Add(n); }
+          }
+          var drop = new System.Collections.Generic.List<string>();
+          foreach (var n in optional) {
+            if (sizeByName[n] > 8000) { drop.Add(n); lines -= 1; bytes -= sizeByName[n]; }  // a single line over about 8 KB is refused on its own
+          }
+          if (!(lines <= 100 && bytes <= 16384)) {
+            optional.Sort();
+            for (int i = optional.Count - 1; i >= 0 && lines > 100; i--) {
+              if (drop.Contains(optional[i])) { continue; }
+              drop.Add(optional[i]); lines -= 1; bytes -= sizeByName[optional[i]];
+            }
+            if (bytes > 16384) {
+              var rem = new System.Collections.Generic.List<string>();
+              foreach (var n in optional) { if (!drop.Contains(n)) { rem.Add(n); } }
+              rem.Sort((a,b2) => sizeByName[b2] != sizeByName[a] ? sizeByName[b2].CompareTo(sizeByName[a]) : string.CompareOrdinal(a,b2));
+              foreach (var n in rem) { if (bytes <= 16384) { break; } drop.Add(n); bytes -= sizeByName[n]; }
+            }
+          }
+          return drop.ToArray();
+        }" />
+        <set-variable name="rdwrFitDropPad" value="@{
+          var d = (string[])context.Variables.GetValueOrDefault("rdwrFitDrop", new string[0]);
+          var pad = new string[160];
+          for (int i = 0; i < 160; i++) { pad[i] = i < d.Length ? d[i] : ("x-rdwr-fit-slot-" + i); }
+          return pad;
+        }" />
+        <set-variable name="rdwrFitLeftOut" value="@{ var d=(string[])context.Variables.GetValueOrDefault("rdwrFitDrop", new string[0]); return d.Length==0 ? "" : d.Length + " headers (" + string.Join(", ", d) + ")"; }" />
+        <!-- ====== Cut a kept header that would otherwise be sent oversized (OI-36) ======
+             Kept headers are never left out of the inspection copy, but the endpoint answers a header
+             line over about 8 KB, or a header block over 16384 bytes, with 400 (which the connector
+             treats as fail-open). So a kept header whose single line would exceed ~8 KB is cut, and if
+             the kept headers together still exceed 16384 bytes the longest are cut to a common length
+             until the block fits. The Cookie value is rebuilt with the Bot Manager cookies first
+             (__uzm*, uzmcr) then the others in their order, stopping at the last cookie that fits;
+             every other kept header's value is truncated to a byte boundary. The request to the
+             backend is never changed; only the inspection copy carries the cut value.
+             A set-variable may not return a Dictionary, so the cut map is a string[] whose entries are
+             "lowercased-name\u0001cut-value" (split on the FIRST \u0001; a header not listed is sent
+             as-is). -->
+        <set-variable name="rdwrKeptCut" value="@{
+          var kept = new System.Collections.Generic.HashSet<string>(new string[] {
+            "cookie","user-agent","referer","origin","authorization","content-type",
+            "accept","accept-language","accept-encoding","x-forwarded-for","forwarded","x-real-ip","x-requested-with" });
+          string cipHdr = ((string)context.Variables.GetValueOrDefault("configuredHeaderNameForClientIp","##DISABLED##") ?? "").Trim().ToLower();
+          if (cipHdr.Length > 0 && cipHdr != "##disabled##") { kept.Add(cipHdr); }
+          int maxLine = 8190;
+          int maxBlock = 16384;
+          var names = new System.Collections.Generic.List<string>();
+          var vals = new System.Collections.Generic.Dictionary<string,string>();
+          foreach (var h in context.Request.Headers) {
+            string n = (h.Key ?? "").ToLower();
+            if (n.StartsWith("x-rdwr-")) { continue; }
+            if (!kept.Contains(n)) { continue; }
+            if (vals.ContainsKey(n)) { continue; }
+            names.Add(n); vals[n] = string.Join(",", h.Value ?? new string[0]);
+          }
+          var cut = new System.Collections.Generic.List<string>();
+          if (names.Count == 0) { return cut.ToArray(); }
+          var cookieOrdered = new System.Collections.Generic.List<string>();
+          if (vals.ContainsKey("cookie")) {
+            var bm = new System.Collections.Generic.List<string>();
+            var rest = new System.Collections.Generic.List<string>();
+            foreach (var partRaw in vals["cookie"].Split(';')) {
+              string part = partRaw.Trim();
+              if (part.Length == 0) { continue; }
+              string pl = part.ToLower();
+              if (pl.StartsWith("__uzm") || pl.StartsWith("uzmcr")) { bm.Add(part); } else { rest.Add(part); }
+            }
+            cookieOrdered.AddRange(bm); cookieOrdered.AddRange(rest);
+          }
+          var lineBudget = new System.Collections.Generic.Dictionary<string,int>();
+          var cappedLen = new System.Collections.Generic.Dictionary<string,int>();
+          foreach (var n in names) {
+            int b = maxLine - n.Length - 4; if (b < 0) { b = 0; }
+            lineBudget[n] = b;
+            int vb = System.Text.Encoding.UTF8.GetByteCount(vals[n]);
+            cappedLen[n] = vb < b ? vb : b;
+          }
+          long fixedBytes = 0;
+          foreach (var kv in new System.Collections.Generic.Dictionary<string,string> {
+            {"x-rdwr-app-id",(string)context.Variables.GetValueOrDefault("rdwrAppId","") ?? ""},
+            {"x-rdwr-api-key",(string)context.Variables.GetValueOrDefault("rdwrApiKey","") ?? ""},
+            {"x-rdwr-connector-ip",(string)context.Variables.GetValueOrDefault("clientIpToSend","") ?? ""},
+            {"x-rdwr-connector-port",context.Request.OriginalUrl.Port.ToString()},
+            {"x-rdwr-connector-scheme",context.Request.OriginalUrl.Scheme ?? ""},
+            {"x-rdwr-plugin-info",(string)context.Variables.GetValueOrDefault("pluginInfo","") ?? ""},
+            {"x-rdwr-connector-proto","2"},{"x-rdwr-connector-stage","request"} }) {
+            fixedBytes += kv.Key.Length + System.Text.Encoding.UTF8.GetByteCount(kv.Value ?? "") + 4;
+          }
+          var drop = new System.Collections.Generic.HashSet<string>((string[])context.Variables.GetValueOrDefault("rdwrFitDrop", new string[0]));
+          var restricted = new System.Collections.Generic.HashSet<string>(new string[] {
+            "connection","content-length","keep-alive","transfer-encoding","upgrade","te","trailer",
+            "proxy-connection","proxy-authenticate","proxy-authorization","expect" });
+          foreach (var h in context.Request.Headers) {
+            string n = (h.Key ?? "").ToLower();
+            if (n.StartsWith("x-rdwr-")) { continue; }
+            if (kept.Contains(n) || drop.Contains(n) || restricted.Contains(n)) { continue; }
+            fixedBytes += n.Length + System.Text.Encoding.UTF8.GetByteCount(string.Join(",", h.Value ?? new string[0])) + 4;
+          }
+          long keptNameOverhead = 0; long curKeptVal = 0;
+          foreach (var n in names) { keptNameOverhead += n.Length + 4; curKeptVal += cappedLen[n]; }
+          int Lcap = int.MaxValue;
+          if (fixedBytes + keptNameOverhead + curKeptVal > maxBlock) {
+            long allowedKeptVal = maxBlock - fixedBytes - keptNameOverhead;
+            if (allowedKeptVal < 0) { allowedKeptVal = 0; }
+            int lo = 0, hi = 0;
+            foreach (var n in names) { if (cappedLen[n] > hi) { hi = cappedLen[n]; } }
+            while (lo < hi) {
+              int mid = (lo + hi + 1) / 2;
+              long sum = 0;
+              foreach (var n in names) { sum += cappedLen[n] < mid ? cappedLen[n] : mid; }
+              if (sum <= allowedKeptVal) { lo = mid; } else { hi = mid - 1; }
+            }
+            Lcap = lo;
+          }
+          foreach (var n in names) {
+            int budget = cappedLen[n] < Lcap ? cappedLen[n] : Lcap;
+            if (budget < 0) { budget = 0; }
+            int origBytes = System.Text.Encoding.UTF8.GetByteCount(vals[n]);
+            if (origBytes <= budget && origBytes <= lineBudget[n]) { continue; }
+            string cv;
+            if (n == "cookie") {
+              var sb = new System.Text.StringBuilder();
+              foreach (var c in cookieOrdered) {
+                string next = sb.Length == 0 ? c : sb.ToString() + "; " + c;
+                if (System.Text.Encoding.UTF8.GetByteCount(next) > budget) { continue; }
+                if (sb.Length > 0) { sb.Append("; "); }
+                sb.Append(c);
+              }
+              if (sb.Length == 0 && cookieOrdered.Count > 0) {
+                string f = cookieOrdered[0];
+                int m = f.Length < budget ? f.Length : budget;
+                while (m > 0 && System.Text.Encoding.UTF8.GetByteCount(f.Substring(0, m)) > budget) { m--; }
+                cv = f.Substring(0, m);
+              } else { cv = sb.ToString(); }
+            } else {
+              int m = vals[n].Length < budget ? vals[n].Length : budget;
+              while (m > 0 && System.Text.Encoding.UTF8.GetByteCount(vals[n].Substring(0, m)) > budget) { m--; }
+              cv = vals[n].Substring(0, m);
+            }
+            cut.Add(n + "\u0001" + cv);
+          }
+          return cut.ToArray();
+        }" />
+        <set-variable name="rdwrKeptCutReport" value="@{
+          var a = (string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]);
+          if (a.Length == 0) { return ""; }
+          var ns = new System.Collections.Generic.List<string>();
+          foreach (var e in a) { int s = e.IndexOf('\u0001'); ns.Add(s > 0 ? e.Substring(0, s) : e); }
+          ns.Sort();
+          return a.Length + " header(s) (" + string.Join(", ", ns) + ")";
+        }" />
+        <set-variable name="rdwrCipFitName" value="@{
+          string h = ((string)context.Variables.GetValueOrDefault("configuredHeaderNameForClientIp","##DISABLED##") ?? "").Trim();
+          if (h.Length == 0 || h.ToLower() == "##disabled##") { return "X-Forwarded-For"; }
+          return h;
+        }" />
+        <set-variable name="rdwrCipFitKey" value="@(((string)context.Variables["rdwrCipFitName"]).ToLower())" />
+        <!-- Per-header cut action + value as scalars (a set-variable may return only a simple
+             type or an array). Action is "override" only when a cut exists, else "skip" (leave
+             the copied header) or "delete" (header absent). -->
+        <set-variable name="rdwrCutAct_cookie" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); bool f=false; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="cookie") { f=true; break; } } return f ? "override" : (context.Request.Headers.ContainsKey("Cookie") ? "skip" : "delete"); }" />
+        <set-variable name="rdwrCutVal_cookie" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="cookie") { return e.Substring(s+1); } } return ""; }" />
+        <set-variable name="rdwrCutAct_user-agent" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); bool f=false; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="user-agent") { f=true; break; } } return f ? "override" : (context.Request.Headers.ContainsKey("User-Agent") ? "skip" : "delete"); }" />
+        <set-variable name="rdwrCutVal_user-agent" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="user-agent") { return e.Substring(s+1); } } return ""; }" />
+        <set-variable name="rdwrCutAct_referer" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); bool f=false; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="referer") { f=true; break; } } return f ? "override" : (context.Request.Headers.ContainsKey("Referer") ? "skip" : "delete"); }" />
+        <set-variable name="rdwrCutVal_referer" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="referer") { return e.Substring(s+1); } } return ""; }" />
+        <set-variable name="rdwrCutAct_origin" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); bool f=false; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="origin") { f=true; break; } } return f ? "override" : (context.Request.Headers.ContainsKey("Origin") ? "skip" : "delete"); }" />
+        <set-variable name="rdwrCutVal_origin" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="origin") { return e.Substring(s+1); } } return ""; }" />
+        <set-variable name="rdwrCutAct_authorization" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); bool f=false; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="authorization") { f=true; break; } } return f ? "override" : (context.Request.Headers.ContainsKey("Authorization") ? "skip" : "delete"); }" />
+        <set-variable name="rdwrCutVal_authorization" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="authorization") { return e.Substring(s+1); } } return ""; }" />
+        <set-variable name="rdwrCutAct_content-type" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); bool f=false; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="content-type") { f=true; break; } } return f ? "override" : (context.Request.Headers.ContainsKey("Content-Type") ? "skip" : "delete"); }" />
+        <set-variable name="rdwrCutVal_content-type" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="content-type") { return e.Substring(s+1); } } return ""; }" />
+        <set-variable name="rdwrCutAct_accept" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); bool f=false; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="accept") { f=true; break; } } return f ? "override" : (context.Request.Headers.ContainsKey("Accept") ? "skip" : "delete"); }" />
+        <set-variable name="rdwrCutVal_accept" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="accept") { return e.Substring(s+1); } } return ""; }" />
+        <set-variable name="rdwrCutAct_accept-language" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); bool f=false; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="accept-language") { f=true; break; } } return f ? "override" : (context.Request.Headers.ContainsKey("Accept-Language") ? "skip" : "delete"); }" />
+        <set-variable name="rdwrCutVal_accept-language" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="accept-language") { return e.Substring(s+1); } } return ""; }" />
+        <set-variable name="rdwrCutAct_accept-encoding" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); bool f=false; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="accept-encoding") { f=true; break; } } return f ? "override" : (context.Request.Headers.ContainsKey("Accept-Encoding") ? "skip" : "delete"); }" />
+        <set-variable name="rdwrCutVal_accept-encoding" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="accept-encoding") { return e.Substring(s+1); } } return ""; }" />
+        <set-variable name="rdwrCutAct_x-forwarded-for" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); bool f=false; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="x-forwarded-for") { f=true; break; } } return f ? "override" : (context.Request.Headers.ContainsKey("X-Forwarded-For") ? "skip" : "delete"); }" />
+        <set-variable name="rdwrCutVal_x-forwarded-for" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="x-forwarded-for") { return e.Substring(s+1); } } return ""; }" />
+        <set-variable name="rdwrCutAct_forwarded" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); bool f=false; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="forwarded") { f=true; break; } } return f ? "override" : (context.Request.Headers.ContainsKey("Forwarded") ? "skip" : "delete"); }" />
+        <set-variable name="rdwrCutVal_forwarded" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="forwarded") { return e.Substring(s+1); } } return ""; }" />
+        <set-variable name="rdwrCutAct_x-real-ip" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); bool f=false; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="x-real-ip") { f=true; break; } } return f ? "override" : (context.Request.Headers.ContainsKey("X-Real-IP") ? "skip" : "delete"); }" />
+        <set-variable name="rdwrCutVal_x-real-ip" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="x-real-ip") { return e.Substring(s+1); } } return ""; }" />
+        <set-variable name="rdwrCutAct_x-requested-with" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); bool f=false; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="x-requested-with") { f=true; break; } } return f ? "override" : (context.Request.Headers.ContainsKey("X-Requested-With") ? "skip" : "delete"); }" />
+        <set-variable name="rdwrCutVal_x-requested-with" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)=="x-requested-with") { return e.Substring(s+1); } } return ""; }" />
+        <set-variable name="rdwrCutAct_cip" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); string k=(string)context.Variables["rdwrCipFitKey"]; string nm=(string)context.Variables["rdwrCipFitName"]; bool f=false; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)==k) { f=true; break; } } return f ? "override" : (context.Request.Headers.ContainsKey(nm) ? "skip" : "delete"); }" />
+        <set-variable name="rdwrCutVal_cip" value="@{ var a=(string[])context.Variables.GetValueOrDefault("rdwrKeptCut", new string[0]); string k=(string)context.Variables["rdwrCipFitKey"]; foreach (var e in a) { int s=e.IndexOf('\u0001'); if (s>0 && e.Substring(0,s)==k) { return e.Substring(s+1); } } return ""; }" />
+        <choose>
+          <when condition="@(((string)context.Variables["rdwrFitLeftOut"]).Length > 0 || (bool)context.Variables.GetValueOrDefault("rdwrTargetTruncated", false) || ((string)context.Variables.GetValueOrDefault("rdwrKeptCutReport","")).Length > 0)">
+            <trace source="securepath" severity="information">
+              <message>@{
+                string m = "the request is larger than a SecurePath inspection request can carry; the inspection copy only was reduced to fit (at most 100 header lines, 16384 bytes of headers, an 8192-byte request line), and the request to the backend is unchanged.";
+                if (((string)context.Variables["rdwrFitLeftOut"]).Length > 0) { m += " Client headers left out: " + (string)context.Variables["rdwrFitLeftOut"] + "."; }
+                if ((bool)context.Variables.GetValueOrDefault("rdwrTargetTruncated", false)) { m += " The last " + context.Variables.GetValueOrDefault("rdwrTargetDropped", 0) + " bytes of the request target were not sent for inspection; to refuse such requests instead, limit the request line length at your server or proxy."; }
+                if (((string)context.Variables.GetValueOrDefault("rdwrKeptCutReport","")).Length > 0) { m += " Kept headers shortened for inspection only (the application still receives the full value): " + (string)context.Variables["rdwrKeptCutReport"] + "."; }
+                return m;
+              }</message>
+            </trace>
+          </when>
+        </choose>
         <!-- ====== Call SecurePath (ignore-error: fail-open by policy) -->
         <choose>
           <when condition="@((bool)context.Variables.GetValueOrDefault("radwareOverrideBody", false))">
@@ -827,21 +1163,222 @@
               <set-header name="X-Rdwr-Plugin-Info" exists-action="override">
                 <value>@((string)context.Variables["pluginInfo"])</value>
               </set-header>
-              <!-- Sent only when the body was truncated: a null value inside send-request still
-                   emits an empty header, so the set-header itself is conditional -->
-              <choose>
-                <when condition="@((bool)context.Variables.GetValueOrDefault("setPartialBodyHeader", false))">
-                  <set-header name="X-Rdwr-Partial-Body" exists-action="override">
-                    <value>true</value>
-                  </set-header>
-                </when>
-              </choose>
+              <!-- Sent only when the body was truncated. A null value inside send-request still
+                   emits an empty header, and send-request accepts no choose element, so the
+                   header's exists-action removes it when the body was not truncated. -->
+              <set-header name="X-Rdwr-Partial-Body" exists-action="@((bool)context.Variables.GetValueOrDefault("setPartialBodyHeader", false) ? "override" : "delete")">
+                <value>true</value>
+              </set-header>
               <set-header name="X-Rdwr-Connector-Proto" exists-action="override">
                 <value>2</value>
               </set-header>
               <set-header name="X-Rdwr-Connector-Stage" exists-action="override">
                 <value>request</value>
               </set-header>
+              <!-- OI-36: a kept header whose single line would exceed the endpoint limit is sent
+                   CUT here (inspection copy only); absent or fitting headers pass through. -->
+              <set-header name="Cookie" exists-action="@((string)context.Variables["rdwrCutAct_cookie"])">
+                <value>@((string)context.Variables["rdwrCutVal_cookie"])</value>
+              </set-header>
+              <set-header name="User-Agent" exists-action="@((string)context.Variables["rdwrCutAct_user-agent"])">
+                <value>@((string)context.Variables["rdwrCutVal_user-agent"])</value>
+              </set-header>
+              <set-header name="Referer" exists-action="@((string)context.Variables["rdwrCutAct_referer"])">
+                <value>@((string)context.Variables["rdwrCutVal_referer"])</value>
+              </set-header>
+              <set-header name="Origin" exists-action="@((string)context.Variables["rdwrCutAct_origin"])">
+                <value>@((string)context.Variables["rdwrCutVal_origin"])</value>
+              </set-header>
+              <set-header name="Authorization" exists-action="@((string)context.Variables["rdwrCutAct_authorization"])">
+                <value>@((string)context.Variables["rdwrCutVal_authorization"])</value>
+              </set-header>
+              <set-header name="Content-Type" exists-action="@((string)context.Variables["rdwrCutAct_content-type"])">
+                <value>@((string)context.Variables["rdwrCutVal_content-type"])</value>
+              </set-header>
+              <set-header name="Accept" exists-action="@((string)context.Variables["rdwrCutAct_accept"])">
+                <value>@((string)context.Variables["rdwrCutVal_accept"])</value>
+              </set-header>
+              <set-header name="Accept-Language" exists-action="@((string)context.Variables["rdwrCutAct_accept-language"])">
+                <value>@((string)context.Variables["rdwrCutVal_accept-language"])</value>
+              </set-header>
+              <set-header name="Accept-Encoding" exists-action="@((string)context.Variables["rdwrCutAct_accept-encoding"])">
+                <value>@((string)context.Variables["rdwrCutVal_accept-encoding"])</value>
+              </set-header>
+              <set-header name="X-Forwarded-For" exists-action="@((string)context.Variables["rdwrCutAct_x-forwarded-for"])">
+                <value>@((string)context.Variables["rdwrCutVal_x-forwarded-for"])</value>
+              </set-header>
+              <set-header name="Forwarded" exists-action="@((string)context.Variables["rdwrCutAct_forwarded"])">
+                <value>@((string)context.Variables["rdwrCutVal_forwarded"])</value>
+              </set-header>
+              <set-header name="X-Real-IP" exists-action="@((string)context.Variables["rdwrCutAct_x-real-ip"])">
+                <value>@((string)context.Variables["rdwrCutVal_x-real-ip"])</value>
+              </set-header>
+              <set-header name="X-Requested-With" exists-action="@((string)context.Variables["rdwrCutAct_x-requested-with"])">
+                <value>@((string)context.Variables["rdwrCutVal_x-requested-with"])</value>
+              </set-header>
+              <set-header name="@((string)context.Variables["rdwrCipFitName"])" exists-action="@((string)context.Variables["rdwrCutAct_cip"])">
+                <value>@((string)context.Variables["rdwrCutVal_cip"])</value>
+              </set-header>
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[0])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[1])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[2])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[3])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[4])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[5])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[6])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[7])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[8])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[9])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[10])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[11])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[12])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[13])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[14])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[15])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[16])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[17])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[18])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[19])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[20])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[21])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[22])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[23])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[24])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[25])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[26])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[27])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[28])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[29])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[30])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[31])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[32])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[33])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[34])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[35])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[36])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[37])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[38])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[39])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[40])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[41])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[42])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[43])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[44])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[45])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[46])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[47])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[48])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[49])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[50])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[51])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[52])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[53])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[54])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[55])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[56])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[57])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[58])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[59])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[60])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[61])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[62])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[63])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[64])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[65])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[66])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[67])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[68])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[69])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[70])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[71])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[72])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[73])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[74])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[75])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[76])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[77])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[78])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[79])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[80])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[81])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[82])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[83])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[84])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[85])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[86])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[87])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[88])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[89])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[90])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[91])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[92])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[93])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[94])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[95])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[96])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[97])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[98])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[99])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[100])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[101])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[102])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[103])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[104])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[105])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[106])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[107])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[108])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[109])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[110])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[111])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[112])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[113])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[114])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[115])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[116])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[117])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[118])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[119])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[120])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[121])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[122])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[123])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[124])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[125])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[126])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[127])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[128])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[129])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[130])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[131])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[132])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[133])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[134])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[135])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[136])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[137])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[138])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[139])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[140])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[141])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[142])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[143])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[144])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[145])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[146])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[147])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[148])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[149])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[150])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[151])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[152])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[153])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[154])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[155])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[156])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[157])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[158])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[159])" exists-action="delete" />
               <set-body>@((byte[])context.Variables["radwareReqBodyBytes"])</set-body>
             </send-request>
           </when>
@@ -873,21 +1410,222 @@
               <set-header name="X-Rdwr-Plugin-Info" exists-action="override">
                 <value>@((string)context.Variables["pluginInfo"])</value>
               </set-header>
-              <!-- Sent only when the body was truncated: a null value inside send-request still
-                   emits an empty header, so the set-header itself is conditional -->
-              <choose>
-                <when condition="@((bool)context.Variables.GetValueOrDefault("setPartialBodyHeader", false))">
-                  <set-header name="X-Rdwr-Partial-Body" exists-action="override">
-                    <value>true</value>
-                  </set-header>
-                </when>
-              </choose>
+              <!-- Sent only when the body was truncated. A null value inside send-request still
+                   emits an empty header, and send-request accepts no choose element, so the
+                   header's exists-action removes it when the body was not truncated. -->
+              <set-header name="X-Rdwr-Partial-Body" exists-action="@((bool)context.Variables.GetValueOrDefault("setPartialBodyHeader", false) ? "override" : "delete")">
+                <value>true</value>
+              </set-header>
               <set-header name="X-Rdwr-Connector-Proto" exists-action="override">
                 <value>2</value>
               </set-header>
               <set-header name="X-Rdwr-Connector-Stage" exists-action="override">
                 <value>request</value>
               </set-header>
+              <!-- OI-36: a kept header whose single line would exceed the endpoint limit is sent
+                   CUT here (inspection copy only); absent or fitting headers pass through. -->
+              <set-header name="Cookie" exists-action="@((string)context.Variables["rdwrCutAct_cookie"])">
+                <value>@((string)context.Variables["rdwrCutVal_cookie"])</value>
+              </set-header>
+              <set-header name="User-Agent" exists-action="@((string)context.Variables["rdwrCutAct_user-agent"])">
+                <value>@((string)context.Variables["rdwrCutVal_user-agent"])</value>
+              </set-header>
+              <set-header name="Referer" exists-action="@((string)context.Variables["rdwrCutAct_referer"])">
+                <value>@((string)context.Variables["rdwrCutVal_referer"])</value>
+              </set-header>
+              <set-header name="Origin" exists-action="@((string)context.Variables["rdwrCutAct_origin"])">
+                <value>@((string)context.Variables["rdwrCutVal_origin"])</value>
+              </set-header>
+              <set-header name="Authorization" exists-action="@((string)context.Variables["rdwrCutAct_authorization"])">
+                <value>@((string)context.Variables["rdwrCutVal_authorization"])</value>
+              </set-header>
+              <set-header name="Content-Type" exists-action="@((string)context.Variables["rdwrCutAct_content-type"])">
+                <value>@((string)context.Variables["rdwrCutVal_content-type"])</value>
+              </set-header>
+              <set-header name="Accept" exists-action="@((string)context.Variables["rdwrCutAct_accept"])">
+                <value>@((string)context.Variables["rdwrCutVal_accept"])</value>
+              </set-header>
+              <set-header name="Accept-Language" exists-action="@((string)context.Variables["rdwrCutAct_accept-language"])">
+                <value>@((string)context.Variables["rdwrCutVal_accept-language"])</value>
+              </set-header>
+              <set-header name="Accept-Encoding" exists-action="@((string)context.Variables["rdwrCutAct_accept-encoding"])">
+                <value>@((string)context.Variables["rdwrCutVal_accept-encoding"])</value>
+              </set-header>
+              <set-header name="X-Forwarded-For" exists-action="@((string)context.Variables["rdwrCutAct_x-forwarded-for"])">
+                <value>@((string)context.Variables["rdwrCutVal_x-forwarded-for"])</value>
+              </set-header>
+              <set-header name="Forwarded" exists-action="@((string)context.Variables["rdwrCutAct_forwarded"])">
+                <value>@((string)context.Variables["rdwrCutVal_forwarded"])</value>
+              </set-header>
+              <set-header name="X-Real-IP" exists-action="@((string)context.Variables["rdwrCutAct_x-real-ip"])">
+                <value>@((string)context.Variables["rdwrCutVal_x-real-ip"])</value>
+              </set-header>
+              <set-header name="X-Requested-With" exists-action="@((string)context.Variables["rdwrCutAct_x-requested-with"])">
+                <value>@((string)context.Variables["rdwrCutVal_x-requested-with"])</value>
+              </set-header>
+              <set-header name="@((string)context.Variables["rdwrCipFitName"])" exists-action="@((string)context.Variables["rdwrCutAct_cip"])">
+                <value>@((string)context.Variables["rdwrCutVal_cip"])</value>
+              </set-header>
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[0])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[1])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[2])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[3])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[4])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[5])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[6])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[7])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[8])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[9])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[10])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[11])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[12])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[13])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[14])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[15])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[16])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[17])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[18])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[19])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[20])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[21])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[22])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[23])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[24])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[25])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[26])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[27])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[28])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[29])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[30])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[31])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[32])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[33])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[34])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[35])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[36])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[37])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[38])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[39])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[40])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[41])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[42])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[43])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[44])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[45])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[46])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[47])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[48])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[49])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[50])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[51])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[52])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[53])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[54])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[55])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[56])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[57])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[58])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[59])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[60])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[61])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[62])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[63])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[64])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[65])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[66])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[67])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[68])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[69])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[70])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[71])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[72])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[73])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[74])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[75])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[76])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[77])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[78])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[79])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[80])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[81])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[82])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[83])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[84])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[85])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[86])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[87])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[88])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[89])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[90])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[91])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[92])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[93])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[94])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[95])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[96])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[97])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[98])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[99])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[100])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[101])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[102])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[103])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[104])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[105])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[106])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[107])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[108])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[109])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[110])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[111])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[112])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[113])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[114])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[115])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[116])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[117])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[118])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[119])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[120])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[121])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[122])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[123])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[124])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[125])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[126])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[127])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[128])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[129])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[130])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[131])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[132])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[133])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[134])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[135])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[136])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[137])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[138])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[139])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[140])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[141])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[142])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[143])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[144])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[145])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[146])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[147])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[148])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[149])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[150])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[151])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[152])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[153])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[154])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[155])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[156])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[157])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[158])" exists-action="delete" />
+              <set-header name="@(((string[])context.Variables["rdwrFitDropPad"])[159])" exists-action="delete" />
             </send-request>
           </otherwise>
         </choose>
@@ -1021,16 +1759,35 @@
               return h[0] ?? "";
             }" />
 
-            <!-- Cache the SecurePath response body (the stream can only be read once) -->
-            <set-variable name="radwareResponseBody" value="@{
-              try {
-                return ((IResponse)context.Variables["radwareResponse"]).Body.As<string>();
-              } catch { return ""; }
+            <!-- SecurePath's response body is read only when the verdict uses it: a block (JSON relayed
+                 as sent, the transaction ID for the block page, a custom Bot Manager body). The
+                 inspection call's timeout covers the answer's status and headers; reading a body is
+                 not bounded by it, so an allow or a fail-open never waits on a body it does not need. -->
+            <set-variable name="rdwrVerdictNeedsBody" value="@{
+              // Running from on-error (a request API Management answered itself), the body is never
+              // read: an error there cannot be handled and would replace API Management's response
+              // with a 500. A block is then served with the connector's block page.
+              if ((bool)context.Variables.GetValueOrDefault("rdwrUnrouted", false)) { return false; }
+              int st = (int)context.Variables["rwStatus"];
+              if (st == 403) { return true; }
+              if (st == 200) {
+                if (((string)context.Variables["radwareCt"]).StartsWith("application/json")) { return true; }
+                if ((string)context.Variables["oopRequestStatusHeader"] == "allowed") { return false; }
+                return !(bool)context.Variables.GetValueOrDefault("uzmcrHeaderPresent", false);
+              }
+              if (st >= 500 || st == 301 || st == 302) { return false; }
+              // another status is relayed only as a custom Bot Manager block response
+              if (!(bool)context.Variables.GetValueOrDefault("rdwrBotManagerEnabled", false)) { return false; }
+              string raw = ((string)context.Variables.GetValueOrDefault("rdwrCustomBotBlockStatuses", "") ?? "").Trim().ToLower();
+              return !(raw == "" || raw == "-" || raw == "disabled" || raw == "off" || raw == "false" || raw == "none" || raw == "~" || raw == "##disabled##");
             }" />
-
-            <!-- ====== Pre-compute custom block page (if enabled) ====== -->
+            <!-- ====== The connector's block page ======
+                 Rendered before SecurePath's body is read: it is what a block serves when that body
+                 is not read (a request API Management answered itself) or cannot be read (the on-error
+                 section serves it then, instead of an error). The transaction ID is added from
+                 SecurePath's body when the body is read. -->
             <set-variable name="rdwrCustomBlockPageEnabled" value="@(true)" />
-            <set-variable name="rdwrRenderedBlockPage" value="@{
+            <set-variable name="rdwrBlockPageBase" value="@{
               string template = @"<!DOCTYPE html>
 <html>
 <head><title>403 Forbidden</title>
@@ -1048,42 +1805,63 @@
   <p class=""transaction"">Transaction ID: [%transaction_id%]</p>
   <p class=""timestamp"">[%timestamp%]</p>
 </div></body></html>";
-              // Extract transaction ID from SP body
-              string transId = "";
-              try {
-                string body = (string)context.Variables.GetValueOrDefault("radwareResponseBody", "");
-                if (!string.IsNullOrEmpty(body)) {
-                  // Pattern 1: _event_transid='...'
-                  int idx = body.IndexOf("_event_transid='");
-                  if (idx >= 0) {
-                    int start = idx + 16;
-                    int end = body.IndexOf("'", start);
-                    if (end > start) { transId = body.Substring(start, end - start); }
-                  }
-                  // Pattern 2: "transid":"..."
-                  if (string.IsNullOrEmpty(transId)) {
-                    idx = body.IndexOf("\"transid\"");
-                    if (idx >= 0) {
-                      int qStart = body.IndexOf("\"", idx + 9 + body.Substring(idx + 9).IndexOf(":") + 1);
-                      if (qStart >= 0) {
-                        int qEnd = body.IndexOf("\"", qStart + 1);
-                        if (qEnd > qStart + 1) { transId = body.Substring(qStart + 1, qEnd - qStart - 1); }
-                      }
-                    }
-                  }
-                }
-              } catch {}
-              // Build rendered page with token substitution
-              string rendered = template
-                .Replace("[%transaction_id%]", transId)
+              return template
                 .Replace("[%client_ip%]", context.Request.IpAddress ?? "")
                 .Replace("[%request_url%]", context.Request.Url.Path + context.Request.Url.QueryString)
                 .Replace("[%request_method%]", context.Request.Method)
                 .Replace("[%request_host%]", context.Request.Headers.GetValueOrDefault("Host", new[]{""})[0])
                 .Replace("[%timestamp%]", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"))
                 .Replace("[%app_id%]", (string)context.Variables.GetValueOrDefault("rdwrAppId", ""));
-              return rendered;
             }" />
+            <set-variable name="rdwrRenderedBlockPage" value="@(((string)context.Variables["rdwrBlockPageBase"]).Replace("[%transaction_id%]", ""))" />
+            <set-variable name="rdwrSpBodyRead" value="@(false)" />
+            <choose>
+              <when condition="@((bool)context.Variables["rdwrVerdictNeedsBody"])">
+                <!-- The status the client receives if the body cannot be read: the on-error section
+                     serves the block page with it (rdwrBlockBodyPending stays set only if the read
+                     below fails). -->
+                <set-variable name="rdwrBlockBodyPending" value="@{
+                  int st = (int)context.Variables["rwStatus"];
+                  return (st == 200 || st == 403) ? 403 : st;
+                }" />
+                <!-- Cache the SecurePath response body (the stream can only be read once) -->
+                <set-variable name="radwareResponseBody" value="@{
+                  try {
+                    return ((IResponse)context.Variables["radwareResponse"]).Body.As<string>();
+                  } catch { return ""; }
+                }" />
+                <set-variable name="rdwrSpBodyRead" value="@(true)" />
+                <set-variable name="rdwrBlockBodyPending" value="@(0)" />
+                <set-variable name="rdwrRenderedBlockPage" value="@{
+                  // Extract transaction ID from SP body
+                  string transId = "";
+                  try {
+                    string body = (string)context.Variables.GetValueOrDefault("radwareResponseBody", "");
+                    if (!string.IsNullOrEmpty(body)) {
+                      // Pattern 1: _event_transid='...'
+                      int idx = body.IndexOf("_event_transid='");
+                      if (idx >= 0) {
+                        int start = idx + 16;
+                        int end = body.IndexOf("'", start);
+                        if (end > start) { transId = body.Substring(start, end - start); }
+                      }
+                      // Pattern 2: "transid":"..."
+                      if (string.IsNullOrEmpty(transId)) {
+                        idx = body.IndexOf("\"transid\"");
+                        if (idx >= 0) {
+                          int qStart = body.IndexOf("\"", idx + 9 + body.Substring(idx + 9).IndexOf(":") + 1);
+                          if (qStart >= 0) {
+                            int qEnd = body.IndexOf("\"", qStart + 1);
+                            if (qEnd > qStart + 1) { transId = body.Substring(qStart + 1, qEnd - qStart - 1); }
+                          }
+                        }
+                      }
+                    }
+                  } catch {}
+                  return ((string)context.Variables["rdwrBlockPageBase"]).Replace("[%transaction_id%]", transId);
+                }" />
+              </when>
+            </choose>
 
             <!-- ====== Fail-open: the inspection endpoint answered 5xx ====== -->
             <!-- Every 5xx fails open to the origin: a 5xx is an endpoint problem, never a verdict.
@@ -1103,7 +1881,7 @@
                 <choose>
                   <!-- JSON block from SecurePath -> map to 403 -->
                   <when condition="@(((string)context.Variables["radwareCt"]).StartsWith("application/json"))">
-                    <set-variable name="rdwrReturnedBody" value="@((string)context.Variables.GetValueOrDefault("radwareResponseBody", ""))" />
+                    <set-variable name="rdwrReturnedBody" value="@((bool)context.Variables.GetValueOrDefault("rdwrSpBodyRead", false) ? (string)context.Variables.GetValueOrDefault("radwareResponseBody", "") : (string)context.Variables.GetValueOrDefault("rdwrRenderedBlockPage", ""))" />
                     <!-- Response-phase log for the blocked request -->
                     <choose>
                       <when condition="@{
@@ -1131,7 +1909,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.4.0"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.0"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -1167,7 +1945,7 @@
                     <return-response>
                       <set-status code="403" reason="Forbidden" />
                       <set-header name="Content-Type" exists-action="override">
-                        <value>application/json</value>
+                        <value>@((bool)context.Variables.GetValueOrDefault("rdwrSpBodyRead", false) ? "application/json" : "text/html; charset=UTF-8")</value>
                       </set-header>
                       <set-header name="Set-Cookie" exists-action="append">
                         <value>@{
@@ -1217,7 +1995,7 @@
                           return string.IsNullOrEmpty(v) ? null : v;
                         }</value>
                       </set-header>
-                      <set-body>@((string)context.Variables.GetValueOrDefault("radwareResponseBody", ""))</set-body>
+                      <set-body>@((string)context.Variables.GetValueOrDefault("rdwrReturnedBody", ""))</set-body>
                     </return-response>
                   </when>
                   <!-- Allowed explicitly -->
@@ -1265,7 +2043,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.4.0"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.0"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -1372,10 +2150,25 @@
                   string loc = ((string)context.Variables.GetValueOrDefault("radwareLocationHeader","")) ?? "";
                   return loc.ToLower().Contains("wrong-api-key.oop.radwarecloud.com");
                 }" />
+                <!-- A redirect needs somewhere to go: a Location that is absent, blank or carries a
+                     control character cannot be relayed as a valid response, so such an answer is
+                     served without a verdict (fail open) and reported, as in the other connectors. -->
+                <set-variable name="isUsableRedirect" value="@{
+                  string loc = ((string)context.Variables.GetValueOrDefault("radwareLocationHeader","")) ?? "";
+                  if (loc.Trim().Length == 0) { return false; }
+                  foreach (char c in loc) { if (c < (char)0x20 || c == (char)0x7f) { return false; } }
+                  return true;
+                }" />
                 <choose>
                   <when condition="@((bool)context.Variables.GetValueOrDefault("isWrongApiKeyRedirect", false))">
                     <set-variable name="radwareDiag" value="@("wrong_api_key_redirect")" />
                     <!-- fail-open -->
+                  </when>
+                  <when condition="@(!(bool)context.Variables.GetValueOrDefault("isUsableRedirect", false))">
+                    <set-variable name="radwareDiag" value="@($"unusable_redirect_{(int)context.Variables["rwStatus"]}")" />
+                    <trace source="securepath" severity="error">
+                      <message>@("SecurePath answered " + ((int)context.Variables["rwStatus"]).ToString() + " without a usable Location header; request served without a verdict (fail open)")</message>
+                    </trace>
                   </when>
                   <otherwise>
                     <set-variable name="radwareDiag" value="@($"redirect_issued_{(int)context.Variables["rwStatus"]}")" />
@@ -1406,7 +2199,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.4.0"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.0"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -1509,7 +2302,7 @@
                 <set-variable name="rdwrReturnedBody" value="@{
               bool enabled = (bool)context.Variables.GetValueOrDefault("rdwrCustomBlockPageEnabled", false);
               string ct = (string)context.Variables.GetValueOrDefault("radwareCt", "text/html");
-              bool isJson = ct.StartsWith("application/json");
+              bool isJson = ct.StartsWith("application/json") && (bool)context.Variables.GetValueOrDefault("rdwrSpBodyRead", false);
               if (enabled && !isJson) { return (string)context.Variables.GetValueOrDefault("rdwrRenderedBlockPage", ""); }
               return (string)context.Variables.GetValueOrDefault("radwareResponseBody", "");
             }" />
@@ -1540,7 +2333,7 @@
                         <value>log</value>
                       </set-header>
                       <set-header name="x-rdwr-plugin-info" exists-action="override">
-                        <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.4.0"))</value>
+                        <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.0"))</value>
                       </set-header>
                       <set-header name="x-rdwr-app-id" exists-action="override">
                         <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -1579,7 +2372,7 @@
                     <value>@{
                       bool enabled = (bool)context.Variables.GetValueOrDefault("rdwrCustomBlockPageEnabled", false);
                       string ct = (string)context.Variables.GetValueOrDefault("radwareCt", "text/html");
-                      bool isJson = ct.StartsWith("application/json");
+                      bool isJson = ct.StartsWith("application/json") && (bool)context.Variables.GetValueOrDefault("rdwrSpBodyRead", false);
                       return (enabled && !isJson) ? "text/html; charset=UTF-8" : ct;
                     }</value>
                   </set-header>
@@ -1634,7 +2427,7 @@
                   <set-body>@{
                     bool enabled = (bool)context.Variables.GetValueOrDefault("rdwrCustomBlockPageEnabled", false);
                     string ct = (string)context.Variables.GetValueOrDefault("radwareCt", "text/html");
-                    bool isJson = ct.StartsWith("application/json");
+                    bool isJson = ct.StartsWith("application/json") && (bool)context.Variables.GetValueOrDefault("rdwrSpBodyRead", false);
                     if (enabled && !isJson) {
                       return (string)context.Variables.GetValueOrDefault("rdwrRenderedBlockPage", "");
                     }
@@ -1713,7 +2506,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.4.0"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.0"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -1879,12 +2672,30 @@
 
     <!-- ====== End of the inspected path ====== -->
 
-    <!-- Propagate diagnostics to backend for observability -->
+    <!-- Propagate diagnostics to backend for observability. When this fragment runs from the
+         on-error section (rdwrUnrouted: API Management rejected the request before any policy),
+         there is no backend and a header set here would reach the client, so the value goes to
+         the trace instead. -->
     <choose>
-      <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("radwareDiag", "")))">
+      <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("radwareDiag", "")) && !(bool)context.Variables.GetValueOrDefault("rdwrUnrouted", false))">
         <set-header name="X-Rdwr-Diag" exists-action="override">
           <value>@((string)context.Variables["radwareDiag"])</value>
         </set-header>
+      </when>
+      <when condition="@{
+        string d = (string)context.Variables.GetValueOrDefault("radwareDiag", "");
+        return !string.IsNullOrEmpty(d) && (bool)context.Variables.GetValueOrDefault("rdwrUnrouted", false)
+          && (d.StartsWith("sideband_error") || d == "wrong_api_key_redirect" || d.StartsWith("unexpected_status_") || d.StartsWith("unusable_redirect_")
+              || d == "no_app_mapping" || d == "config_incomplete" || d == "app_map_invalid");
+      }">
+        <trace source="securepath" severity="error">
+          <message>@("request rejected by API Management before any policy (" + (context.LastError != null ? context.LastError.Reason : "") + ") was not inspected: " + (string)context.Variables["radwareDiag"] + "; API Management's own response was returned")</message>
+        </trace>
+      </when>
+      <when condition="@(!string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("radwareDiag", "")) && (bool)context.Variables.GetValueOrDefault("rdwrUnrouted", false))">
+        <trace source="securepath" severity="information">
+          <message>@("request rejected by API Management before any policy (" + (context.LastError != null ? context.LastError.Reason : "") + ") inspected: " + (string)context.Variables["radwareDiag"])</message>
+        </trace>
       </when>
     </choose>
 </fragment>

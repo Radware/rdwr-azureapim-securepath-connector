@@ -11,5 +11,12 @@
     </outbound>
     <on-error>
         <include-fragment fragment-id="securepath-onerror" />
+        <choose>
+            <when condition="@((bool)context.Variables.GetValueOrDefault("rdwrUnrouted", false))">
+                <include-fragment fragment-id="securepath-app-map" />
+                <include-fragment fragment-id="securepath-inbound" />
+                <include-fragment fragment-id="securepath-outbound" />
+            </when>
+        </choose>
     </on-error>
 </policies>

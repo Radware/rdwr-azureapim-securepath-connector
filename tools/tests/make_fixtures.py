@@ -6,7 +6,7 @@ import os
 import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(HERE, "..", "..", "rdwr-azureapim-securepath-connector-v1.4.xml")
+SRC = os.path.join(HERE, "..", "..", "rdwr-azureapim-securepath-connector-v1.5.xml")
 OUT = os.path.join(HERE, "fixtures", "merged_jwt_first.xml")
 JWT = """        <validate-jwt header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized">
             <openid-config url="https://login.example.com/tenant/v2.0/.well-known/openid-configuration" />

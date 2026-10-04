@@ -1,5 +1,179 @@
 # Release Notes — Radware SecurePath Connector for Azure API Management
 
+## v1.5.0 (2026-10-04)
+
+**The policy changed in this release, and every v1.4.0 install must be updated**, in the order given
+in "Upgrading from v1.4.0" at the end of this section: API Management no longer accepts part of the
+v1.4.0 policy. What is new: the connector inspects the requests API Management answers itself
+(no matching operation, missing or invalid subscription key); SecurePath's answer can no longer hold
+an allowed request beyond `rdwr-app-ep-timeout-seconds`; the response-phase log no longer holds a
+response to measure it; and configuration values the connector cannot use are reported instead of
+failing requests. `x-rdwr-plugin-info` becomes `700-v1.5.0`.
+
+### The policy is accepted by API Management again
+
+API Management no longer accepts a `<choose>` element inside `send-request` or
+`send-one-way-request`, which the v1.4.0 fragments and policy document used for the headers that are
+sent only in some cases. On an instance this affects:
+
+- registering the v1.4.0 fragments, or saving the v1.4.0 policy document, is refused
+  (*"The element 'send-request' has invalid child element 'choose'"*), so a new v1.4.0 install cannot
+  be completed;
+- on an instance that already runs v1.4.0, a change to any Named Value the inbound fragment reads —
+  the API key, `rdwr-bot-manager-enabled`, the application map, a timeout — is refused with
+  *"... breaks policy fragments ..."*, and so is re-registering any single fragment.
+
+This release uses no such element: `x-rdwr-partial-body`, the `x-rdwr-o2h-*` origin headers and the
+body-sample headers are added or left out by their `exists-action`. Executed on Standard v2 and
+Developer instances: the four fragments, the All APIs policy and the policy document are accepted,
+and Named Values can be changed afterwards.
+
+### Requests API Management answers itself are inspected
+
+API Management answers some requests before any policy runs: a method or path that matches no
+operation (404, including a path that matches no API), and a missing or invalid subscription key
+(401). The connector now inspects them from the `<on-error>` section: they appear in the Radware
+Cloud portal, a SecurePath block is enforced, an allowed request receives API Management's own
+response unchanged, and the response-phase log records API Management's status. It applies to the
+fragment install forms — every request at All APIs scope (Form 1), the API's own requests in an API
+or product policy (Form 2); the Form 3 document does not include it. If SecurePath cannot be
+reached or answers with an error, API Management's own 404 or 401 is returned unchanged, within
+`rdwr-app-ep-timeout-seconds`, and the trace says the request was not inspected.
+
+### SecurePath's answer cannot hold an allowed request beyond the timeout
+
+`rdwr-app-ep-timeout-seconds` bounds the inspection call up to SecurePath's status and headers. The
+connector also read the body of every SecurePath answer, so an answer whose body arrived slowly, or
+whose connection stalled after the headers, held the request well beyond the timeout and could end
+it with a 500. The body is now read only for a block, which uses it (the JSON SecurePath sends, or
+the transaction ID on the block page). An allow and every fail-open complete within the timeout.
+
+### The response-phase log no longer holds the response
+
+To measure the response, the response-phase log read the whole response body, which makes API
+Management hold the response until the last byte has arrived before the client receives the first
+one: a stream (server-sent events, a long poll) could be delayed to its end, and a large download
+was held in the gateway's memory. Sizes now come from the origin's `Content-Length`; a response
+without one (chunked or streamed) is reported with a body size of 0. A body sample, when SecurePath
+asks for one, is taken only from a response that declares a length within
+`rdwr-body-max-size-bytes`. The log no longer carries empty `content-type` and
+`content-transfer-encoding` headers when it has no body sample.
+
+### Configuration the connector cannot use is reported at once
+
+An inspection endpoint or application-map entry the connector cannot use no longer costs the request
+an error or a wait: the request is served uninspected at once and the condition is reported
+(`X-Rdwr-Diag: config_incomplete` or `app_map_invalid`, an error line in the trace, and the install
+check):
+
+- an inspection endpoint carrying a port (`….oop.radwarecloud.net:443`), in `rdwr-app-ep-addr` or a
+  map entry, and a map-entry `port` outside 1–65535 — previously a 500 on every affected request;
+- an inspection endpoint carrying a path (`….oop.radwarecloud.net/`) — previously every request
+  waited out `rdwr-app-ep-timeout-seconds`;
+- an inspection endpoint carrying a scheme (`https://…`), and credentials containing control
+  characters — previously the inspection call failed on every request.
+
+The install check reports the endpoint forms as `L08` / `L10`. A negative `rdwr-app-ep-port`,
+`rdwr-app-ep-timeout-seconds` or size value, or a port above 65535, is treated like any value the
+connector cannot read: the documented default is used and the trace names the value.
+
+### A SecurePath redirect without a usable Location
+
+A `301` or `302` verdict without a `Location` header (or with a blank one, or one carrying control
+characters) has nowhere to send the client. It is now served without a verdict and reported
+(`X-Rdwr-Diag: unusable_redirect_<status>` and an error line in the trace), as the other SecurePath
+connectors do. Previously the client received a redirect with an empty `Location`.
+
+### Request bodies of more types are inspected
+
+- A **chunked** request body (no declared length) is sent for inspection only when its content type
+  is listed in `chunked-request-allowed-content-types`. The default now lists the common API body
+  types — `application/json, application/x-www-form-urlencoded, text/plain, application/soap+xml,
+  text/xml, application/xml, xml/text` — so a chunked XML, SOAP or plain-text body is inspected; with
+  the previous default (JSON and form only) such a body was inspected headers-only. `multipart/form-data`
+  stays out of the default (API Management can only read a body whole, so a chunked upload of unknown
+  size would be held in the gateway); add it if your chunked uploads are small. **Existing installs
+  keep their value: set the Named Value to the new default to get this** (README 3b).
+- A **multipart** body with a declared length is now sent like any other body: whole up to
+  `rdwr-partial-body-size-bytes`, otherwise its first `rdwr-partial-body-size-bytes` with
+  `x-rdwr-partial-body: true`; above `rdwr-multipart-max-size-bytes` it is inspected headers-only, as
+  before. Previously a multipart body up to `rdwr-multipart-max-size-bytes` was sent whole.
+
+### The inspection copy is fitted to the SecurePath endpoint's request limits
+
+The SecurePath endpoint accepts at most 100 header lines, a header block up to about 16 KB (a single
+header line up to about 8 KB), and a request line up to 8192 bytes; beyond any of these it answers
+503/400/414, which the connector treats as a reason to serve the request without inspection. API
+Management admits considerably more — many more headers, larger headers, and (on some tiers) longer
+URLs — and adds its own and the platform's headers. The connector now fits the
+**inspection copy only** to those limits, so a request with many or large headers or a very long
+query is still inspected: it always sends the headers an application needs (host,
+cookie, user-agent, referer, origin, authorization, content-type, content-length, accept,
+accept-language, accept-encoding, x-forwarded-for, forwarded, x-real-ip, x-requested-with), the
+configured client-IP header and its own; it leaves out other client and platform headers — a single
+line over about 8 KB first, then from the end of the alphabet to reach 100 lines, then the largest
+first to reach 16 KB — and, when the request line would exceed 8192 bytes, sends the path and as much
+of the query as fits without splitting a `%`-escape. **The request to your backend is never changed**;
+only the inspection copy is reduced, and a trace line (rate-limited) reports what was left out. On the
+tiers whose own URL limit already refuses a longer request line, that refusal still applies first.
+
+A header an application needs is never left out: if its single line would exceed the endpoint's limit,
+its value is shortened **in the inspection copy only** so the endpoint still inspects the request. The
+`Cookie` value is rebuilt with the Bot Manager cookies first and then as many of the others as fit; any
+other such header's value is shortened to fit. If those headers together still exceed the header-block
+limit, the longest are shortened to a common length. A bare `%` in the request path (one that does not
+begin a `%`-escape) is written as `%25` for the inspection call, because the endpoint rejects a bare
+`%`; the query is sent as received. In every case the request your backend receives keeps the original,
+full header and path.
+
+A request whose last path segment carries a path parameter (for example `/catalog;v=2.js`) is no longer
+treated as a static asset and is inspected, and the file-extension match is case-sensitive, so a path
+such as `/report.PNG` is inspected rather than bypassed.
+
+### Install check and documentation
+
+- The Bicep template (`deploy/securepath-apim.bicep`) no longer embeds the policy fragments — the
+  inbound fragment is larger than a Bicep template may embed — so the fragments are registered by
+  the Step 4 CLI block (or the Portal) first and the template provisions the Named Values, the
+  backend entity and the All APIs policy. `deploy/README.md` says so.
+- `L16` reports a fragment install whose `<on-error>` does not carry the block for the requests API
+  Management answers itself.
+- `L08` / `L10` report an endpoint that is not a bare host name and a map port outside 1–65535.
+- The Named Value pre-flight check (README 2a) and the Named Value check (3c) reported nothing in zsh,
+  the default shell on macOS (`collisions: 0` whatever existed): they now run the same in bash and
+  zsh, and 2a reports how many names it checked.
+
+### Named Values and version
+
+No new Named Values (24 in total). `x-rdwr-plugin-info` becomes `700-v1.5.0`. The policy document
+is now `rdwr-azureapim-securepath-connector-v1.5.xml`.
+
+### Upgrading from v1.4.0
+
+API Management validates every policy that uses a fragment whenever the fragment or a Named Value it
+reads changes, together with the other fragments that policy uses — and it refuses the v1.4.0
+fragments. So the fragments cannot be replaced, nor `plugin-version-info` changed, while a policy
+still references the v1.4.0 ones. In this order:
+
+1. Remove the connector's lines from every policy that has them: for Form 1, set the All APIs policy
+   to the default (README, "Removing the connector"); for Form 2, delete the include lines and the
+   `<on-error>` block from each API or product policy. Inspection pauses until step 4.
+2. Register the four fragments (README Step 4, Form 1, first block).
+3. Set `plugin-version-info` to `700-v1.5.0` (refused until step 2 is done: the v1.4.0 inbound
+   fragment reads it).
+4. Put the connector's lines back: the second block of Form 1, or the Form 2 lines, including the
+   `<on-error>` block.
+5. Run `python3 tools/securepath-apim-lint.py --live` (README 5e): any fragment that did not register
+   is reported as `L14`. Then trace one request (README Debugging, Option A).
+
+With the Bicep template, do steps 1 and 2, then run the deployment (it performs steps 3 and 4 for the
+All APIs scope; it writes the Named Values before the fragments, which API Management refuses while the
+v1.4.0 fragments are registered). Form 3 (the policy document): replace the document with
+`rdwr-azureapim-securepath-connector-v1.5.xml` — a single save, no other step.
+
+From v1.3.x, follow "Upgrading from v1.3.x" under v1.4.0, using this release's files; the
+`<on-error>` block (README Step 4) is part of the Form 1 and Form 2 lines.
+
 ## v1.4.0 (2026-09-22)
 
 **The policy changed in this release; every install is updated by re-registering the fragments
@@ -441,7 +615,8 @@ Initial release. Basic inspection call and verdict enforcement.
 
 | Version    | Date       | Status      | Highlights                                                       |
 |------------|------------|-------------|------------------------------------------------------------------|
-| **v1.4.0** | 2026-09-22 | **Current** | Several applications on one instance, client-facing hostname, generated map and sync tool, on-error log, custom Bot Manager block responses, install check, trace tool |
+| **v1.5.0** | 2026-10-04 | **Current** | Policy accepted by API Management again, requests API Management answers itself inspected, SecurePath's answer and the response-phase log can no longer hold a response, unusable configuration reported instead of failing requests |
+| v1.4.0     | 2026-09-22 | Superseded  | Several applications on one instance, client-facing hostname, generated map and sync tool, on-error log, custom Bot Manager block responses, install check, trace tool |
 | v1.3.4     | 2026-08-16 | Superseded  | Three install forms, pre-flight checks (documentation and packaging; policy unchanged) |
 | v1.3.3     | 2026-08-14 | Superseded  | Certificate files shipped in the package (documentation and packaging) |
 | v1.3.2     | 2026-05-03 | Superseded  | `x-rdwr-o2v-bytes-sent` reports total wire bytes (status line + headers + body) |

@@ -47,37 +47,45 @@ $apim.SystemCertificates = @($root, $int)
 Set-AzApiManagement -InputObject $apim
 ```
 
-## Uploading — ARM / Bicep *(from the ARM schema; not executed by Radware for this release)*
+## Uploading — Azure CLI *(executed by Radware for this release, on a Developer tier instance)*
 
-CA certificates are a property of the service resource itself (`properties.certificates`), not a
-child resource. The `Microsoft.ApiManagement/service/certificates` child resource is the client
-certificate store mentioned above and does not establish trust for the inspection call.
+`az apim` has no CA-certificate command, but the CA list is a property of the API Management
+service itself and `az rest` can set it. Run from the directory that contains `certs/`.
 
-```bicep
-param apimName string
-param location string        // az apim show --query location
-param skuName string         // az apim show --query sku.name
-param skuCapacity int        // az apim show --query sku.capacity
-param publisherEmail string  // az apim show --query publisherEmail
-param publisherName string   // az apim show --query publisherName
+The request **replaces** the instance's CA certificate list. First check that the instance has
+none yet; if this prints anything, use the Portal instead, which adds to the list:
 
-resource trust 'Microsoft.ApiManagement/service@2024-05-01' = {
-  name: apimName
-  location: location
-  sku: { name: skuName, capacity: skuCapacity }
-  properties: {
-    publisherEmail: publisherEmail
-    publisherName: publisherName
-    certificates: [
-      { encodedCertificate: base64(loadTextContent('../certs/rdwr-root-ca.pem')), storeName: 'Root' }
-      { encodedCertificate: base64(loadTextContent('../certs/rdwr-intermediate-ca.pem')), storeName: 'CertificateAuthority' }
-    ]
-  }
-}
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+az apim show -g "$RG" -n "$APIM" --query "certificates[].certificate.subject" -o tsv
 ```
 
-An update to the service resource must repeat the properties the instance already has; run
-`what-if` before deploying it.
+Then upload both certificates in one request. Nothing else on the instance changes:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+SUB=$(az account show --query id -o tsv)
+ROOT=$(grep -v -- "-----" certs/rdwr-root-ca.pem | tr -d '\r\n')
+INT=$(grep -v -- "-----" certs/rdwr-intermediate-ca.pem | tr -d '\r\n')
+printf '{"properties":{"certificates":[{"encodedCertificate":"%s","storeName":"Root"},{"encodedCertificate":"%s","storeName":"CertificateAuthority"}]}}' "$ROOT" "$INT" > rdwr-ca-certs.json &&
+az rest --method PATCH --uri "https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM?api-version=2024-05-01" \
+  --headers "Content-Type=application/json" --body @rdwr-ca-certs.json -o none &&
+echo "CA certificates submitted; provisioning takes 15 minutes or more"
+```
+
+The instance shows *Updating* until provisioning finishes (about 20 minutes when Radware ran it).
+
+**ARM template or Bicep.** CA certificates are a property of the service resource itself
+(`properties.certificates`); the `Microsoft.ApiManagement/service/certificates` child resource is the
+client-certificate store and does not establish trust for the inspection call. A template that
+declares the service resource replaces its properties as a whole: run `what-if` first. When Radware
+ran one that declared only the certificates, `what-if` showed it would also remove the instance's
+protocol and cipher settings and its public network access setting, and switch on the legacy
+developer portal. Use the `az rest` request above, which changes only the CA list.
 
 ## Confirm they landed in the trust store
 

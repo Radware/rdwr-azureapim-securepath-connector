@@ -1,10 +1,13 @@
 // Radware SecurePath connector for Azure API Management: one-shot install at All APIs scope.
 //
-// Creates the Named Values, registers the four policy fragments (including the empty default of
-// the generated application map), sets the All APIs policy
-// to reference them, and (by default) creates the backend entity that establishes trust for
-// the inspection endpoint on Standard v2 / Premium v2. Existing API and product policies are
-// left untouched; they inherit the connector through <base />.
+// Creates the Named Values, sets the All APIs policy, and (by default) creates the backend entity
+// that establishes trust for the inspection endpoint on Standard v2 / Premium v2. Existing API and
+// product policies are left untouched; they inherit the connector through <base />.
+//
+// The four policy fragments are NOT embedded here: the inbound fragment exceeds the size a Bicep
+// template may embed (loadTextContent caps at 131072 characters), so the fragments are registered
+// by the documented CLI block (README Step 4, Form 1, first block) or the Portal BEFORE this
+// template is deployed. This template's All APIs policy references them by name.
 //
 // See deploy/README.md for usage and the parameter table.
 targetScope = 'resourceGroup'
@@ -53,7 +56,8 @@ param hostFallback string = 'gateway'
 @description('Bot Manager: SecurePath status codes, beyond the standard verdicts, that the connector relays to the client as a Bot Manager block response, for example "429" or "429,418"; "*" for any such status; ##DISABLED## off. Used only when botManagerEnabled is true; a 5xx is never relayed. See README 3e.')
 param customBotBlockStatuses string = '##DISABLED##'
 
-@description('Register the securepath-app-map fragment with its empty default. Set false when tools/securepath-apim-sync.py manages the generated application map, so that a re-deployment does not replace it.')
+@description('Accepted for compatibility and no longer used: this template does not register the fragments (they are registered by README Step 4 before deployment), so it never replaces a sync-managed application-map fragment.')
+#disable-next-line no-unused-params
 param manageAppMapFragment bool = true
 
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
@@ -73,12 +77,12 @@ var namedValues = [
   { name: 'rdwr-true-client-ip-header', value: trueClientIpHeader, secret: false }
   { name: 'rdwr-api-base-path', value: apiBasePath, secret: false }
   { name: 'rdwr-bot-manager-enabled', value: botManagerEnabled ? 'true' : 'false', secret: false }
-  { name: 'plugin-version-info', value: '700-v1.4.0', secret: false }
+  { name: 'plugin-version-info', value: '700-v1.5.0', secret: false }
   { name: 'static-extensions-enabled', value: 'true', secret: false }
   { name: 'static-list-of-methods-not-to-inspect', value: 'GET,HEAD', secret: false }
   { name: 'static-list-of-bypassed-extensions', value: 'png,jpg,css,js,jpeg,gif,ico,ttf,svg,woff,woff2,svc,swf,otf,eot,webp,avif', secret: false }
   { name: 'static-inspect-if-query-string-exists', value: 'true', secret: false }
-  { name: 'chunked-request-allowed-content-types', value: 'application/json,application/x-www-form-urlencoded', secret: false }
+  { name: 'chunked-request-allowed-content-types', value: 'application/json,application/x-www-form-urlencoded,text/plain,application/soap+xml,text/xml,application/xml,xml/text', secret: false }
   { name: 'rdwr-inline-trusted-sources', value: '##DISABLED##', secret: false }
   { name: 'rdwr-inline-headers-enabled', value: 'false', secret: false }
   { name: 'rdwr-true-host-header', value: trueHostHeader, secret: false }
@@ -112,58 +116,15 @@ resource nvAppMap 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
   }
 }
 
-resource fragMap 'Microsoft.ApiManagement/service/policyFragments@2024-05-01' = if (manageAppMapFragment) {
-  parent: apim
-  name: 'securepath-app-map'
-  properties: {
-    description: 'Radware SecurePath generated application map (written by tools/securepath-apim-sync.py)'
-    format: 'rawxml'
-    value: loadTextContent('../fragments/securepath-app-map.fragment.xml')
-  }
-  dependsOn: [nv]
-}
-
-resource fragIn 'Microsoft.ApiManagement/service/policyFragments@2024-05-01' = {
-  parent: apim
-  name: 'securepath-inbound'
-  properties: {
-    description: 'Radware SecurePath inbound'
-    format: 'rawxml'
-    value: loadTextContent('../fragments/securepath-inbound.fragment.xml')
-  }
-  dependsOn: [nv, nvAppMap, fragMap]
-}
-
-resource fragOut 'Microsoft.ApiManagement/service/policyFragments@2024-05-01' = {
-  parent: apim
-  name: 'securepath-outbound'
-  properties: {
-    description: 'Radware SecurePath outbound'
-    format: 'rawxml'
-    value: loadTextContent('../fragments/securepath-outbound.fragment.xml')
-  }
-  dependsOn: [nv]
-}
-
-resource fragErr 'Microsoft.ApiManagement/service/policyFragments@2024-05-01' = {
-  parent: apim
-  name: 'securepath-onerror'
-  properties: {
-    description: 'Radware SecurePath on-error'
-    format: 'rawxml'
-    value: loadTextContent('../fragments/securepath-onerror.fragment.xml')
-  }
-  dependsOn: [nv]
-}
-
 resource globalPolicy 'Microsoft.ApiManagement/service/policies@2024-05-01' = {
   parent: apim
   name: 'policy'
   properties: {
     format: 'rawxml'
-    value: '<policies><inbound><include-fragment fragment-id="securepath-app-map" /><include-fragment fragment-id="securepath-inbound" /></inbound><backend><forward-request /></backend><outbound><include-fragment fragment-id="securepath-outbound" /></outbound><on-error><include-fragment fragment-id="securepath-onerror" /></on-error></policies>'
+    value: '<policies><inbound><include-fragment fragment-id="securepath-app-map" /><include-fragment fragment-id="securepath-inbound" /></inbound><backend><forward-request /></backend><outbound><include-fragment fragment-id="securepath-outbound" /></outbound><on-error><include-fragment fragment-id="securepath-onerror" /><choose><when condition="@((bool)context.Variables.GetValueOrDefault("rdwrUnrouted", false))"><include-fragment fragment-id="securepath-app-map" /><include-fragment fragment-id="securepath-inbound" /><include-fragment fragment-id="securepath-outbound" /></when></choose></on-error></policies>'
   }
-  dependsOn: [fragIn, fragOut, fragErr]
+  // the four fragments must already be registered (README Step 4); this policy references them
+  dependsOn: [nv, nvAppMap]
 }
 
 var endpointScheme = endpointSsl ? 'https' : 'http'

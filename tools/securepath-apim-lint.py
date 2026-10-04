@@ -177,6 +177,25 @@ def lint_document(text: str, scope: str, label: str) -> List[Finding]:
                     "L06", label, sections.get(name, (None, []))[0],
                     f"{frag} is not referenced in <{name}> while the connector is present elsewhere in this document",
                     f'add <include-fragment fragment-id="{frag}" /> after <base /> in <{name}>'))
+
+    # L16: the on-error block that inspects requests API Management answers itself (no
+    # matching operation, missing subscription key). securepath-onerror decides (rdwrUnrouted),
+    # so it must come before the inbound include in <on-error>.
+    if uses_fragments and present_in["on-error"]:
+        start, body = sections.get("on-error", (None, []))
+        ids = [m.group(1) for m in (_INCLUDE_RE.search(ln) for ln in body) if m]
+        if "securepath-inbound" not in ids:
+            findings.append(Finding(
+                "L16", label, start,
+                "<on-error> does not inspect the requests API Management answers itself (no matching operation, "
+                "missing subscription key); they never reach SecurePath",
+                "add the <choose> block on rdwrUnrouted after the securepath-onerror line (README Step 4, "
+                "Requests API Management answers itself)"))
+        elif "securepath-onerror" in ids and ids.index("securepath-inbound") < ids.index("securepath-onerror"):
+            findings.append(Finding(
+                "L16", label, start,
+                "in <on-error>, securepath-inbound comes before securepath-onerror, which sets rdwrUnrouted",
+                "put the securepath-onerror line first in <on-error>, then the <choose> block"))
     return findings
 
 
@@ -327,6 +346,16 @@ def parse_app_map(raw: str) -> dict:
         return json.loads(raw.replace("'", '"'))
 
 
+def _bare_host(value: str) -> bool:
+    """What the connector accepts as an inspection endpoint: a host name or address alone. A scheme,
+    port or path would make the inspection URL invalid; the connector reports it as
+    config_incomplete and serves the request uninspected."""
+    v = (value or "").strip().lower()
+    if v.startswith("[") and v.endswith("]"):
+        return len(v) > 2 and all(c in "0123456789abcdef:." for c in v[1:-1])
+    return 0 < len(v) <= 253 and all(c.isascii() and (c.isalnum() or c in ".-") for c in v)
+
+
 def _host_of(url: str) -> str:
     return re.sub(r"^https?://", "", url or "").split("/")[0].split(":")[0].lower()
 
@@ -472,7 +501,12 @@ def lint_instance(reader: Reader, check_operations: bool = False) -> List[Findin
             "L08", "named-values", None,
             f"rdwr-app-id '{app_id}' contains a dot; that is a hostname, not the Application ID",
             "set rdwr-app-id to the bare Application ID from the Radware Cloud portal"))
-    if ep and not ep.lower().endswith(".oop.radwarecloud.net"):
+    if ep and not _bare_host(ep):
+        findings.append(Finding(
+            "L08", "named-values", None, f"rdwr-app-ep-addr '{ep}' is not a bare host name",
+            "set it to the host name alone, without https://, a port or a path; the connector serves every request "
+            "uninspected with this value (X-Rdwr-Diag: config_incomplete)"))
+    elif ep and not ep.lower().endswith(".oop.radwarecloud.net"):
         findings.append(Finding(
             "L08", "named-values", None, f"rdwr-app-ep-addr '{ep}' is not an inspection endpoint",
             "use the hostname ending in .oop.radwarecloud.net (not .v1)"))
@@ -563,7 +597,12 @@ def lint_instance(reader: Reader, check_operations: bool = False) -> List[Findin
                     if bp is not None and not str(bp).startswith("/"):
                         findings.append(Finding("L10", "named-values", None, f"rdwr-app-map entry '{key}' base_path '{bp}' must start with /",
                                                 "use the API's path prefix, for example /orders"))
-                    for field, ok, want in (("port", lambda v: isinstance(v, int) and not isinstance(v, bool), "a number such as 443"),
+                    if entry.get("endpoint") and not _bare_host(str(entry["endpoint"])):
+                        findings.append(Finding("L10", "named-values", None,
+                                                f"rdwr-app-map entry '{key}' endpoint '{entry['endpoint']}' is not a bare host name",
+                                                "the host name alone, without https://, a port or a path; the connector treats the entry as "
+                                                "invalid and serves that application's requests uninspected (X-Rdwr-Diag: config_incomplete)"))
+                    for field, ok, want in (("port", lambda v: isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 65535, "a port number from 1 to 65535"),
                                             ("ssl", lambda v: isinstance(v, bool), "true or false"),
                                             ("bot_manager", lambda v: isinstance(v, bool), "true or false"),
                                             ("bot_block_statuses", lambda v: isinstance(v, str), "a quoted list such as '429,418'")):
@@ -603,7 +642,7 @@ def lint_instance(reader: Reader, check_operations: bool = False) -> List[Findin
 OOP_SUFFIX = ".oop.radwarecloud.net"
 _ERR_IGNORED_RE = re.compile(r"request to '([^']+)' resulted in error, error ignored: (.*)", re.S)
 FAIL_OPEN_DIAGS = ("sideband_error_or_timeout", "wrong_api_key_redirect", "no_app_mapping", "config_incomplete", "app_map_invalid")
-FAIL_OPEN_PREFIXES = ("sideband_error_failopen_", "unexpected_status_")
+FAIL_OPEN_PREFIXES = ("sideband_error_failopen_", "unexpected_status_", "unusable_redirect_")
 ENFORCED_PREFIXES = ("action_enforced_status_", "custom_bot_block_status_", "redirect_issued_")
 INFO_DIAGS = {"uzmcr_allow": "allow (Bot Manager mobile exception: uzmcr)", "multipart_headers_only": "allow (multipart body: headers-only inspection)"}
 
@@ -617,7 +656,7 @@ _DIAG_MEANING = {
     "sideband_error_failopen_5xx": "SecurePath answered with a server error",
     "wrong_api_key_redirect": "SecurePath did not recognise the Application ID / API key pair",
     "no_app_mapping": "no application map entry matched this request (Step 3d)",
-    "config_incomplete": "the selected application has no Application ID, API key or endpoint (Step 3a / 3d)",
+    "config_incomplete": "the selected application has no Application ID, API key or endpoint, or the endpoint is not a bare host name (Step 3a / 3d)",
     "app_map_invalid": "rdwr-app-map or the generated map is not valid JSON (Step 3d)",
 }
 
@@ -772,8 +811,10 @@ def lint_trace(trace: dict) -> List[Finding]:
                            "usually transient on the SecurePath side; if it persists, contact Radware support with this trace"))
     diag = s["diag"]
     if diag and not out:
+        meaning = _DIAG_MEANING.get(diag) or ("SecurePath answered a redirect without a usable Location header"
+                                              if diag.startswith("unusable_redirect_") else "see the X-Rdwr-Diag table")
         out.append(Finding("T07", where, None,
-                           f"inspection did not complete: X-Rdwr-Diag = {diag} ({_DIAG_MEANING.get(diag, 'see the X-Rdwr-Diag table')})",
+                           f"inspection did not complete: X-Rdwr-Diag = {diag} ({meaning})",
                            "see the X-Rdwr-Diag table in Step 5 (5c)"))
     return out
 
