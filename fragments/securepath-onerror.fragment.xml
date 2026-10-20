@@ -105,29 +105,29 @@
           <set-header name="Content-Type" exists-action="override">
             <value>text/html; charset=UTF-8</value>
           </set-header>
-          <set-header name="Set-Cookie" exists-action="append">
-            <value>@{ var v = (string)context.Variables.GetValueOrDefault("bmSetCookie0", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
+          <set-header name="Set-Cookie" exists-action="@((string)context.Variables.GetValueOrDefault("bmSlotAct0", "delete"))">
+            <value>@((string)context.Variables.GetValueOrDefault("bmSlotVal0", ""))</value>
           </set-header>
-          <set-header name="Set-Cookie" exists-action="append">
-            <value>@{ var v = (string)context.Variables.GetValueOrDefault("bmSetCookie1", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
+          <set-header name="Set-Cookie" exists-action="@((string)context.Variables.GetValueOrDefault("bmSlotAct1", "delete"))">
+            <value>@((string)context.Variables.GetValueOrDefault("bmSlotVal1", ""))</value>
           </set-header>
-          <set-header name="Set-Cookie" exists-action="append">
-            <value>@{ var v = (string)context.Variables.GetValueOrDefault("bmSetCookie2", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
+          <set-header name="Set-Cookie" exists-action="@((string)context.Variables.GetValueOrDefault("bmSlotAct2", "delete"))">
+            <value>@((string)context.Variables.GetValueOrDefault("bmSlotVal2", ""))</value>
           </set-header>
-          <set-header name="Set-Cookie" exists-action="append">
-            <value>@{ var v = (string)context.Variables.GetValueOrDefault("bmSetCookie3", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
+          <set-header name="Set-Cookie" exists-action="@((string)context.Variables.GetValueOrDefault("bmSlotAct3", "delete"))">
+            <value>@((string)context.Variables.GetValueOrDefault("bmSlotVal3", ""))</value>
           </set-header>
-          <set-header name="Set-Cookie" exists-action="append">
-            <value>@{ var v = (string)context.Variables.GetValueOrDefault("bmSetCookie4", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
+          <set-header name="Set-Cookie" exists-action="@((string)context.Variables.GetValueOrDefault("bmSlotAct4", "delete"))">
+            <value>@((string)context.Variables.GetValueOrDefault("bmSlotVal4", ""))</value>
           </set-header>
-          <set-header name="Set-Cookie" exists-action="append">
-            <value>@{ var v = (string)context.Variables.GetValueOrDefault("bmSetCookie5", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
+          <set-header name="Set-Cookie" exists-action="@((string)context.Variables.GetValueOrDefault("bmSlotAct5", "delete"))">
+            <value>@((string)context.Variables.GetValueOrDefault("bmSlotVal5", ""))</value>
           </set-header>
-          <set-header name="shieldsquare-response" exists-action="append">
-            <value>@{ var v = (string)context.Variables.GetValueOrDefault("bmShieldSquareHeader0", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
+          <set-header name="shieldsquare-response" exists-action="@(string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmShieldSquareHeader0", "")) ? "delete" : "append")">
+            <value>@((string)context.Variables.GetValueOrDefault("bmShieldSquareHeader0", ""))</value>
           </set-header>
-          <set-header name="uzmcr" exists-action="append">
-            <value>@{ var v = (string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", ""); return string.IsNullOrEmpty(v) ? null : v; }</value>
+          <set-header name="uzmcr" exists-action="@(string.IsNullOrEmpty((string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", "")) ? "delete" : "append")">
+            <value>@((string)context.Variables.GetValueOrDefault("bmUzmcrHeader0", ""))</value>
           </set-header>
           <set-body>@((string)context.Variables["rdwrRecoveredPage"])</set-body>
         </return-response>

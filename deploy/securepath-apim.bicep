@@ -1,7 +1,8 @@
 // Radware SecurePath connector for Azure API Management: one-shot install at All APIs scope.
 //
 // Creates the Named Values, sets the All APIs policy, and (by default) creates the backend entity
-// that establishes trust for the inspection endpoint on Standard v2 / Premium v2. Existing API and
+// that establishes trust for the inspection endpoint on Standard v2 / Premium v2. With Bot Manager
+// enabled it also creates the API for the Bot Manager CAPTCHA path (README Step 4). Existing API and
 // product policies are left untouched; they inherit the connector through <base />.
 //
 // The four policy fragments are NOT embedded here: the inbound fragment exceeds the size a Bicep
@@ -55,6 +56,9 @@ param hostFallback string = 'gateway'
 
 @description('Bot Manager: SecurePath status codes, beyond the standard verdicts, that the connector relays to the client as a Bot Manager block response, for example "429" or "429,418"; "*" for any such status; ##DISABLED## off. Used only when botManagerEnabled is true; a 5xx is never relayed. See README 3e.')
 param customBotBlockStatuses string = '##DISABLED##'
+
+@description('Create the API for the Bot Manager CAPTCHA path (/7f7c01e221604f25/), through which the connector serves a challenged visitor the CAPTCHA page from the inspection endpoint. Follows botManagerEnabled unless set. See README Step 4, "The Bot Manager CAPTCHA path".')
+param createCaptchaApi bool = botManagerEnabled
 
 @description('Accepted for compatibility and no longer used: this template does not register the fragments (they are registered by README Step 4 before deployment), so it never replaces a sync-managed application-map fragment.')
 #disable-next-line no-unused-params
@@ -155,6 +159,39 @@ resource mapBackends 'Microsoft.ApiManagement/service/backends@2024-05-01' = [fo
       validateCertificateChain: false
       validateCertificateName: false
     }
+  }
+}]
+
+// The Bot Manager CAPTCHA path. No policy of its own: it inherits the connector from All APIs
+// scope, which forwards every request on it to the inspection endpoint and answers it itself; the
+// service URL is used only if the connector does not run for this API. No subscription key: the
+// caller is a visitor's browser.
+resource captchaApi 'Microsoft.ApiManagement/service/apis@2024-05-01' = if (createCaptchaApi) {
+  parent: apim
+  name: 'securepath-captcha'
+  properties: {
+    displayName: 'SecurePath Bot Manager CAPTCHA'
+    path: '7f7c01e221604f25'
+    protocols: [
+      'https'
+    ]
+    subscriptionRequired: false
+    // API Management removes the API's path before forwarding, so the service URL carries it again
+    serviceUrl: '${endpointScheme}://${endpoint}${endpointPortSuffix}/7f7c01e221604f25'
+  }
+}
+
+resource captchaOperations 'Microsoft.ApiManagement/service/apis/operations@2024-05-01' = [for m in [
+  'GET'
+  'POST'
+  'HEAD'
+]: if (createCaptchaApi) {
+  parent: captchaApi
+  name: 'captcha-${toLower(m)}'
+  properties: {
+    displayName: '${m} /*'
+    method: m
+    urlTemplate: '/*'
   }
 }]
 

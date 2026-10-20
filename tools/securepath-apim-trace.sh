@@ -66,6 +66,10 @@ echo "request: $METHOD $URL -> HTTP ${STATUS:-no response}"
 if [ -z "$TRACE_ID" ]; then
   echo "no Apim-Trace-Id header in the response. Either the request never reached $APIM, it matched a" >&2
   echo "different API than '$API_ID' (the token is per API), or a proxy in front removed the debug header." >&2
+  case "$URL" in
+    */7f7c01e221604f25/*) echo "On the Bot Manager CAPTCHA path this is expected when the inspection endpoint answered: the" >&2
+                          echo "connector returns the endpoint's response as it is, without API Management's trace header." >&2 ;;
+  esac
   echo "response headers were:" >&2; sed 's/^/  /' "$TMP/headers" >&2
   exit 2
 fi

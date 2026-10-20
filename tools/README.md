@@ -14,7 +14,7 @@ Exit code 0 means clean, 1 means findings, 2 means the instance or file could no
 | Code | What it means | What to do |
 |---|---|---|
 | L01 | The connector is not installed at any scope | Install the fragments (README Step 4) |
-| L02 | The connector is installed at two scopes | Every request is inspected twice; keep one scope |
+| L02 | The connector is installed at two scopes that the same request passes through (All APIs and an API or product, or a product and an API) | Every request is inspected twice; keep one scope. Two different APIs each carrying the connector is not reported |
 | L03 | An API or product policy has a section without `<base />` while the connector is at a wider scope | That API skips the connector entirely; add `<base />` first in that section | Also reported for an operation's own policy when `--operations` is given: an operation without `<base />` skips the connector entirely.
 | L04 | A policy that can reject the request (`validate-jwt`, `check-header`, `ip-filter`, `rate-limit`, `quota`, `return-response`, `validate-*`) runs before the connector | Requests it rejects are never inspected; move the include line directly after `<base />` |
 | L05 | A `set-variable` has no value | Left behind by a manual merge; restore it, or use the fragments |
@@ -28,6 +28,7 @@ Exit code 0 means clean, 1 means findings, 2 means the instance or file could no
 | L13 | `rdwr-custom-bot-block-statuses` (or a map entry's `bot_block_statuses`) is not a status-code list, lists a standard verdict (200/301/302/403) or a 5xx, or is set while Bot Manager is disabled | See README 3e; the setting is ignored in each of those cases |
 | L14 | A connector fragment on the instance differs from the file shipped in this package, or is referenced but not registered | Re-register it from `fragments/` and run the check again. A fragment registration is asynchronous: the CLI reports success before validation, so a rejected upload silently keeps the previous fragment |
 | L16 | A fragment install's `<on-error>` does not carry the block that inspects the requests API Management answers itself (no matching operation, missing subscription key), or has `securepath-inbound` before `securepath-onerror` there | Those requests never reach SecurePath; add the `<choose>` block on `rdwrUnrouted` right after the `securepath-onerror` line (README Step 4, Requests API Management answers itself) |
+| L17 | Bot Manager is enabled (`rdwr-bot-manager-enabled`, or an application-map entry with `bot_manager: true`) and no API serves the CAPTCHA path `7f7c01e221604f25`, or that API requires a subscription key, or the connector does not run for it | A visitor that Bot Manager challenges never reaches the CAPTCHA page; create the API `securepath-captcha` (README Step 4, The Bot Manager CAPTCHA path), with no subscription key, and with Form 2 / Form 3 give it the connector |
 
 Run it after every install and whenever a policy on the instance changes.
 
@@ -62,7 +63,7 @@ whether the response-phase log was sent, and what the origin answered. Findings:
 
 A request that matched a bypass rule (a static extension, an excluded method, an inline trusted source) is not a finding: the verdict line of the readout says so and the exit code is 0.
 
-`--redact trace.json` replaces, in place, the credential values inside a trace (the request's `Authorization`, subscription key and cookies, the debug token, and the `x-rdwr-api-key` the connector sends) so the file can be shared. `securepath-apim-trace.sh` does this for every trace it saves.
+`--redact trace.json` replaces, in place, the credential values inside a trace (the request's `Authorization`, subscription key and cookies, the debug token, the `x-rdwr-api-key` the connector sends, and the connector's variables that hold an API key or the application map) so the file can be shared. `securepath-apim-trace.sh` does this for every trace it saves.
 
 Exit code 0 when the trace shows a completed inspection, 1 with findings, 2 when the file is not a trace.
 

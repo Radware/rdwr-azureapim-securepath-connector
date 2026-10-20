@@ -50,6 +50,8 @@ NEW_IN_140 = {"rdwr-app-map", "rdwr-true-host-header", "rdwr-host-fallback", "rd
 SHIPPED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fragments")
 SHIPPED_FRAGMENTS = ("securepath-inbound", "securepath-outbound", "securepath-onerror")
 STANDARD_VERDICT_STATUSES = (200, 301, 302, 403)
+# the Bot Manager inline CAPTCHA path: SecurePath redirects a challenged visitor there (README Step 4)
+CAPTCHA_API_PATH = "7f7c01e221604f25"
 DISABLE_TOKENS = {"", "-", "disabled", "off", "false", "none", "~", "##disabled##"}
 
 _BASE_RE = re.compile(r"<base\s*/>")
@@ -215,6 +217,8 @@ class Reader:
     def fragment(self, fragment_id: str) -> Optional[str]: return None  # text, or None when absent
     def operations(self, api_id: str) -> List[str]: return []
     def operation_policy(self, api_id: str, operation_id: str) -> Optional[str]: return None
+    # {api id: {"path": ..., "subscription_required": bool}}, or None when not known (L17 is skipped)
+    def api_info(self) -> Optional[Dict[str, dict]]: return None
 
 
 class AzReader(Reader):
@@ -226,6 +230,7 @@ class AzReader(Reader):
             raise RuntimeError("az account show returned nothing; run az login")
         self.base = (f"https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}"
                      f"/providers/Microsoft.ApiManagement/service/{apim}")
+        self._api_list: Optional[List[dict]] = None
 
     @staticmethod
     def _az(args: List[str]) -> str:
@@ -286,8 +291,18 @@ class AzReader(Reader):
     def global_policy(self):
         return self._policy("")
 
+    def _apis(self) -> List[dict]:
+        if self._api_list is None:
+            self._api_list = self._list("/apis")
+        return self._api_list
+
     def apis(self):
-        return [a["name"] for a in self._list("/apis")]
+        return [a["name"] for a in self._apis()]
+
+    def api_info(self):
+        return {a["name"]: {"path": (a.get("properties") or {}).get("path") or "",
+                            "subscription_required": (a.get("properties") or {}).get("subscriptionRequired", True) is not False}
+                for a in self._apis()}
 
     def api_policy(self, api_id):
         return self._policy(f"/apis/{api_id}")
@@ -456,6 +471,40 @@ def check_bot_block_statuses(value: str, bot_manager: str, where: str) -> List[F
     return out
 
 
+def check_captcha_api(reader: Reader, docs, global_has: bool, installed: bool, bot_manager: bool) -> List[Finding]:
+    """L17: with Bot Manager enabled, SecurePath sends a challenged visitor to /7f7c01e221604f25/ on
+    the site's hostname. An API on that path, without a subscription key and with the connector
+    running for it, is what brings the request to the connector, which forwards it to the endpoint."""
+    if not (installed and bot_manager):
+        return []
+    info = reader.api_info()
+    if info is None:
+        return []
+    fix_create = "create the API securepath-captcha on the path 7f7c01e221604f25 (README Step 4, The Bot Manager CAPTCHA path)"
+    caps = sorted(a for a, i in info.items() if (i.get("path") or "").strip("/").lower() == CAPTCHA_API_PATH)
+    if not caps:
+        return [Finding("L17", "instance", None,
+                        "Bot Manager is enabled and no API serves the CAPTCHA path /7f7c01e221604f25/: a visitor that "
+                        "Bot Manager challenges receives a 404 (or the API on the root of the hostname) instead of the CAPTCHA",
+                        fix_create)]
+    out: List[Finding] = []
+    policies = {label: text for _, label, text in docs}
+    for a in caps:
+        if info[a].get("subscription_required"):
+            out.append(Finding("L17", f"api:{a}", None,
+                               "the API on the CAPTCHA path requires a subscription key, which a visitor's browser does not "
+                               "send: API Management rejects the request before the connector's inbound section",
+                               f"az apim api update -g RG --service-name APIM --api-id {a} --subscription-required false"))
+        text = policies.get(f"api:{a}")
+        if not global_has and not (text and document_has_connector(text)):
+            out.append(Finding("L17", f"api:{a}", None,
+                               "the connector does not run for the API on the CAPTCHA path, so the path is not forwarded to "
+                               "the inspection endpoint",
+                               "Form 2: add the connector's lines to this API's own policy; Form 3: put the policy document on it "
+                               "(README Step 4, The Bot Manager CAPTCHA path)"))
+    return out
+
+
 def lint_instance(reader: Reader, check_operations: bool = False) -> List[Finding]:
     findings: List[Finding] = []
     docs: List[Tuple[str, str, Optional[str]]] = [("global", "global", reader.global_policy())]
@@ -469,12 +518,15 @@ def lint_instance(reader: Reader, check_operations: bool = False) -> List[Findin
         findings.append(Finding(
             "L01", "instance", None, "the SecurePath connector is not installed at any scope",
             "install the fragments at All APIs scope (see deploy/) or reference them from one API or product policy"))
-    if len(with_connector) > 1:
-        for scope, label in with_connector:
-            others = ", ".join(lab for _, lab in with_connector if lab != label)
+    # Two scopes overlap when one request passes through both: All APIs covers everything, and a
+    # product covers its APIs (membership is not read, so a product counts as overlapping). Two
+    # different APIs never see the same request (Form 2 or Form 3 on several APIs, the CAPTCHA API).
+    for scope, label in with_connector:
+        others = [lab for sc, lab in with_connector if lab != label and not (scope == "api" and sc == "api")]
+        if others:
             findings.append(Finding(
                 "L02", label, None,
-                f"connector also present at {others}: every request is inspected more than once",
+                f"connector also present at {', '.join(others)}: every request is inspected more than once",
                 "keep the connector at one scope only"))
 
     for scope, label, text in docs:
@@ -513,6 +565,7 @@ def lint_instance(reader: Reader, check_operations: bool = False) -> List[Findin
 
     # endpoints that need trust: the default one (when TLS is on) plus every map entry
     endpoints = {ep.lower()} if (ep and ep_ssl) else set()
+    bm_in_map = False  # an application-map entry (hand-written or generated) with bot_manager: true
 
     # generated application map (tools/securepath-apim-sync.py) in the securepath-app-map fragment
     uses_fragments = any(text and 'fragment-id="securepath-inbound"' in text for _, _, text in docs)
@@ -552,6 +605,8 @@ def lint_instance(reader: Reader, check_operations: bool = False) -> List[Findin
                                                     "run securepath-apim-sync apply (it writes the key Named Values before the fragment)"))
                         if entry.get("endpoint") and entry.get("ssl", True) is not False:
                             endpoints.add(str(entry["endpoint"]).lower())
+                        if entry.get("bot_manager") is True:
+                            bm_in_map = True
             except ValueError as e:
                 findings.append(Finding("L10", "fragments", None, f"the generated map is not valid JSON ({e})",
                                         "run securepath-apim-sync apply again"))
@@ -612,6 +667,8 @@ def lint_instance(reader: Reader, check_operations: bool = False) -> List[Findin
                                                     "the connector treats a mistyped entry as invalid and serves that application's requests uninspected (X-Rdwr-Diag: app_map_invalid)"))
                     if entry.get("endpoint") and entry.get("ssl", True) is not False:
                         endpoints.add(str(entry["endpoint"]).lower())
+                    if entry.get("bot_manager") is True:
+                        bm_in_map = True
         except ValueError as e:
             findings.append(Finding("L10", "named-values", None, f"rdwr-app-map is not valid JSON ({e})",
                                     "fix the JSON (single quotes, no double quotes) or set the Named Value to ##DISABLED##"))
@@ -627,6 +684,8 @@ def lint_instance(reader: Reader, check_operations: bool = False) -> List[Findin
     findings.extend(check_host_settings(nvs))
     if "rdwr-custom-bot-block-statuses" in nvs:
         findings.extend(check_bot_block_statuses(nvs.get("rdwr-custom-bot-block-statuses", ""), nvs.get("rdwr-bot-manager-enabled", ""), "rdwr-custom-bot-block-statuses"))
+    findings.extend(check_captcha_api(reader, docs, global_has, bool(with_connector),
+                                      (nvs.get("rdwr-bot-manager-enabled") or "").strip().lower() == "true" or bm_in_map))
     for key, entry in (app_map.items() if isinstance(app_map, dict) else []):
         if isinstance(entry, dict) and entry.get("bot_block_statuses") is not None:
             bm = entry.get("bot_manager")
@@ -685,7 +744,7 @@ def summarize_trace(trace: dict) -> dict:
          "bypassed": False, "sideband_url": None, "sideband_error": None, "sideband_status": None,
          "verdict_status": None, "oop_request_status": None, "diag": None, "enforced": None, "note": None, "wrong_api_key": False,
          "client_facing_host": None, "client_facing_host_source": None,
-         "oop_log": None, "response_log": None, "origin_status": None}
+         "oop_log": None, "response_log": None, "origin_status": None, "bm_path": None}
     seen = False
     for sec, src, text, data in _trace_entries(trace):
         if src == "api-inspector" and isinstance(data.get("configuration"), dict):
@@ -717,6 +776,8 @@ def summarize_trace(trace: dict) -> dict:
                     s["client_facing_host_source"] = v
                 elif n == "rdwrOopLog":
                     s["oop_log"] = v
+                elif n == "rdwrBmPath" and v:
+                    s["bm_path"] = v
                 elif n == "radwareDiag" and v:
                     v = str(v)
                     if v.startswith(ENFORCED_PREFIXES):
@@ -747,6 +808,8 @@ def summarize_trace(trace: dict) -> dict:
     s["connector_ran"] = seen
     if s["diag"] == "wrong_api_key_redirect":
         s["wrong_api_key"] = True
+    if s["response_log"] is None and seen and s["bm_path"]:
+        s["response_log"] = "none for this path"
     if s["response_log"] is None and seen:
         s["response_log"] = "not requested" if s["oop_log"] not in ("2", "3") else "not sent"
     return s
@@ -826,8 +889,10 @@ REDACT_HEADERS = {"authorization", "x-rdwr-api-key", "apim-debug-authorization",
 def redact_trace(trace: dict) -> int:
     """Replace, in place, the values of credential-carrying headers anywhere in the trace
     (the request's Authorization / subscription key / cookies, the debug token, and the
-    SecurePath API key the connector sends). Returns the number of values replaced."""
+    SecurePath API key the connector sends), and of the connector's variables that hold an API
+    key or the application map. Returns the number of values replaced."""
     n = 0
+    original = json.loads(json.dumps(trace))
 
     def walk(o):
         nonlocal n
@@ -844,21 +909,84 @@ def redact_trace(trace: dict) -> int:
             for v in o:
                 walk(v)
     walk(trace)
-    # set-variable / set-header entries also echo the value as a string in "value"/"message"
+    # set-variable / set-header entries also echo the value as a string in "value"/"message".
+    # The application map (hand-written or generated) carries every mapped application's key, so
+    # the variables that hold it, or the selected entry, are replaced whole.
     text_keys = ("value", "message")
+    secret_names = ("rdwrapikey", "x-rdwr-api-key", "rdwrappmapraw", "rdwrappmapgenerated", "rdwrappmapjson",
+                    "rdwrappselection")
 
     def scrub(o, parent_name=None):
         nonlocal n
         if isinstance(o, dict):
             name = o.get("name") if isinstance(o.get("name"), str) else parent_name
             for k in text_keys:
-                if isinstance(o.get(k), str) and name and name.lower() in ("rdwrapikey", "x-rdwr-api-key") and o[k] != "<redacted>":
+                if isinstance(o.get(k), str) and name and name.lower() in secret_names and o[k] != "<redacted>":
                     o[k] = "<redacted>"; n += 1
             for v in o.values():
                 scrub(v, name)
         elif isinstance(o, list):
             for v in o:
                 scrub(v, parent_name)
+    # The values those variables held are also echoed by the entries that computed them (an
+    # expression entry carries the result without the variable's name). Collect every key seen and
+    # replace it wherever it appears.
+    keys = set()
+
+    def collect_keys(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "api_key" and isinstance(v, str):
+                    keys.add(v)
+                else:
+                    collect_keys(v)
+        elif isinstance(o, list):
+            for v in o:
+                collect_keys(v)
+
+    def harvest(o):
+        if isinstance(o, dict):
+            name = o.get("name")
+            v = o.get("value").strip() if isinstance(o.get("value"), str) else None
+            if v is not None and isinstance(name, str) and name.lower() in ("rdwrapikey", "x-rdwr-api-key"):
+                keys.add(v)
+            elif v is not None and "api_key" in v:  # a map, or one entry of it, by name or not
+                try:
+                    collect_keys(parse_app_map(v))
+                except ValueError:
+                    pass
+            for v in o.values():
+                harvest(v)
+        elif isinstance(o, list):
+            for v in o:
+                harvest(v)
+    harvest(original)
+    keys = {k for k in keys if len(k) >= 8 and k != "<redacted>" and not k.startswith("{{")}
+
+    def replace_keys(o):
+        nonlocal n
+        if isinstance(o, dict):
+            for k, v in list(o.items()):
+                if isinstance(v, str):
+                    nv = v
+                    for key in keys:
+                        nv = nv.replace(key, "<redacted>")
+                    if nv != v:
+                        o[k] = nv; n += 1
+                else:
+                    replace_keys(v)
+        elif isinstance(o, list):
+            for i, v in enumerate(o):
+                if isinstance(v, str):
+                    nv = v
+                    for key in keys:
+                        nv = nv.replace(key, "<redacted>")
+                    if nv != v:
+                        o[i] = nv; n += 1
+                else:
+                    replace_keys(v)
+    if keys:
+        replace_keys(trace)
     scrub(trace)
     return n
 
@@ -875,6 +1003,11 @@ def format_trace_summary(s: dict) -> str:
                 call += f" ({s['oop_request_status']})"
     if not s["connector_ran"]:
         verdict = "-"
+    elif s["bm_path"] == "bare":
+        verdict = "Bot Manager CAPTCHA path without its final slash: redirected to /7f7c01e221604f25/ (not inspected)"
+    elif s["bm_path"]:
+        verdict = ("Bot Manager CAPTCHA path: forwarded to the inspection endpoint and its answer returned "
+                   "(not inspected, by design)")
     elif s["diag"]:
         verdict = f"served uninspected (X-Rdwr-Diag = {s['diag']})"
     elif s["enforced"] and s["enforced"].startswith("custom_bot_block_status_"):

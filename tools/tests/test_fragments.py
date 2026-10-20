@@ -97,7 +97,7 @@ def test_chunked_is_detected_as_a_token():
     assert 'GetValueOrDefault("origTransferEncoding", "")).ToLower() == "chunked"' not in t
     assert 'Variables["origTransferEncoding"]) == "chunked"' not in t
     assert "?.FirstOrDefault()?.ToLower()" not in t.split('name="origTransferEncoding"')[1].split("/>")[0]
-    assert t.count('<send-request mode="copy"') == 2
+    assert t.count('<send-request mode="copy" response-variable-name="radwareResponse"') == 2
 
 
 def test_no_policy_touches_transfer_encoding():
@@ -255,7 +255,7 @@ def test_onerror_enforces_a_block_whose_body_could_not_be_read():
 
 
 def test_inspection_copy_is_fitted_to_the_endpoint_header_limits():
-    """OI-36: the SecurePath endpoint answers 503 above 100 header lines and 400 to a header block it
+    """The SecurePath endpoint answers 503 above 100 header lines and 400 to a header block it
     cannot buffer, and the connector fails open on both. API Management admits far more; the
     inspection copy is fitted (rdwrFitDrop) and the drop is applied in each send-request by a fixed
     set of delete-slots (send-request takes no choose). The kept list, the method, path, query, body
@@ -279,7 +279,7 @@ def test_inspection_copy_is_fitted_to_the_endpoint_header_limits():
 
 
 def test_a_kept_header_over_the_line_limit_is_cut_not_sent_oversized():
-    """OI-36 (fleet rule): a kept header is never left out, but one whose single line would exceed the
+    """A kept header is never left out, but one whose single line would exceed the
     endpoint's ~8 KB limit, or kept headers that together exceed the 16384-byte block, are CUT in the
     inspection copy only. Cookie keeps the Bot Manager cookies first; the others truncate at a byte
     boundary. The request to the backend is never changed."""
@@ -351,7 +351,7 @@ def test_a_bare_percent_in_the_path_is_escaped_for_inspection_only():
 
 
 def test_query_is_sent_to_securepath_as_received():
-    """OI-36: the query must reach SecurePath exactly as the client sent it (no decode/re-encode),
+    """The query must reach SecurePath exactly as the client sent it (no decode/re-encode),
     so the inspection request line is no longer than the one API Management admitted."""
     t = frag("inbound")
     raw = t[t.index('name="rdwrTargetRaw"'):]
@@ -386,3 +386,80 @@ def test_default_chunked_list_covers_the_api_body_types():
         assert f'"chunked-request-allowed-content-types={want}"' in f.read()
     with open(os.path.join(root, "deploy", "securepath-apim.bicep"), encoding="utf-8") as f:
         assert f"value: '{want}'" in f.read()
+
+
+def test_bot_manager_captcha_path_is_forwarded_not_inspected():
+    """SecurePath's challenge redirect sends the visitor to /7f7c01e221604f25/ at the root of the
+    client-facing host. The connector forwards that path to the application's endpoint (Host = the
+    endpoint, X-ORIG-XFF from X-Forwarded-For, the answer returned as sent) BEFORE the static bypass
+    and the inspected path, and only when the client-facing path (base path stripped) starts with
+    it: a path that merely contains the segment is an ordinary request."""
+    t = frag("inbound")
+    i_sel = t.index('name="rdwrApiBasePath" value="@{ JObject e')
+    i_det = t.index('name="rdwrBmPath"')
+    i_problem = t.index('name="rdwrConfigProblem"')
+    assert i_sel < i_det < i_problem  # after the application (and its base_path) is chosen
+    det = t[i_det:t.index("/>", t.index("}\"", i_det))]
+    assert 'StartsWith("/7f7c01e221604f25/", StringComparison.Ordinal)' in det
+    assert 'path == "/7f7c01e221604f25"' in det
+    assert "Contains(" not in det and "IndexOf(" not in det
+    i_reserved = t.index('"[%transaction_id%]", "reserved-header-violation"')
+    i_route = t.index('response-variable-name="rdwrBmPathResponse"')
+    assert i_reserved < i_route < t.index("<!-- ====== Static bypass ====== -->") < t.index("<!-- ====== Inspected path ====== -->")
+    send = t[t.rindex("<send-request", 0, i_route):t.index("</send-request>", i_route)]
+    assert "X-Rdwr-" not in send and "x-rdwr-" not in send  # not an inspection call: no connector headers
+    assert '<set-header name="Host" exists-action="override">' in send
+    assert '<set-header name="X-ORIG-XFF" exists-action="@(' in send and 'GetValueOrDefault("X-Forwarded-For", "")' in send
+    assert 'timeout="@((int)context.Variables["rdwrAppEpTimeout"])" ignore-error="true"' in send
+    assert '<return-response response-variable-name="rdwrBmPathResponse" />' in t
+    # the endpoint could not be reached: a prompt 502, never the backend
+    tail = t[t.index("Bot Manager inline CAPTCHA path: forwarded"):t.index("<!-- ====== Static bypass ====== -->")]
+    assert '<set-status code="502"' in tail and '<set-status code="404"' in tail
+
+
+def test_the_config_problem_line_does_not_claim_the_captcha_path_was_served():
+    t = frag("inbound")
+    i = t.index('name="rdwrConfigProblem"')
+    cond = t[t.index("<when condition=", i):t.index(">", t.index("<when condition=", i))]
+    assert '((string)context.Variables["rdwrBmPath"]) == ""' in cond
+
+
+def test_only_the_captcha_path_is_routed():
+    """API Management does no Bot Manager script injection (a policy cannot modify the origin's
+    response body), so the script and telemetry paths are not routed by this connector."""
+    for name in ("inbound", "outbound", "onerror"):
+        t = frag(name)
+        assert "18f5227b-e27b-445a-a53f-f845fbe69b40" not in t and "c99a4269-161c-4242-a3f0-28d44fa6ce24" not in t, name
+
+
+def test_no_return_response_header_can_be_emitted_empty():
+    """A null <value> in a set-header is emitted as an EMPTY header on the classic tiers (Developer,
+    Basic, Standard, Premium) — six empty "Set-Cookie:" lines on a block with Bot Manager off, measured
+    2026-10-19 — while Standard v2 drops it. Every optional header of the connector's own responses is
+    therefore added or left out by its exists-action, never by a null value."""
+    for name in ("inbound", "onerror"):
+        t = frag(name)
+        assert "? null" not in t and "return null" not in t, name
+        for m in re.finditer(r'<set-header name="Set-Cookie" exists-action="([^"]*)">\s*<value>([^<]*)</value>', t):
+            assert "bmSlotAct" in m.group(1) and "bmSlotVal" in m.group(2), m.group(0)[:120]
+
+
+def test_cookie_slots_put_unused_slots_first_and_keep_securepath_order():
+    """Simulate the slot rules on a fresh response: delete before any append (a delete after a cookie
+    would remove it), and the cookies end up in SecurePath's order."""
+    t = frag("inbound")
+    for k in range(6):
+        assert f'name="bmSlotAct{k}" value="@({k} < 6 - (int)context.Variables["bmSetCookieN"] ? "delete" : "append")"' in t
+        assert f'"bmSetCookie" + ({k} - 6 + (int)context.Variables["bmSetCookieN"])' in t
+    for n in range(7):
+        cookies = [f"c{i}" for i in range(n)]
+        out = []
+        for k in range(6):
+            if k < 6 - n:
+                out = [c for c in out]  # delete on an absent header: nothing (and nothing appended yet)
+                assert out == []
+            else:
+                out.append(cookies[k - 6 + n])
+        assert out == cookies
+    # the slot variables are computed where the cookies are extracted, before any block response
+    assert t.index('name="bmSlotVal5"') < t.index('exists-action="@((string)context.Variables.GetValueOrDefault("bmSlotAct0", "delete"))"')

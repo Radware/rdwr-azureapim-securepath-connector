@@ -1,9 +1,11 @@
 # One-shot install with Bicep
 
 Installs the connector at **All APIs** scope on an existing API Management instance: the 24
-Named Values, the four policy fragments (including the empty default of the generated
-application map), the All APIs policy that references them, and the backend entity that
-establishes trust for the inspection endpoint on Standard v2 / Premium v2. Policies you already
+Named Values, the All APIs policy that references the four policy fragments, the backend entity
+that establishes trust for the inspection endpoint on Standard v2 / Premium v2, and, with Bot
+Manager enabled, the API for the Bot Manager CAPTCHA path (main README, Step 4). The fragments
+themselves are registered first, by the first block of main README Step 4, Form 1: the inbound
+fragment is larger than a Bicep template may embed. Policies you already
 have on APIs and products are not touched; they inherit the connector through `<base />`. **The
 All APIs policy itself is replaced**: if the instance already has one, export it first (the
 `what-if` below shows `~ Modify` on `policies/policy`) and add the connector's lines to it by
@@ -81,6 +83,7 @@ as it is.
 | `appId`, `apiKey`, `endpoint` | required | your SecurePath application values |
 | `endpointPort` / `endpointSsl` | `443` / `true` | leave unless Radware told you otherwise |
 | `botManagerEnabled` | `false` | `true` if Bot Manager is enabled on your application |
+| `createCaptchaApi` | same as `botManagerEnabled` | the API `securepath-captcha` on the path `7f7c01e221604f25`, through which the connector serves a challenged visitor the CAPTCHA page; main README, Step 4, "The Bot Manager CAPTCHA path" |
 | `trueClientIpHeader` | `##DISABLED##` | header carrying the real client IP when a proxy you control fronts the gateway and is its sole path (`X-Forwarded-For`); main README 3b |
 | `apiBasePath` | `/` | path prefix to strip before inspection |
 | `createBackend` | `true` | backend entity for endpoint trust on Standard v2 / Premium v2 (Path B; the gateway does not validate the endpoint's certificate); set `false` on Developer, Basic, Standard and Premium, where the CA is installed and the certificate is validated |

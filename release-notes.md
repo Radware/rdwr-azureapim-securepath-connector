@@ -2,13 +2,68 @@
 
 ## v1.5.0 (2026-10-04)
 
+### Package update, 2026-10-20
+
+The package was updated with the changes below. The connector still identifies itself as
+`700-v1.5.0`. **If you installed the v1.5.0 package of 2026-10-04, re-register two fragments (or
+replace the policy document), and with Bot Manager enabled add one API:** the Named Values and your
+own policies are unchanged.
+
+- **A visitor that Bot Manager challenges reaches the CAPTCHA page.** The connector forwards the
+  Bot Manager CAPTCHA path to the inspection endpoint; it needs an API on that path. See *A visitor
+  that Bot Manager challenges reaches the CAPTCHA page* below.
+- **No empty header lines in the connector's own responses on Developer, Basic, Standard and
+  Premium.** On those tiers a block, redirect or custom Bot Manager response carried an empty
+  `Set-Cookie:` line for each Bot Manager cookie slot it did not use (six when Bot Manager is off),
+  and a custom Bot Manager response an empty `Retry-After`, `Cache-Control`, `Expires` or
+  `WWW-Authenticate` line when SecurePath did not send that header. Those lines are now left out;
+  the Bot Manager cookies are relayed in SecurePath's order, as before. Standard v2 and Premium v2
+  sent no such lines.
+- **A trace saved by `tools/securepath-apim-trace.sh`, or redacted with `--redact`, no longer
+  contains application-map API keys.** The redaction now also covers the connector's variables that
+  hold the application map. Redact a trace saved with the earlier tools again with the new
+  `tools/securepath-apim-lint.py --redact` before you share it.
+- The install check reports a Bot Manager install without the CAPTCHA API (`L17`), and no longer
+  reports `L02` for the connector on two different APIs. The Bicep template creates the CAPTCHA API
+  when `botManagerEnabled` is `true`. The README examples use values that belong to no application.
+
+**What to re-copy from this package:**
+
+1. Forms 1 and 2: register `securepath-inbound` and `securepath-onerror` again, from the directory
+   that holds this package's `fragments/` folder. The other two fragments are unchanged; in
+   particular `securepath-app-map` stays as it is, which matters if the sync tool writes it. Form 3:
+   replace the document with `rdwr-azureapim-securepath-connector-v1.5.xml` (README Step 4, Form 3).
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+SUB=$(az account show --query id -o tsv)
+BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
+RDWR_OK=1
+for F in inbound onerror; do
+  jq -Rs "{properties:{format:\"rawxml\",description:\"Radware SecurePath $F\",value:.}}" \
+     fragments/securepath-$F.fragment.xml > rdwr-frag-$F.json &&
+  az rest --method PUT --uri "$BASE/policyFragments/securepath-$F?api-version=2024-05-01" \
+          --headers "Content-Type=application/json" --body @rdwr-frag-$F.json -o none > /dev/null &&
+  echo "registered securepath-$F" || { echo "FAILED: securepath-$F"; RDWR_OK=0; break; }
+done
+[ "$RDWR_OK" = 1 ] && echo "both fragments registered"
+```
+
+2. With Bot Manager enabled: add the CAPTCHA API (README Step 4, *The Bot Manager CAPTCHA path*;
+   with Form 2 or Form 3, give it the connector too).
+3. Replace your copy of `tools/`.
+4. Run `python3 tools/securepath-apim-lint.py --live` (README 5e).
+
 **The policy changed in this release, and every v1.4.0 install must be updated**, in the order given
 in "Upgrading from v1.4.0" at the end of this section: API Management no longer accepts part of the
 v1.4.0 policy. What is new: the connector inspects the requests API Management answers itself
 (no matching operation, missing or invalid subscription key); SecurePath's answer can no longer hold
 an allowed request beyond `rdwr-app-ep-timeout-seconds`; the response-phase log no longer holds a
-response to measure it; and configuration values the connector cannot use are reported instead of
-failing requests. `x-rdwr-plugin-info` becomes `700-v1.5.0`.
+response to measure it; configuration values the connector cannot use are reported instead of
+failing requests; and, with Bot Manager enabled, a visitor that Bot Manager challenges now reaches the
+CAPTCHA page (one API to add, README Step 4). `x-rdwr-plugin-info` becomes `700-v1.5.0`.
 
 ### The policy is accepted by API Management again
 
@@ -39,6 +94,32 @@ fragment install forms — every request at All APIs scope (Form 1), the API's o
 or product policy (Form 2); the Form 3 document does not include it. If SecurePath cannot be
 reached or answers with an error, API Management's own 404 or 401 is returned unchanged, within
 `rdwr-app-ep-timeout-seconds`, and the trace says the request was not inspected.
+
+### A visitor that Bot Manager challenges reaches the CAPTCHA page
+
+Bot Manager challenges a visitor by redirecting it to `/7f7c01e221604f25/` on the site's own
+hostname, where the application's SecurePath inspection endpoint serves the CAPTCHA page. API
+Management had nothing on that path, and the connector inspected it like any other request, so the
+challenged visitor got a block page, a `404`, or the page of the API that owns the root of the
+hostname instead of the CAPTCHA, and could not get past the challenge.
+
+- The connector now forwards requests for that path to the inspection endpoint of the request's
+  application, over the connection it uses for inspection and within `rdwr-app-ep-timeout-seconds`:
+  not inspected, no response-phase log, never sent to the backend. The visitor receives the
+  endpoint's answer as sent (status, headers, every cookie, body); the endpoint receives `Host` set
+  to its own name and the `X-Forwarded-For` the gateway received as `X-ORIG-XFF` (a client's own
+  `X-ORIG-XFF` is never passed on). The application is selected by the client-facing hostname, `*`
+  or the default application; an entry keyed by an API id does not apply to this path.
+- **What you add, with Bot Manager enabled:** the API `securepath-captcha` on the path
+  `7f7c01e221604f25` (README Step 4, "The Bot Manager CAPTCHA path": one CLI block, no subscription
+  key, no policy of its own with Form 1). `deploy/securepath-apim.bicep` creates it when
+  `botManagerEnabled` is `true` (parameter `createCaptchaApi`).
+- `/7f7c01e221604f25` without the final slash is redirected to `/7f7c01e221604f25/` on the visitor's
+  own hostname. If the endpoint cannot be reached, the visitor receives `502` within the timeout; if
+  no application is configured for the hostname, `404`. Both are written to the trace.
+- The Bot Manager script and its data are not served by this connector: API Management cannot add
+  the script to your pages (a policy cannot modify the origin's response body), so those two paths
+  are not involved.
 
 ### SecurePath's answer cannot hold an allowed request beyond the timeout
 
@@ -139,6 +220,8 @@ such as `/report.PNG` is inspected rather than bypassed.
 - `L16` reports a fragment install whose `<on-error>` does not carry the block for the requests API
   Management answers itself.
 - `L08` / `L10` report an endpoint that is not a bare host name and a map port outside 1–65535.
+- `L17` reports a Bot Manager install without the API for the CAPTCHA path, or with one that the
+  connector does not run for, or that requires a subscription key.
 - The Named Value pre-flight check (README 2a) and the Named Value check (3c) reported nothing in zsh,
   the default shell on macOS (`collisions: 0` whatever existed): they now run the same in bash and
   zsh, and 2a reports how many names it checked.
@@ -146,7 +229,8 @@ such as `/report.PNG` is inspected rather than bypassed.
 ### Named Values and version
 
 No new Named Values (24 in total). `x-rdwr-plugin-info` becomes `700-v1.5.0`. The policy document
-is now `rdwr-azureapim-securepath-connector-v1.5.xml`.
+is now `rdwr-azureapim-securepath-connector-v1.5.xml`. With Bot Manager enabled, one new API:
+`securepath-captcha` (README Step 4).
 
 ### Upgrading from v1.4.0
 
@@ -163,13 +247,16 @@ still references the v1.4.0 ones. In this order:
    fragment reads it).
 4. Put the connector's lines back: the second block of Form 1, or the Form 2 lines, including the
    `<on-error>` block.
-5. Run `python3 tools/securepath-apim-lint.py --live` (README 5e): any fragment that did not register
+5. With Bot Manager enabled, add the API for the CAPTCHA path (README Step 4, "The Bot Manager
+   CAPTCHA path").
+6. Run `python3 tools/securepath-apim-lint.py --live` (README 5e): any fragment that did not register
    is reported as `L14`. Then trace one request (README Debugging, Option A).
 
-With the Bicep template, do steps 1 and 2, then run the deployment (it performs steps 3 and 4 for the
+With the Bicep template, do steps 1 and 2, then run the deployment (it performs steps 3, 4 and 5 for the
 All APIs scope; it writes the Named Values before the fragments, which API Management refuses while the
 v1.4.0 fragments are registered). Form 3 (the policy document): replace the document with
-`rdwr-azureapim-securepath-connector-v1.5.xml` — a single save, no other step.
+`rdwr-azureapim-securepath-connector-v1.5.xml` — a single save — and, with Bot Manager enabled, add
+the CAPTCHA API with the same document on it.
 
 From v1.3.x, follow "Upgrading from v1.3.x" under v1.4.0, using this release's files; the
 `<on-error>` block (README Step 4) is part of the Form 1 and Form 2 lines.
@@ -615,7 +702,7 @@ Initial release. Basic inspection call and verdict enforcement.
 
 | Version    | Date       | Status      | Highlights                                                       |
 |------------|------------|-------------|------------------------------------------------------------------|
-| **v1.5.0** | 2026-10-04 | **Current** | Policy accepted by API Management again, requests API Management answers itself inspected, SecurePath's answer and the response-phase log can no longer hold a response, unusable configuration reported instead of failing requests |
+| **v1.5.0** | 2026-10-04 | **Current** | Policy accepted by API Management again, requests API Management answers itself inspected, SecurePath's answer and the response-phase log can no longer hold a response, unusable configuration reported instead of failing requests, Bot Manager CAPTCHA path served |
 | v1.4.0     | 2026-09-22 | Superseded  | Several applications on one instance, client-facing hostname, generated map and sync tool, on-error log, custom Bot Manager block responses, install check, trace tool |
 | v1.3.4     | 2026-08-16 | Superseded  | Three install forms, pre-flight checks (documentation and packaging; policy unchanged) |
 | v1.3.3     | 2026-08-14 | Superseded  | Certificate files shipped in the package (documentation and packaging) |

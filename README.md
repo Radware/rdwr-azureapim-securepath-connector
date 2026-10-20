@@ -52,12 +52,12 @@ use:
 
 | Variable | Example |
 |---|---|
-| `RG` | `waaap` |
-| `APIM` | `securepath-apim` |
+| `RG` | `rg-orders-prod` |
+| `APIM` | `contoso-apim` |
 | `API_ID` | `orders-api` |
-| `APP_ID` | `afa37f7d53ce4e76a4988c4955c2d7e5` |
+| `APP_ID` | `0123456789abcdef0123456789abcdef` |
 | `API_KEY` | `f4b1c2d3-1111-2222-3333-abcdefabcdef` |
-| `APP_EP` | `afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net` |
+| `APP_EP` | `0123456789abcdef0123456789abcdef.oop.radwarecloud.net` |
 
 > **The mistake almost everyone makes once.** The Radware Cloud portal also shows a hostname ending
 > `.v1.radwarecloud.net`. That is your application's front-end address and this connector does not
@@ -520,7 +520,9 @@ For each request the connector looks up, in this order:
 2. the **client-facing hostname**;
 3. the entry named `*`.
 
-The first match wins. No match means the default application from 3a. If you set `rdwr-app-id`
+The first match wins. No match means the default application from 3a. (The Bot Manager CAPTCHA
+path is not on one of your APIs, so step 1 never applies to it; see
+[The Bot Manager CAPTCHA path](#the-bot-manager-captcha-path).) If you set `rdwr-app-id`
 to `##DISABLED##` there is no default: an unmatched request is **served without inspection**,
 and the connector says so — it adds `X-Rdwr-Diag: no_app_mapping` to the request it forwards to
 your backend and writes a trace line — so an unprotected API is visible, never silent.
@@ -604,7 +606,7 @@ options.
 Named Value is inserted into the policy text, where a double quote is not allowed:
 
 ```
-{'orders-api': {'app_id': 'afa37f7d53ce4e76a4988c4955c2d7e5', 'api_key': 'f4b1c2d3-1111-2222-3333-abcdefabcdef', 'endpoint': 'afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net', 'base_path': '/orders'},
+{'orders-api': {'app_id': '0123456789abcdef0123456789abcdef', 'api_key': 'f4b1c2d3-1111-2222-3333-abcdefabcdef', 'endpoint': '0123456789abcdef0123456789abcdef.oop.radwarecloud.net', 'base_path': '/orders'},
  'shop.example.com': {'app_id': '0b1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f', 'api_key': 'aaaa1111-2222-3333-4444-555566667777', 'endpoint': '0b1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f.oop.radwarecloud.net'},
  '*': {'app_id': '9f8e7d6c5b4a39281706f5e4d3c2b1a0', 'api_key': 'bbbb1111-2222-3333-4444-555566667777', 'endpoint': '9f8e7d6c5b4a39281706f5e4d3c2b1a0.oop.radwarecloud.net'}}
 ```
@@ -774,7 +776,8 @@ To see it work, trace one request (Debugging, Option A): the readout's verdict l
 
 **What this does:** installs the connector. Whichever form you choose, it covers the request
 path, the response path and requests rejected by your own policies. There is no separate step
-for response-phase logging.
+for response-phase logging. With Bot Manager enabled, also add the API for
+[the Bot Manager CAPTCHA path](#the-bot-manager-captcha-path).
 
 Pick **one** form and install at **one** scope.
 
@@ -1092,6 +1095,90 @@ Set-AzApiManagementPolicy -Context $ctx -ApiId "your-api-resource-name" `
 XML attributes.
 
 ---
+
+## The Bot Manager CAPTCHA path
+
+**Needed when Bot Manager is enabled on your SecurePath application**, whichever form you
+installed. Without it, a visitor that Bot Manager challenges cannot get past the challenge.
+
+When Bot Manager challenges a visitor, SecurePath redirects the visitor's browser to
+`/7f7c01e221604f25/` on your own hostname (`https://www.example.com/7f7c01e221604f25/?ssa=…`), and
+your application's SecurePath inspection endpoint serves the CAPTCHA page on that path. Your APIs
+live under their own URL suffixes, so API Management has no operation for it: unless the connector
+forwards it, the visitor gets API Management's `404 Resource not found`, a block page, or whatever
+API owns the root of the hostname, instead of the CAPTCHA.
+
+The connector forwards requests for this path to the inspection endpoint of the request's
+application, over the same trusted connection it uses for inspection (Step 1) and within
+`rdwr-app-ep-timeout-seconds`. They are not inspected, no response-phase log is sent, and they never
+reach your backend. The visitor receives SecurePath's answer as SecurePath sent it: status, headers,
+every cookie, body (on Standard v2 and Premium v2, API Management itself leaves out the `Server`
+and `Alt-Svc` headers). SecurePath receives the request as the visitor sent it, with `Host` set to the
+endpoint and the `X-Forwarded-For` the gateway received copied to `X-ORIG-XFF` (an `X-ORIG-XFF`
+sent by the client is never passed on).
+
+**What you add** is an API on the path `7f7c01e221604f25`, so that the request reaches the
+connector. It needs no subscription key, since the caller is a visitor's browser, and no backend of
+its own: the connector answers every request on it.
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+APP_EP="your-application-id.oop.radwarecloud.net"
+
+az apim api create -g "$RG" --service-name "$APIM" --api-id securepath-captcha \
+  --path 7f7c01e221604f25 --display-name "SecurePath Bot Manager CAPTCHA" \
+  --service-url "https://$APP_EP/7f7c01e221604f25" --protocols https --subscription-required false \
+  --only-show-errors -o none &&
+az apim api operation create -g "$RG" --service-name "$APIM" --api-id securepath-captcha \
+  --operation-id captcha-get --display-name "GET /*" --method GET --url-template "/*" -o none &&
+az apim api operation create -g "$RG" --service-name "$APIM" --api-id securepath-captcha \
+  --operation-id captcha-post --display-name "POST /*" --method POST --url-template "/*" -o none &&
+az apim api operation create -g "$RG" --service-name "$APIM" --api-id securepath-captcha \
+  --operation-id captcha-head --display-name "HEAD /*" --method HEAD --url-template "/*" -o none &&
+echo "CAPTCHA API created"
+```
+
+`deploy/securepath-apim.bicep` creates the same API when `botManagerEnabled` is `true`. The service
+URL (the endpoint, with the path) is used only if the connector does not run for this API. Then,
+depending on the form:
+
+- **Form 1:** nothing more. The API has no policy of its own and inherits the connector from the
+  All APIs scope.
+- **Form 2:** add the connector's lines to this API's own policy, as for any other API.
+- **Form 3:** put the policy document on this API too (`API_ID="securepath-captcha"`).
+
+**Which application serves the path.** The request is not on one of your APIs, so an
+application-map entry keyed by an API id does not apply to it. The connector uses the entry for the
+client-facing hostname, then `*`, then the default application (3a). If your map is keyed by API id
+only and the default application is disabled, add an entry for each hostname on which Bot Manager
+challenges visitors, or a `*` entry; otherwise the connector answers the path with `404` and writes
+a trace line naming the hostname that had no application. The path is recognised after
+`rdwr-api-base-path` (or the entry's `base_path`) is removed, the same way inspection reads paths,
+so `/shop/7f7c01e221604f25/` is an ordinary request unless `/shop` is that base path.
+
+With Form 1, the connector also forwards the path when no API matches it at all, from its
+`<on-error>` block ([Requests API Management answers itself](#requests-api-management-answers-itself)).
+Create the API anyway: without it, API Management counts each of these requests as a failed request
+(no matching operation) in its analytics, and the path then depends on how the `<on-error>` section
+is written.
+
+**Verify**, with the hostname your visitors use:
+
+```bash
+SITE="your-site-hostname"
+
+curl -s -o /dev/null -D - "https://$SITE/7f7c01e221604f25/" | grep -i -E "^(HTTP|set-cookie)"
+```
+
+Expect `200` and at least one `Set-Cookie`: SecurePath's own page for a request that carries no
+challenge. A `404` means the request did not reach the connector, or no application was found for
+the hostname (the trace says which). The install check (5e) reports a Bot Manager install without
+the API as `L17`. A request the endpoint answered cannot be traced with
+`tools/securepath-apim-trace.sh`: the connector returns the endpoint's response as it is, without
+API Management's trace header, so the script reports that no trace id came back.
+
+---
 ---
 
 # ▶ STEP 5 — Verify
@@ -1260,7 +1347,7 @@ Trace summary
   API / operation:        /orders / GET /orders/{id}
   connector ran:          yes (fragments)
   policies before it:     none
-  inspection call:        https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net/orders/1 -> 200 (allowed)
+  inspection call:        https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net/orders/1 -> 200 (allowed)
   verdict:                allow
   response-phase log:     sent
   origin answered:        200
@@ -1282,12 +1369,12 @@ Trace summary
   API / operation:        /orders / GET /orders/{id}
   connector ran:          yes (fragments)
   policies before it:     none
-  inspection call:        https://afa37f7d53ce4e76a4988c4955c2d7e5.v1.radwarecloud.net/orders/1 -> FAILED: The remote certificate was rejected by the provided RemoteCertificateValidationCallback
+  inspection call:        https://0123456789abcdef0123456789abcdef.v1.radwarecloud.net/orders/1 -> FAILED: The remote certificate was rejected by the provided RemoteCertificateValidationCallback
   verdict:                served uninspected (X-Rdwr-Diag = sideband_error_or_timeout)
   response-phase log:     not requested
   origin answered:        200
 
-T03 [trace]: the inspection call went to 'afa37f7d53ce4e76a4988c4955c2d7e5.v1.radwarecloud.net', which is not a SecurePath inspection endpoint. Fix: set rdwr-app-ep-addr (or the application-map entry) to <APP_ID>.oop.radwarecloud.net — the '.v1.radwarecloud.net' hostname is the application's front-end address (Step 3a, Step 3c)
+T03 [trace]: the inspection call went to '0123456789abcdef0123456789abcdef.v1.radwarecloud.net', which is not a SecurePath inspection endpoint. Fix: set rdwr-app-ep-addr (or the application-map entry) to <APP_ID>.oop.radwarecloud.net — the '.v1.radwarecloud.net' hostname is the application's front-end address (Step 3a, Step 3c)
 T04 [trace]: the inspection call was rejected on TLS (The remote certificate was rejected by the provided RemoteCertificateValidationCallback); the request was served uninspected. Fix: establish trust for exactly this host (Step 1): CA certificates on Developer/Basic/Standard/Premium (Path A), a backend entity with certificate validation disabled on Standard v2/Premium v2 (Path B); fix T03 first — a backend entity created for the .oop host does not apply to this URL
 2 finding(s)
 ```
@@ -1297,8 +1384,9 @@ listed in `tools/README.md`. Exit code `0` means the trace shows a completed ins
 problem, `2` no trace could be captured (the message says why).
 
 **The trace file is sensitive.** A trace carries the request's own credentials (`Authorization`,
-subscription key, cookies), the debug token, and the SecurePath API key the connector sends. The
-script replaces those values with `<redacted>` when it saves the file; a trace saved any other way
+subscription key, cookies), the debug token, the SecurePath API key the connector sends and, when
+you use the application map (3d), the API key of every mapped application. The script replaces
+those values with `<redacted>` when it saves the file; a trace saved any other way
 (the Portal, the commands in Option B) is not redacted until you run
 `python3 tools/securepath-apim-lint.py --redact trace.json`. Do that before attaching a trace to a
 ticket or sending it to a colleague, and delete the file when you are done.
@@ -1481,6 +1569,9 @@ still inspects such a request from `<on-error>` (see
 [Requests API Management answers itself](#requests-api-management-answers-itself)); to test the
 connector with a request that reaches your backend, use a path from `az apim api operation list`.
 
+A `404` for `/7f7c01e221604f25/` is the Bot Manager CAPTCHA path: see
+[The Bot Manager CAPTCHA path](#the-bot-manager-captcha-path).
+
 ## Issue 8 — Unexpected 403 on traffic that should pass
 
 The request carried a reserved header. The connector rejects any request presenting
@@ -1577,6 +1668,15 @@ az rest --method PUT --uri "$URI" --headers "Content-Type=application/json" --bo
 ```
 
 ## In every case
+
+If you added the API for the Bot Manager CAPTCHA path, delete it:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+az apim api delete -g "$RG" --service-name "$APIM" --api-id securepath-captcha --yes
+```
 
 The 24 Named Values and the backend entities are inert once the connector is removed. Delete them
 after the fragments are gone (API Management refuses while a fragment references them) — and check

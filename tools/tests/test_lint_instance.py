@@ -14,8 +14,8 @@ def fx(name):
 
 
 NV_OK = {n: "x" for n in lint.REQUIRED_NAMED_VALUES}
-NV_OK.update({"rdwr-app-id": "afa37f7d53ce4e76a4988c4955c2d7e5",
-              "rdwr-app-ep-addr": "afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net",
+NV_OK.update({"rdwr-app-id": "0123456789abcdef0123456789abcdef",
+              "rdwr-app-ep-addr": "0123456789abcdef0123456789abcdef.oop.radwarecloud.net",
               "rdwr-app-ep-ssl": "true",
               "rdwr-app-map": "##DISABLED##", "rdwr-true-host-header": "##DISABLED##",
               "rdwr-custom-bot-block-statuses": "##DISABLED##"})
@@ -27,7 +27,7 @@ class FakeReader(lint.Reader):
         self._apis, self._products = apis or {}, products or {}
         self._nvs = NV_OK if nvs is None else nvs
         self._backends = backends if backends is not None else [
-            "https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net"]
+            "https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net"]
 
     def sku(self): return self._sku
     def global_policy(self): return self._glob
@@ -102,9 +102,9 @@ def test_l08_app_id_with_dot_and_wrong_endpoint():
 def test_l08_endpoint_with_scheme_port_or_path():
     """A scheme, port or path in rdwr-app-ep-addr ends in .oop.radwarecloud.net just the same, so the
     old check passed it; the connector serves every request uninspected with it (config_incomplete)."""
-    for bad in ("https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net",
-                "afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net:443",
-                "afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net/"):
+    for bad in ("https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net",
+                "0123456789abcdef0123456789abcdef.oop.radwarecloud.net:443",
+                "0123456789abcdef0123456789abcdef.oop.radwarecloud.net/"):
         nvs = dict(NV_OK)
         nvs["rdwr-app-ep-addr"] = bad
         f = lint.lint_instance(FakeReader(glob=fx("clean_global.xml"), nvs=nvs))
@@ -113,8 +113,8 @@ def test_l08_endpoint_with_scheme_port_or_path():
 
 def test_l10_map_entry_port_out_of_range_and_endpoint_with_scheme():
     nvs = dict(NV_OK)
-    nvs["rdwr-app-map"] = ("{'orders': {'app_id': 'a', 'api_key': 'k', 'endpoint': 'afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net', 'port': 70000},"
-                           " 'shop': {'app_id': 'a', 'api_key': 'k', 'endpoint': 'https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net'}}")
+    nvs["rdwr-app-map"] = ("{'orders': {'app_id': 'a', 'api_key': 'k', 'endpoint': '0123456789abcdef0123456789abcdef.oop.radwarecloud.net', 'port': 70000},"
+                           " 'shop': {'app_id': 'a', 'api_key': 'k', 'endpoint': 'https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net'}}")
     f = lint.lint_instance(FakeReader(glob=fx("clean_global.xml"), nvs=nvs))
     msgs = [x.message for x in f if x.code == "L10"]
     assert any("'orders' port is 70000" in m for m in msgs), msgs
@@ -168,11 +168,11 @@ def test_l04_flows_through_from_api_documents():
 def test_single_quoted_map_is_accepted_and_base_path_checked():
     nvs = dict(NV_OK)
     nvs["rdwr-app-map"] = "{'orders': {'app_id': 'a', 'api_key': 'k', 'endpoint': 'x.oop.radwarecloud.net', 'base_path': 'orders'}}"
-    r = FakeReader(glob=fx("clean_global.xml"), nvs=nvs, backends=["https://x.oop.radwarecloud.net", "https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net"])
+    r = FakeReader(glob=fx("clean_global.xml"), nvs=nvs, backends=["https://x.oop.radwarecloud.net", "https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net"])
     f = lint.lint_instance(r)
     assert codes(f) == ["L10"] and "base_path" in f[0].message
     nvs["rdwr-app-map"] = "{'orders': {'app_id': 'a', 'api_key': 'k', 'endpoint': 'x.oop.radwarecloud.net', 'base_path': '/orders'}}"
-    assert lint.lint_instance(FakeReader(glob=fx("clean_global.xml"), nvs=nvs, backends=["https://x.oop.radwarecloud.net", "https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net"])) == []
+    assert lint.lint_instance(FakeReader(glob=fx("clean_global.xml"), nvs=nvs, backends=["https://x.oop.radwarecloud.net", "https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net"])) == []
 
 
 def test_map_endpoint_without_backend_is_l09():
@@ -201,11 +201,11 @@ GEN = ('<fragment>\n    <set-variable name="rdwrAppMapGenerated" value="{\'shop.
 def test_generated_map_endpoints_and_key_named_values_are_checked():
     nvs = dict(NV_OK)
     r = FakeReaderWithFragment(glob=fx("clean_global.xml"), nvs=nvs, fragment=GEN,
-                               backends=["https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net"])
+                               backends=["https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net"])
     assert codes(lint.lint_instance(r)) == ["L09", "L12"]
     nvs["rdwr-app-key-a1"] = "k"
     r = FakeReaderWithFragment(glob=fx("clean_global.xml"), nvs=nvs, fragment=GEN,
-                               backends=["https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net", "https://gen1.oop.radwarecloud.net"])
+                               backends=["https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net", "https://gen1.oop.radwarecloud.net"])
     assert lint.lint_instance(r) == []
 
 
@@ -232,7 +232,7 @@ def _nv(**over):
 
 
 def _codes(nvs):
-    r = FakeReader(glob=fx("clean_global.xml"), nvs=nvs, backends=["https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net"])
+    r = FakeReader(glob=fx("clean_global.xml"), nvs=nvs, backends=["https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net"])
     return [f for f in lint.lint_instance(r) if f.code == "L13"]
 
 
@@ -267,7 +267,7 @@ def test_L13_map_entry_override_checked():
 # ---------------------------------------------------------------- L15 live fragments vs the shipped files
 
 def _l15(frags):
-    r = FakeReader(glob=fx("clean_global.xml"), nvs=NV_OK, backends=["https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net"])
+    r = FakeReader(glob=fx("clean_global.xml"), nvs=NV_OK, backends=["https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net"])
     r.frags = frags
     return [f for f in lint.lint_instance(r) if f.code == "L14"]
 
@@ -384,3 +384,68 @@ def test_operations_are_not_read_when_no_wider_scope_carries_the_connector():
     r._glob = None
     r._apis = {"orders": fx("clean_api.xml")}
     assert [f for f in lint.lint_instance(r, check_operations=True) if f.code == "L03"] == []
+
+
+class FakeReaderWithApis(FakeReader):
+    def __init__(self, *a, info=None, **kw):
+        super().__init__(*a, **kw)
+        self._info = info
+
+    def api_info(self):
+        return self._info
+
+
+NV_BM = dict(NV_OK, **{"rdwr-bot-manager-enabled": "true"})
+CAPTCHA_INFO = {"orders": {"path": "orders", "subscription_required": True},
+                "securepath-captcha": {"path": "7f7c01e221604f25", "subscription_required": False}}
+
+
+def test_l17_bot_manager_without_the_captcha_api():
+    r = FakeReaderWithApis(glob=fx("clean_global.xml"), apis={"orders": fx("no_connector_api.xml")}, nvs=NV_BM,
+                           info={"orders": {"path": "orders", "subscription_required": True}})
+    f = [x for x in lint.lint_instance(r) if x.code == "L17"]
+    assert len(f) == 1 and "/7f7c01e221604f25/" in f[0].message and "securepath-captcha" in f[0].fix
+
+
+def test_l17_clean_with_the_captcha_api_at_all_apis_scope():
+    r = FakeReaderWithApis(glob=fx("clean_global.xml"), apis={"orders": fx("no_connector_api.xml"), "securepath-captcha": None},
+                           nvs=NV_BM, info=CAPTCHA_INFO)
+    assert lint.lint_instance(r) == []
+
+
+def test_l17_not_reported_without_bot_manager_or_when_apis_are_unknown():
+    r = FakeReaderWithApis(glob=fx("clean_global.xml"), apis={"orders": fx("no_connector_api.xml")},
+                           info={"orders": {"path": "orders", "subscription_required": True}})
+    assert lint.lint_instance(r) == []          # rdwr-bot-manager-enabled is not true
+    r = FakeReader(glob=fx("clean_global.xml"), apis={"orders": fx("no_connector_api.xml")}, nvs=NV_BM)
+    assert lint.lint_instance(r) == []          # the reader cannot list API paths: no guess
+
+
+def test_l17_bot_manager_from_a_map_entry():
+    nvs = dict(NV_OK, **{"rdwr-app-map": "{'shop.example.com': {'app_id': 'a', 'api_key': 'k', 'endpoint': 'a.oop.radwarecloud.net', 'bot_manager': true}}"})
+    r = FakeReaderWithApis(glob=fx("clean_global.xml"), apis={"orders": fx("no_connector_api.xml")}, nvs=nvs,
+                           backends=["https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net", "https://a.oop.radwarecloud.net"],
+                           info={"orders": {"path": "orders", "subscription_required": True}})
+    assert codes(lint.lint_instance(r)) == ["L17"]
+
+
+def test_l17_captcha_api_requiring_a_key_or_without_the_connector():
+    info = {"securepath-captcha": {"path": "/7f7c01e221604f25/", "subscription_required": True}}
+    r = FakeReaderWithApis(glob=fx("clean_global.xml"), apis={"securepath-captcha": None}, nvs=NV_BM, info=info)
+    f = [x for x in lint.lint_instance(r) if x.code == "L17"]
+    assert len(f) == 1 and "subscription" in f[0].message
+    # connector at API scope only (Form 2 / Form 3): the CAPTCHA API must carry it as well
+    info = {"orders": {"path": "orders", "subscription_required": True},
+            "securepath-captcha": {"path": "7f7c01e221604f25", "subscription_required": False}}
+    r = FakeReaderWithApis(glob=None, apis={"orders": fx("clean_api.xml"), "securepath-captcha": None}, nvs=NV_BM, info=info)
+    f = [x for x in lint.lint_instance(r) if x.code == "L17"]
+    assert len(f) == 1 and "does not run" in f[0].message
+    r = FakeReaderWithApis(glob=None, apis={"orders": fx("clean_api.xml"), "securepath-captcha": fx("clean_api.xml")}, nvs=NV_BM, info=info)
+    assert [x for x in lint.lint_instance(r) if x.code == "L17"] == []
+
+
+def test_l02_not_reported_for_two_different_apis():
+    """Form 2 / Form 3 on two APIs (for example an API of yours and the CAPTCHA API): no request
+    passes through both, so nothing is inspected twice."""
+    r = FakeReader(glob=None, apis={"orders": fx("clean_api.xml"), "billing": fx("clean_api.xml")})
+    assert "L02" not in codes(lint.lint_instance(r))

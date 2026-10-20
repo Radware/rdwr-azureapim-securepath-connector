@@ -8,8 +8,8 @@ _spec = importlib.util.spec_from_file_location("lint", os.path.join(HERE, "..", 
 lint = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(lint)
 
-OOP = "https://afa37f7d53ce4e76a4988c4955c2d7e5.oop.radwarecloud.net/orders/1"
-V1 = "https://afa37f7d53ce4e76a4988c4955c2d7e5.v1.radwarecloud.net/orders/1"
+OOP = "https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net/orders/1"
+V1 = "https://0123456789abcdef0123456789abcdef.v1.radwarecloud.net/orders/1"
 CERT_ERR = "The remote certificate was rejected by the provided RemoteCertificateValidationCallback."
 
 
@@ -139,7 +139,7 @@ def test_T02_not_raised_when_jwt_runs_after_connector():
 
 def test_field_shape_v1_host_and_certificate_rejected():
     # connector in the right place, endpoint Named Value holds the .v1 front-end host, no trust for it
-    t = trace([inspector("/orders", "POST", "/api/x"), setvar("rdwrAppEpAddr", "afa37f7d53ce4e76a4988c4955c2d7e5.v1.radwarecloud.net")]
+    t = trace([inspector("/orders", "POST", "/api/x"), setvar("rdwrAppEpAddr", "0123456789abcdef0123456789abcdef.v1.radwarecloud.net")]
               + sideband_failed() + diag("sideband_error_or_timeout")
               + [e("validate-jwt", {"message": "JWT validation succeeded."})])
     s = lint.summarize_trace(t)
@@ -312,3 +312,34 @@ def test_cli_redact_in_place(tmp_path):
     f.write_text(json.dumps(trace([inspector(), e("api-inspector", {"request": {"headers": [{"name": "authorization", "value": "x"}]}}), enter_fragment()] + sideband_sent())))
     assert lint.main(["--redact", str(f)]) == 0
     assert "<redacted>" in f.read_text() and '"x"' not in f.read_text()
+
+
+def test_captcha_path_summary_is_not_a_finding():
+    cap = "https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net:443/7f7c01e221604f25/?ssa=t"
+    t = trace([inspector(api="/7f7c01e221604f25"), enter_fragment("securepath-app-map"), leave_fragment("securepath-app-map"),
+               enter_fragment(), setvar("rdwrBmPath", "dir")] + sideband_sent(url=cap, headers={"set-cookie": "a=1"})
+              + [leave_fragment()], backend=[])
+    s = lint.summarize_trace(t)
+    assert s["bm_path"] == "dir" and s["sideband_status"] == 200 and s["response_log"] == "none for this path"
+    assert lint.lint_trace(t) == []
+    text = lint.format_trace_summary(s)
+    assert "Bot Manager CAPTCHA path: forwarded to the inspection endpoint" in text
+
+
+def test_redact_removes_application_map_keys():
+    """The application map is copied into variables the trace records; each one carries the API
+    key of every mapped application (the generated map once its key references are resolved)."""
+    m = "{'shop.example.com': {'app_id': 'a1', 'api_key': 'KEY-SHOP-123', 'endpoint': 'a1.oop.radwarecloud.net'}}"
+    t = trace([inspector(), setvar("rdwrAppMapRaw", m), setvar("rdwrAppMapGenerated", m.replace("SHOP", "GEN")),
+               setvar("rdwrAppMapJson", m), setvar("rdwrAppSelection", "{'api_key':'KEY-SHOP-123'}"),
+               setvar("rdwrApiKey", "KEY-SHOP-123"),
+               # a real trace also has the expression entry that computed each value, without the name
+               e("set-variable", {"expression": "JObject.Parse(...)", "message": "Expression was successfully evaluated.",
+                                  "value": "{\"app_id\":\"a1\",\"api_key\":\"KEY-SHOP-123\"}"}),
+               e("set-variable", {"expression": "(string)e[\"api_key\"]", "message": "Expression was successfully evaluated.",
+                                  "value": "KEY-SHOP-123"}),
+               enter_fragment()] + sideband_sent() + verdict_allow())
+    lint.redact_trace(t)
+    text = json.dumps(t)
+    assert "KEY-SHOP-123" not in text and "KEY-GEN-123" not in text
+    assert lint.summarize_trace(t)["connector_ran"]
