@@ -24,12 +24,14 @@ it registers this fragment too.
   is documented (README Issue 11): the request that was on such a connection is served uninspected
   and is not sent again, by API Management or by the connector, and a response-phase log on it is
   lost without any sign in API Management.
-- **A request whose path matches no API at all is no longer inspected.** API Management now answers
-  it with its own `404` without running any policy, `<on-error>` included; until October 2026 it ran
-  `<on-error>`, and the connector inspected these requests. Requests for one of your APIs (wrong
-  method, unknown path, missing subscription key) are still inspected. To have the others inspected
-  as well, add an API at the root path with no operations (README Step 4, *Requests API Management
-  answers itself*); nothing else changes.
+- **Requests whose path matches no API at all now need one more step to be inspected.** API
+  Management now answers such a request with its own `404` without running any policy, `<on-error>`
+  included. Until October 2026 it ran `<on-error>`, which is how the connector inspected these
+  requests (*Requests API Management answers itself are inspected*, below). Requests for one of your
+  APIs (wrong method, unknown path, missing subscription key) are inspected as before. For the
+  others, add an API at the root path with no operations (README Step 4, *Requests API Management
+  answers itself*, one command): each such request then belongs to that API and is inspected again;
+  nothing else changes.
 - The trace readout (`tools/securepath-apim-trace.sh`, `securepath-apim-lint.py --trace`) now reads a
   timed-out inspection call (`resulted in timeout`), which it showed as `?`, and names a connection
   the endpoint closed before answering (`T04`).
@@ -53,8 +55,10 @@ az rest --method PUT --uri "$BASE/policyFragments/securepath-inbound?api-version
 echo "registered securepath-inbound" || echo "FAILED: securepath-inbound"
 ```
 
-2. Replace your copy of `tools/`.
-3. Run `python3 tools/securepath-apim-lint.py --live` (README 5e): it reports a fragment that did not
+2. Form 1: add the root-path API if requests to paths that match none of your APIs should be
+   inspected (README Step 4, *Requests API Management answers itself*).
+3. Replace your copy of `tools/`.
+4. Run `python3 tools/securepath-apim-lint.py --live` (README 5e): it reports a fragment that did not
    register as `L14`.
 
 ### Package update, 2026-10-20
@@ -139,6 +143,9 @@ Developer instances: the four fragments, the All APIs policy and the policy docu
 and Named Values can be changed afterwards.
 
 ### Requests API Management answers itself are inspected
+
+(Since October 2026 a path that matches no API needs the root-path API described in the 2026-10-25
+package update above.)
 
 API Management answers some requests before any policy runs: a method or path that matches no
 operation (404, including a path that matches no API), and a missing or invalid subscription key

@@ -1381,9 +1381,12 @@ ApiManagementGatewayLogs
 | order by minute desc
 ```
 
-The counts follow the sampling of the instance's Azure Monitor diagnostic (100 % by default). Every
-request served without a verdict carries one line, at all times: a long outage of the inspection
-endpoint produces one per request, in the rows that log those requests anyway.
+The counts follow the sampling of the instance's Azure Monitor diagnostic (100 % unless you changed
+it). The lines are not rate-limited, on purpose: each one is a field of its own request's log row,
+not a separate log entry, so a long outage of the inspection endpoint adds no rows to the log, only
+one line to each row that logs a request served without a verdict; and an API Management policy
+keeps no state from one request to the next with which it could count them. The per-minute view
+comes from the query above instead.
 
 ---
 ---
