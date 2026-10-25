@@ -1226,6 +1226,11 @@
               </when>
             </choose>
             <!-- ====== Call SecurePath (ignore-error: fail-open by policy) -->
+            <!-- The start time of the inspection call. When it fails, the time it took is the only thing
+                 the policy can see about why (ignore-error leaves no error details): failing before the
+                 timeout means the connection was closed, reset or refused, or TLS or name resolution
+                 failed; reaching the timeout means no answer came in time. -->
+            <set-variable name="rdwrSidebandStartTicks" value="@(DateTime.UtcNow.Ticks)" />
             <choose>
               <when condition="@((bool)context.Variables.GetValueOrDefault("radwareOverrideBody", false))">
                 <send-request mode="copy" response-variable-name="radwareResponse" timeout="@((int)context.Variables["rdwrAppEpTimeout"])" ignore-error="true">
@@ -1731,6 +1736,31 @@
               <choose>
                 <when condition="@(!context.Variables.ContainsKey("radwareResponse") || context.Variables["radwareResponse"] == null)">
                 <set-variable name="radwareDiag" value="@("sideband_error_or_timeout")" />
+                <!-- Name the cause by the time the call took: on API Management a connection the endpoint
+                     closes (TLS close_notify and FIN) or resets fails within milliseconds, and a call that
+                     gets no answer ends at the timeout. API Management sends the inspection call again in
+                     neither case. X-Rdwr-Diag keeps its value; this trace line is the more specific signal. -->
+                <set-variable name="rdwrSidebandElapsedMs" value="@{
+                  long start = (long)context.Variables.GetValueOrDefault("rdwrSidebandStartTicks", 0L);
+                  return start > 0 ? (DateTime.UtcNow.Ticks - start) / 10000 : -1L;
+                }" />
+                <set-variable name="rdwrSidebandFailure" value="@{
+                  long ms = (long)context.Variables.GetValueOrDefault("rdwrSidebandElapsedMs", -1L);
+                  int to = (int)context.Variables.GetValueOrDefault("rdwrAppEpTimeout", 10);
+                  return ms >= 0 && ms >= to * 1000L - 100 ? "timeout" : "connection";
+                }" />
+                <trace source="securepath" severity="error">
+                  <message>@{
+                    long ms = (long)context.Variables.GetValueOrDefault("rdwrSidebandElapsedMs", -1L);
+                    int to = (int)context.Variables.GetValueOrDefault("rdwrAppEpTimeout", 10);
+                    string took = ms >= 0 ? ms.ToString() + " ms" : "an unmeasured time";
+                    if ((string)context.Variables.GetValueOrDefault("rdwrSidebandFailure", "") == "timeout")
+                    {
+                      return "SecurePath inspection call timed out after " + took + " (the " + to.ToString() + " s timeout, rdwr-app-ep-timeout-seconds); request served without a verdict (fail open)";
+                    }
+                    return "SecurePath inspection call failed after " + took + ", before the " + to.ToString() + " s timeout: the connection was closed, reset or refused, or TLS or name resolution failed; request served without a verdict (fail open)";
+                  }</message>
+                </trace>
                 </when>
                 <otherwise>
                 <set-variable name="rwStatus" value="@(((IResponse)context.Variables["radwareResponse"]).StatusCode)" />
@@ -1984,6 +2014,9 @@
                 <choose>
                   <when condition="@((int)context.Variables["rwStatus"] >= 500)">
                     <set-variable name="radwareDiag" value="@($"sideband_error_failopen_{(int)context.Variables["rwStatus"]}")" />
+                    <trace source="securepath" severity="error">
+                      <message>@("SecurePath answered " + ((int)context.Variables["rwStatus"]).ToString() + ", a server error; request served without a verdict (fail open)")</message>
+                    </trace>
                     <!-- no return-response → request continues to origin (fail-open) -->
                   </when>
                   <otherwise>
@@ -2227,6 +2260,9 @@
                     <choose>
                       <when condition="@((bool)context.Variables.GetValueOrDefault("isWrongApiKeyRedirect", false))">
                         <set-variable name="radwareDiag" value="@("wrong_api_key_redirect")" />
+                        <trace source="securepath" severity="error">
+                          <message>@("SecurePath answered " + ((int)context.Variables["rwStatus"]).ToString() + " with its wrong-API-key redirect: the Application ID and API key pair was not recognised; request served without a verdict (fail open)")</message>
+                        </trace>
                         <!-- fail-open -->
                       </when>
                       <when condition="@(!(bool)context.Variables.GetValueOrDefault("isUsableRedirect", false))">

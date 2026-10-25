@@ -343,3 +343,25 @@ def test_redact_removes_application_map_keys():
     text = json.dumps(t)
     assert "KEY-SHOP-123" not in text and "KEY-GEN-123" not in text
     assert lint.summarize_trace(t)["connector_ran"]
+
+
+def test_T04_gateway_timeout_line_is_read():
+    """API Management writes a timed-out inspection call as "... resulted in timeout." (no "error ignored")."""
+    t = trace([inspector(), enter_fragment(),
+               e("send-request", f"GET request to '{OOP}' resulted in timeout.")]
+              + diag("sideband_error_or_timeout"))
+    s = lint.summarize_trace(t)
+    assert s["sideband_error"] == "timeout" and s["sideband_url"] == OOP
+    f = lint.lint_trace(t)
+    assert codes(f) == ["T04"] and "rdwr-app-ep-timeout-seconds" in f[0].message
+
+
+def test_T04_connection_closed_before_answering_classified():
+    for reason in ("Underlying transport connection was unexpectedly closed..",
+                   "An existing connection was forcibly closed by the remote host..",
+                   "Backend response header size exceeded the configured limit. Cause: Connection closed before received headers."):
+        t = trace([inspector(), enter_fragment()] + sideband_failed(url=OOP, reason=reason) + diag("sideband_error_or_timeout"))
+        f = lint.lint_trace(t)
+        assert codes(f) == ["T04"], reason
+        assert "closed or reset the connection before answering" in f[0].message
+        assert "does not send the inspection call again" in f[0].message and "Issue 11" in f[0].fix

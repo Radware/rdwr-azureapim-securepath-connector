@@ -2,6 +2,61 @@
 
 ## v1.5.0 (2026-10-04)
 
+### Package update, 2026-10-25
+
+The package was updated with the changes below. The connector still identifies itself as
+`700-v1.5.0`, and what it sends to SecurePath, to your backend and to your clients is unchanged.
+**If you installed the v1.5.0 package of 2026-10-20, re-register one fragment (or replace the policy
+document)** to get the new trace lines; the Named Values and your own policies are unchanged. If you
+installed the package of 2026-10-04, follow the 2026-10-20 update below instead, from this package:
+it registers this fragment too.
+
+- **Every request served without a verdict now has an error-severity trace line naming the cause.**
+  When the inspection call fails, the line says whether it timed out (`SecurePath inspection call
+  timed out after <N> ms`) or failed before the timeout (`... failed after <N> ms, before the <T> s
+  timeout: the connection was closed, reset or refused, or TLS or name resolution failed`). A 5xx
+  answer and the wrong-API-key redirect now write a line too; the unusable redirect and the
+  unexpected status already did. The `X-Rdwr-Diag` values and every existing trace line are
+  unchanged. README 5f lists the lines and shows how to keep them in a Log Analytics workspace and
+  count them per minute by cause; this adds no log rows (each line is stored in the row of its
+  request).
+- **What happens when the inspection endpoint closes the connections API Management keeps open**
+  is documented (README Issue 11): the request that was on such a connection is served uninspected
+  and is not sent again, by API Management or by the connector, and a response-phase log on it is
+  lost without any sign in API Management.
+- **A request whose path matches no API at all is no longer inspected.** API Management now answers
+  it with its own `404` without running any policy, `<on-error>` included; until October 2026 it ran
+  `<on-error>`, and the connector inspected these requests. Requests for one of your APIs (wrong
+  method, unknown path, missing subscription key) are still inspected. To have the others inspected
+  as well, add an API at the root path with no operations (README Step 4, *Requests API Management
+  answers itself*); nothing else changes.
+- The trace readout (`tools/securepath-apim-trace.sh`, `securepath-apim-lint.py --trace`) now reads a
+  timed-out inspection call (`resulted in timeout`), which it showed as `?`, and names a connection
+  the endpoint closed before answering (`T04`).
+
+**What to re-copy from this package:**
+
+1. Forms 1 and 2: register `securepath-inbound` again, from the directory that holds this package's
+   `fragments/` folder. The other three fragments are unchanged. Form 3: replace the document with
+   `rdwr-azureapim-securepath-connector-v1.5.xml` (README Step 4, Form 3).
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+SUB=$(az account show --query id -o tsv)
+BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
+jq -Rs "{properties:{format:\"rawxml\",description:\"Radware SecurePath inbound\",value:.}}" \
+   fragments/securepath-inbound.fragment.xml > rdwr-frag-inbound.json &&
+az rest --method PUT --uri "$BASE/policyFragments/securepath-inbound?api-version=2024-05-01" \
+        --headers "Content-Type=application/json" --body @rdwr-frag-inbound.json -o none > /dev/null &&
+echo "registered securepath-inbound" || echo "FAILED: securepath-inbound"
+```
+
+2. Replace your copy of `tools/`.
+3. Run `python3 tools/securepath-apim-lint.py --live` (README 5e): it reports a fragment that did not
+   register as `L14`.
+
 ### Package update, 2026-10-20
 
 The package was updated with the changes below. The connector still identifies itself as

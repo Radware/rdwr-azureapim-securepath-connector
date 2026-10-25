@@ -56,7 +56,7 @@ whether the response-phase log was sent, and what the origin answered. Findings:
 | T01 | The connector did not run on this request | Step 4 (scope), Step 2b (`<base />`), the request matched another API |
 | T02 | A request-ending policy of yours ran before the connector | Step 4: move the include lines directly after `<base />` |
 | T03 | The inspection call went to a host that is not `<APP_ID>.oop.radwarecloud.net` (typically the `.v1` front-end host) | Step 3a, 3c: `rdwr-app-ep-addr` or the map entry |
-| T04 | The inspection call failed (`error ignored`): certificate rejected, timeout, or hostname not resolving — the message says which | Step 1 (trust for the host actually called), network path, Step 3c |
+| T04 | The inspection call failed (`error ignored`, or `resulted in timeout`): certificate rejected, timeout, hostname not resolving, or the endpoint closed or reset the connection before answering — the message says which | Step 1 (trust for the host actually called), network path, Step 3c, README Issue 11 |
 | T05 | SecurePath redirected to `wrong-api-key` | Step 3a: Application ID / API key |
 | T06 | SecurePath answered 5xx; served uninspected | usually transient; contact Radware with the trace if sustained |
 | T07 | Served uninspected for another reason (`X-Rdwr-Diag` value: `no_app_mapping`, `config_incomplete`, `app_map_invalid`, ...) | Step 3d, the `X-Rdwr-Diag` table in Step 5 |

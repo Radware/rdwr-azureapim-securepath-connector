@@ -916,10 +916,10 @@ section. Anything after it is fine, and that is where your policies normally alr
 
 ### Requests API Management answers itself
 
-API Management answers some requests before any policy runs: a method or path that matches no
-operation (`404 Resource not found`, including a path that matches no API at all), and a missing
-or invalid subscription key (`401`). None of them reaches your backend. API Management still runs
-the `<on-error>` section for them, and the connector's `<on-error>` block uses it:
+API Management answers some requests before any policy runs: a method or path under one of your
+APIs that matches no operation (`404 Resource not found`), and a missing or invalid subscription
+key (`401`). None of them reaches your backend. API Management still runs the `<on-error>` section
+for them, and the connector's `<on-error>` block uses it:
 
 - the request is inspected and appears in the Radware Cloud portal like any other;
 - when SecurePath blocks it, the client receives the block response instead of the 404 or 401;
@@ -928,13 +928,34 @@ the `<on-error>` section for them, and the connector's `<on-error>` block uses i
 
 Where it applies:
 
-- **All APIs scope (Form 1):** every request the gateway receives, including paths that match no
-  API.
+- **All APIs scope (Form 1):** every request for one of the instance's APIs. A path that matches
+  no API at all only with an API at the root path (below).
 - **An API or product policy (Form 2):** that API's own requests — a wrong method or an unknown
-  path under it, or a missing key for it. A path that matches no API reaches the All APIs scope
-  only.
+  path under it, or a missing key for it.
 - **The Form 3 document:** not included. It carries the connector inline and cannot reference the
   fragments from `<on-error>`; use Form 1 or Form 2 to inspect these requests.
+
+**A path that matches no API at all** is answered by API Management (`404 Resource not found`)
+without running any policy, `<on-error>` included, so the connector never sees it. (Until October
+2026 API Management ran `<on-error>` for these requests too.) To have them inspected, give the
+instance an API at the root path with no operations, unless an API already uses the root path.
+Every path then belongs to an API: a request that matches none of yours becomes a `404` of that
+API and is inspected like the requests above. The client still receives API Management's `404`
+when SecurePath allows the request, and nothing is forwarded anywhere, since the API has no
+operations. With Form 1 nothing else is needed; with Form 2, add the connector's lines to this
+API's policy too.
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+SUB=$(az account show --query id -o tsv)
+az rest --method PUT \
+  --uri "https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/securepath-unmatched-paths?api-version=2024-05-01" \
+  --headers "Content-Type=application/json" \
+  --body '{"properties":{"displayName":"Requests that match no API (inspected by SecurePath)","path":"","protocols":["https"],"subscriptionRequired":false}}' \
+  -o none && echo "root API created"
+```
 
 Things to know:
 
@@ -1157,11 +1178,12 @@ a trace line naming the hostname that had no application. The path is recognised
 `rdwr-api-base-path` (or the entry's `base_path`) is removed, the same way inspection reads paths,
 so `/shop/7f7c01e221604f25/` is an ordinary request unless `/shop` is that base path.
 
-With Form 1, the connector also forwards the path when no API matches it at all, from its
-`<on-error>` block ([Requests API Management answers itself](#requests-api-management-answers-itself)).
-Create the API anyway: without it, API Management counts each of these requests as a failed request
-(no matching operation) in its analytics, and the path then depends on how the `<on-error>` section
-is written.
+With Form 1, the connector also forwards the path from its `<on-error>` block when the request
+belongs to an API that has no matching operation, such as the root-path API described in
+[Requests API Management answers itself](#requests-api-management-answers-itself). A path that
+matches no API at all gets API Management's `404` without any policy running. Create the API in any
+case: without it, API Management counts each of these requests as a failed request (no matching
+operation) in its analytics, and the path then depends on how the `<on-error>` section is written.
 
 **Verify**, with the hostname your visitors use:
 
@@ -1260,7 +1282,7 @@ curl -s -o /dev/null -D - "https://$APIM.azure-api.net/your/real/operation/path"
 | *(header absent)* | yes | Inspection completed with an allow verdict. Blocks and redirects never reach the backend; they are visible in the trace. |
 | `uzmcr_allow` | yes | Allowed by the Bot Manager mobile exception (SecurePath sent `uzmcr`). The trace carries an error line with SecurePath's status, its request-status header and the `x-rdwr-oop-id`, because this is the one path where a verdict other than allow is passed to the backend. |
 | `multipart_headers_only` | yes | A multipart body above `rdwr-multipart-max-size-bytes`, or a chunked multipart body while `multipart/form-data` is not in `chunked-request-allowed-content-types`, was inspected headers-only. |
-| `sideband_error_or_timeout` | **no** | The inspection call failed or timed out — Issue 1, Issue 9. |
+| `sideband_error_or_timeout` | **no** | The inspection call failed or timed out — Issue 1, Issue 9, Issue 11. The connector's trace line says which (5f). |
 | `sideband_error_failopen_<status>` | **no** | SecurePath answered a 5xx (for example `sideband_error_failopen_503`). |
 | `wrong_api_key_redirect` | **no** | The Application ID / API key pair was not recognised — Issue 3. |
 | `unexpected_status_<status>` | **no** | SecurePath answered a status outside the verdicts (for example `unexpected_status_429`) — 3e. |
@@ -1298,6 +1320,70 @@ is slower, but it is the only way to catch an operation that silently skips the 
 inherits it, nothing of yours runs ahead of it, and the Named Values and (on v2 tiers) the backend
 entity are in place. Anything else is printed with the line to change and the fix. The codes are
 explained in `tools/README.md`.
+
+## 5f — Keep track of requests served uninspected (optional)
+
+Besides `X-Rdwr-Diag` at your backend (5c), the connector writes one error-severity trace line
+for every request it serves without a verdict, where it makes that decision, naming the cause:
+
+| Cause | The trace line starts | `X-Rdwr-Diag` |
+|---|---|---|
+| `timeout` | `SecurePath inspection call timed out after 10004 ms (the 10 s timeout, ...` | `sideband_error_or_timeout` |
+| `connection failed` | `SecurePath inspection call failed after 6 ms, before the 10 s timeout: the connection was closed, reset or refused, or TLS or name resolution failed ...` | `sideband_error_or_timeout` |
+| `status 503` (any 5xx) | `SecurePath answered 503, a server error ...` | `sideband_error_failopen_503` |
+| `API key rejected` | `SecurePath answered 302 with its wrong-API-key redirect ...` | `wrong_api_key_redirect` |
+| `unusable redirect` | `SecurePath answered 302 without a usable Location header ...` | `unusable_redirect_302` |
+| `status 429` (any other) | `SecurePath answered 429, which is not a verdict ...` | `unexpected_status_429` |
+
+Each of these lines contains `request served without a verdict (fail open)`. The cause words are the
+ones the other SecurePath connectors use, with one exception: `connection failed`. API Management
+does not tell the policy why a call failed, only how long it took, so a connection the endpoint
+closed or reset, a refused connection, and a TLS or name-resolution failure are a single cause here.
+A trace of one such request names the exact reason (Debugging, *Reading a trace yourself*).
+
+To keep these lines, send API Management's gateway log to a Log Analytics workspace. The trace lines
+are stored in the log row of the request they belong to, so they add no rows of their own:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+WORKSPACE_ID="/subscriptions/your-subscription-id/resourceGroups/your-workspace-resource-group/providers/Microsoft.OperationalInsights/workspaces/your-workspace"
+
+az monitor diagnostic-settings create --name securepath-gateway-logs \
+  --resource "$(az apim show -g "$RG" -n "$APIM" --query id -o tsv)" \
+  --workspace "$WORKSPACE_ID" --export-to-resource-specific true \
+  --logs '[{"category":"GatewayLogs","enabled":true}]' -o none && echo "gateway log sent to the workspace"
+```
+
+The first rows can take 20 to 30 minutes to appear. Then this query, run on the workspace's **Logs**
+page, gives for every minute the requests API Management handled (by method) and the requests served
+without a verdict (by cause):
+
+```kusto
+let failOpen = ApiManagementGatewayLogs
+| where TimeGenerated > ago(1d)
+| mv-expand rec = TraceRecords
+| extend msg = tostring(rec.message)
+| where tostring(rec.source) == "securepath" and msg has "(fail open)"
+| extend cause = case(msg has "timed out after", "timeout",
+                      msg has "before the", "connection failed",
+                      msg has "wrong-API-key", "API key rejected",
+                      msg has "usable Location", "unusable redirect",
+                      strcat("status ", extract(@"answered (\d+)", 1, msg)))
+| summarize n = count() by minute = bin(TimeGenerated, 1m), cause
+| summarize served_without_verdict = make_bag(bag_pack(cause, n)) by minute;
+ApiManagementGatewayLogs
+| where TimeGenerated > ago(1d)
+| summarize n = count() by minute = bin(TimeGenerated, 1m), Method
+| summarize requests = make_bag(bag_pack(Method, n)) by minute
+| join kind=leftouter failOpen on minute
+| project minute, requests, served_without_verdict
+| order by minute desc
+```
+
+The counts follow the sampling of the instance's Azure Monitor diagnostic (100 % by default). Every
+request served without a verdict carries one line, at all times: a long outage of the inspection
+endpoint produces one per request, in the rows that log those requests anyway.
 
 ---
 ---
@@ -1473,7 +1559,9 @@ they appear in the **Inbound** section:
 | `Entering policy fragment 'securepath-inbound'` (fragments) or `set-variable ... rdwrAppEpAddr` (Form 3) | The connector ran on this request. **Absent: the connector is not in this API's policy path** — not installed at a covering scope, or the API's own policy lacks `<base />`. | Step 4, Step 2b |
 | Any `validate-jwt`, `check-header`, `ip-filter`, `rate-limit`, `return-response` **above** that line | Your policy runs first. Whatever it rejects is never seen by SecurePath. (A `check-header` on `X-Azure-FDID` ahead of the connector is a deliberate choice: direct-to-gateway probes are dropped before inspection.) | Step 4: move the include lines directly after `<base />` |
 | `request to 'https://<host>/...'` inside `send-request` | Where the inspection call went. **The host must end in `.oop.radwarecloud.net`.** A host ending `.v1.radwarecloud.net` is the application's front-end address: the Named Value is wrong. | Step 3a, 3c |
-| `... resulted in error, error ignored: <reason>` | The inspection call failed and the request was served uninspected. The reason names the cause: a certificate rejection (trust, Step 1 — for the host actually called), a timeout (network path to the endpoint), a hostname that does not resolve (typo). | Issue 1, Issue 9 |
+| `... resulted in error, error ignored: <reason>` | The inspection call failed and the request was served uninspected. The reason names the cause: a certificate rejection (trust, Step 1 — for the host actually called), a hostname that does not resolve (typo), `Underlying transport connection was unexpectedly closed` (the endpoint closed the connection before answering). | Issue 1, Issue 11 |
+| `... resulted in timeout.` | The inspection call got no answer within `rdwr-app-ep-timeout-seconds`; the request was served uninspected. | Issue 9 |
+| `SecurePath inspection call failed after <N> ms, before the <T> s timeout ...` or `... timed out after <N> ms ...` (source `securepath`) | The connector's own line for the same request, with the time the call took. Every request served without a verdict has one such line (5f). | 5f |
 | `send-request` response with status `301`/`302` and a `location` containing `wrong-api-key` | SecurePath did not recognise the Application ID / API key pair. | Step 3a, Issue 3 |
 | `set-variable rwStatus = 200` and `oopRequestStatusHeader = allowed` | Inspection completed, verdict allow. `rwStatus = 403` is a block. `rwStatus >= 500` is a SecurePath-side error and the request is served uninspected. | — |
 | `set-header X-Rdwr-Diag: <value>` | The request was served **without** a completed inspection; the value says why (table in 5c). This header goes to your backend, so its access log is an ongoing health signal. | 5c |
@@ -1585,7 +1673,8 @@ If an upstream proxy or CDN adds any of these, strip them before the request rea
 
 Each request waits for the inspection call, bounded by `rdwr-app-ep-timeout-seconds` (default `10`).
 If the endpoint is unreachable, every request waits out that timeout before being forwarded. Check
-the trace for `error ignored`.
+the trace for `error ignored` and `resulted in timeout`; each request that waited out the timeout
+also has the connector's line `SecurePath inspection call timed out after <N> ms` (5f).
 
 The timeout covers SecurePath's answer up to its headers. An allow or a fail-open needs nothing
 more, so it never waits longer. A block also reads the page or JSON that SecurePath sends with it;
@@ -1596,6 +1685,27 @@ if SecurePath delivers that body slowly, the blocked request waits for it.
 Your shell stopped partway through, most likely on a syntax error, and the remaining commands never
 ran. Re-run the block, then run Step 3c to see what was actually created. If you are pasting into a
 shell other than bash, paste one command at a time.
+
+## Issue 11 — Short bursts of `sideband_error_or_timeout`
+
+API Management keeps its connections to the inspection endpoint open and reuses them. The endpoint
+closes connections it holds open, at times all of an application's connections at once. A request
+that API Management has just sent on such a connection gets no answer, and is served uninspected
+within milliseconds: `X-Rdwr-Diag: sideband_error_or_timeout` at your backend, the connector's line
+`SecurePath inspection call failed after <N> ms, before the <T> s timeout` (5f), and in a trace of the
+request `Underlying transport connection was unexpectedly closed`. An occasional burst needs no
+action.
+
+- **The inspection call is not sent again**, by API Management or by the connector. The policy
+  cannot tell this case apart from a refused connection or an answer that stopped partway, and a
+  second attempt is made on another of the connections API Management keeps open, which the
+  endpoint has usually closed at the same moment. A second attempt would add load on the endpoint
+  without getting the request inspected.
+- **A response-phase log sent on such a connection is lost.** API Management sends it without
+  waiting for an answer and does not send it again, so neither API Management nor the connector can
+  see the loss, and nothing reports it; SecurePath does not receive that request's response details.
+
+If most requests show it, it is not this: check trust (Issue 1) and `rdwr-app-ep-port`.
 
 ---
 ---

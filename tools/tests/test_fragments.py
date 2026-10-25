@@ -463,3 +463,56 @@ def test_cookie_slots_put_unused_slots_first_and_keep_securepath_order():
         assert out == cookies
     # the slot variables are computed where the cookies are extracted, before any block response
     assert t.index('name="bmSlotVal5"') < t.index('exists-action="@((string)context.Variables.GetValueOrDefault("bmSlotAct0", "delete"))"')
+
+
+def _branch(t, marker, close="</when>"):
+    i = t.index(marker)
+    return t[i:t.index(close, i)]
+
+
+def test_inspection_call_start_time_is_taken_before_both_send_request_branches():
+    """The cause of a failed inspection call is named by the time it took, so the start time must be
+    set once, after every expression that prepares the call and before either send-request branch."""
+    t = frag("inbound")
+    start = t.index('<set-variable name="rdwrSidebandStartTicks"')
+    calls = [m.start() for m in re.finditer(r'<send-request [^>]*response-variable-name="radwareResponse"', t)]
+    assert len(calls) == 2 and all(start < c for c in calls)
+    assert t.count('name="rdwrSidebandStartTicks"') == 1
+    assert "<set-variable" not in t[start + 10:calls[0]].replace('<set-variable name="rdwrSidebandStartTicks"', "")
+
+
+def test_failed_inspection_call_keeps_its_diag_value_and_names_the_cause():
+    """X-Rdwr-Diag stays byte-identical (sideband_error_or_timeout); an additive error trace says
+    whether the call timed out or failed before the timeout (closed, reset, refused, TLS, DNS)."""
+    t = frag("inbound")
+    b = _branch(t, 'context.Variables["radwareResponse"] == null)">')
+    assert '<set-variable name="radwareDiag" value="@("sideband_error_or_timeout")" />' in b
+    assert 'name="rdwrSidebandElapsedMs"' in b and 'name="rdwrSidebandFailure"' in b
+    assert '<trace source="securepath" severity="error">' in b
+    assert "timed out after" in b and "before the" in b and "closed, reset or refused" in b
+    assert "ms >= to * 1000L - 100" in b, "timeout = within 100 ms of the configured timeout"
+    assert "(fail open)" in b
+
+
+def test_every_fail_open_writes_an_error_trace_naming_its_cause():
+    """Each verdict-tree fail-open writes one error-severity trace line where the verdict is decided:
+    no answer, 5xx, wrong-API-key redirect, unusable redirect, unexpected status."""
+    t = frag("inbound")
+    for marker in ('value="@("sideband_error_or_timeout")"',
+                   'value="@($"sideband_error_failopen_{',
+                   'value="@("wrong_api_key_redirect")"',
+                   'value="@($"unusable_redirect_{',
+                   'value="@($"unexpected_status_{'):
+        i = t.index(marker)
+        seg = t[i:t.index("</when>" if "unexpected" not in marker else "</otherwise>", i)]
+        assert '<trace source="securepath" severity="error">' in seg, marker
+        assert "request served without a verdict (fail open)" in seg, marker
+
+
+def test_no_trace_line_uses_the_alert_phrase_failing_open():
+    """Operators alert on the per-request 'failing open' line that other SecurePath connectors write;
+    this connector's trace lines say '(fail open)' and must never carry that phrase."""
+    assert len(re.findall(r"<message>", frag("inbound"))) > 10
+    for name in ("inbound", "outbound", "onerror"):
+        messages = re.findall(r"<message>(.*?)</message>", frag(name), flags=re.S)
+        assert not [m for m in messages if "failing open" in m], name

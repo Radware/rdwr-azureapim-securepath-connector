@@ -700,6 +700,8 @@ def lint_instance(reader: Reader, check_operations: bool = False) -> List[Findin
 
 OOP_SUFFIX = ".oop.radwarecloud.net"
 _ERR_IGNORED_RE = re.compile(r"request to '([^']+)' resulted in error, error ignored: (.*)", re.S)
+# API Management writes a timed-out send-request without "error ignored": "GET request to '<url>' resulted in timeout."
+_TIMEOUT_RE = re.compile(r"request to '([^']+)' resulted in timeout")
 FAIL_OPEN_DIAGS = ("sideband_error_or_timeout", "wrong_api_key_redirect", "no_app_mapping", "config_incomplete", "app_map_invalid")
 FAIL_OPEN_PREFIXES = ("sideband_error_failopen_", "unexpected_status_", "unusable_redirect_")
 ENFORCED_PREFIXES = ("action_enforced_status_", "custom_bot_block_status_", "redirect_issued_")
@@ -792,9 +794,13 @@ def summarize_trace(trace: dict) -> dict:
                 s["sideband_url"] = data["request"].get("url")
             elif src == "send-request":
                 m = _ERR_IGNORED_RE.search(text)
+                mt = _TIMEOUT_RE.search(text)
                 if m:
                     s["sideband_url"] = s["sideband_url"] or m.group(1)
                     s["sideband_error"] = m.group(2).strip().rstrip(".")
+                elif mt:
+                    s["sideband_url"] = s["sideband_url"] or mt.group(1)
+                    s["sideband_error"] = "timeout"
                 elif isinstance(data.get("response"), dict):
                     resp = data["response"]
                     s["sideband_status"] = (resp.get("status") or {}).get("code")
@@ -858,6 +864,14 @@ def lint_trace(trace: dict) -> List[Finding]:
                                f"the inspection endpoint did not answer within rdwr-app-ep-timeout-seconds ({err})",
                                f"check that the gateway can reach {host or 'the endpoint'} on port 443 (VNet, NSG, "
                                "firewall, forced tunnelling) and that the hostname is right (Step 3c)"))
+        elif ("unexpectedly closed" in low or "forcibly closed" in low or "closed before received headers" in low
+              or "connection reset" in low):
+            out.append(Finding("T04", where, None,
+                               f"the inspection endpoint closed or reset the connection before answering ({err}); "
+                               "the request was served uninspected, and API Management does not send the inspection call again",
+                               "an occasional one is the endpoint closing the connections API Management keeps open, and "
+                               "needs no action (Issue 11); if most requests show it, check rdwr-app-ep-port and the TLS "
+                               "settings (Step 1, Step 3a) and contact Radware with this trace"))
         elif "no such host" in low or "resolve" in low or "name resolution" in low or "nodename" in low:
             out.append(Finding("T04", where, None, f"the inspection endpoint hostname does not resolve ({err})",
                                "check rdwr-app-ep-addr for a typo (Step 3a, Step 3c)"))
