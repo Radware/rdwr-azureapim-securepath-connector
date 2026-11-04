@@ -26,8 +26,10 @@ def main():
         text = f.read()
     m = re.search(r"<inbound>\s*\n(\s*<base\s*/>[ \t]*\n)", text)
     text = text[:m.end(1)] + JWT + text[m.end(1):]
-    text = re.sub(r'<set-variable name="rdwrRenderedBlockPage" value="@\{.*?\}" />',
-                  '<set-variable name="rdwrRenderedBlockPage" />', text, count=1, flags=re.S)
+    # the block page's Transaction ID expression (the block-page set-variable written as @{...})
+    text, n = re.subn(r'<set-variable name="rdwrTransactionId" value="@\{.*?\}" />',
+                      '<set-variable name="rdwrTransactionId" />', text, count=1, flags=re.S)
+    assert n == 1, "the block-page set-variable was not found"
     with open(OUT, "w", encoding="utf-8") as f:
         f.write(text)
     print("wrote", OUT, len(text.splitlines()), "lines")

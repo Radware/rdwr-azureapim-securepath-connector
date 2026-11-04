@@ -1,5 +1,94 @@
 # Release Notes — Radware SecurePath Connector for Azure API Management
 
+## v1.5.1 (2026-11-04)
+
+Two changes to what the connector does, and the identifier `700-v1.5.1`. **Upgrading is recommended
+for every install that keeps the static-file bypass on (`static-extensions-enabled` = `true`, the
+default).** The Named Values (other than `plugin-version-info`), the APIs and your own policies stay
+as they are; "Upgrading from v1.5.0" below has the steps.
+
+### The static-file bypass is decided on the decoded path
+
+A request whose last path segment hides a separator with percent-encoding before a static-file
+extension is inspected; the static-file bypass is decided on the decoded path. `/admin%3b.js` is
+inspected, as `/admin;.js` already was: a last segment whose decoded form contains `;`, `\` or a NUL
+byte, or whose percent-encoding hides a `/`, is never treated as a static file, because many
+application servers route it to `/admin`. The extension is read from the decoded last segment, and the
+extension list is still compared exactly; a query string still forces inspection
+(`static-inspect-if-query-string-exists`).
+
+API Management decodes some escapes itself before any policy runs and forwards the decoded path to
+your backend (seen on Standard v2): `%2E` becomes `.`, and `%2F` and `%5C` become `/`. The connector sees the same path as
+your backend: `/x%2ejs` is handled as `/x.js`, and `/admin.php%2f.css` as `/admin.php/.css`, a path
+that ends in a listed extension and is treated as a static file, as by the other SecurePath
+connectors. If your application serves pages on such paths (PHP path info, for example), remove the
+extension from `static-list-of-bypassed-extensions` or set `static-extensions-enabled` to `false`.
+README Step 3b, *Static files*.
+
+### The block page shows SecurePath's Transaction ID for its 403 page too
+
+The connector's block page carries SecurePath's Transaction ID, the reference to the event in the
+Radware Cloud portal, when SecurePath blocks with its `403` HTML page as well as with its `200` block
+page: the ID that follows `Transaction ID` on SecurePath's page (letters and digits, at most 128).
+Nothing else from SecurePath's page is put on the block page, and a page whose body was not received
+whole gives no ID. JSON blocks are relayed as SecurePath sent them, and the `200` block page is
+handled as before.
+
+A block page that goes out without a Transaction ID now writes one error-severity line in the
+request's trace, in the wording the other SecurePath connectors use:
+`SecurePath: block page served without a Transaction ID: SecurePath answered <status> (<content
+type>) for <path> without one`. The path is given without its query string, the content type is at
+most 60 characters, and characters outside printable ASCII are replaced with `?`. API Management has no
+warning severity and a policy keeps no state from one request to the next, so the line is written for
+each such request, as a field of that request's own log row (README 5d, 5f).
+
+### Named Values and version
+
+No new Named Values (24 in total). `x-rdwr-plugin-info` becomes `700-v1.5.1` (Named Value
+`plugin-version-info`). The policy document keeps its name, `rdwr-azureapim-securepath-connector-v1.5.xml`.
+
+### Upgrading from v1.5.0
+
+Run these from the directory that holds this package's `fragments/` folder.
+
+1. Forms 1 and 2: register `securepath-inbound`, `securepath-outbound` and `securepath-onerror`
+   again. `securepath-app-map` is unchanged and stays as it is, which matters if the sync tool writes
+   it. Form 3: replace the document with `rdwr-azureapim-securepath-connector-v1.5.xml` (README Step 4,
+   Form 3).
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+SUB=$(az account show --query id -o tsv)
+BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
+RDWR_OK=1
+for F in inbound outbound onerror; do
+  jq -Rs "{properties:{format:\"rawxml\",description:\"Radware SecurePath $F\",value:.}}" \
+     fragments/securepath-$F.fragment.xml > rdwr-frag-$F.json &&
+  az rest --method PUT --uri "$BASE/policyFragments/securepath-$F?api-version=2024-05-01" \
+          --headers "Content-Type=application/json" --body @rdwr-frag-$F.json -o none > /dev/null &&
+  echo "registered securepath-$F" || { echo "FAILED: securepath-$F"; RDWR_OK=0; break; }
+done
+[ "$RDWR_OK" = 1 ] && echo "three fragments registered"
+```
+
+2. Set the identifier the connector reports:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id plugin-version-info \
+  --value 700-v1.5.1 -o none && echo "plugin-version-info updated"
+```
+
+3. Replace your copy of `tools/`.
+4. Run `python3 tools/securepath-apim-lint.py --live` (README 5e): it reports a fragment that did not
+   register as `L14`.
+
+---
+
 ## v1.5.0 (2026-10-04)
 
 ### Package update, 2026-10-25
@@ -21,9 +110,9 @@ it registers this fragment too.
   count them per minute by cause; this adds no log rows (each line is stored in the row of its
   request).
 - **What happens when the inspection endpoint closes the connections API Management keeps open**
-  is documented (README Issue 11): the request that was on such a connection is served uninspected
-  and is not sent again, by API Management or by the connector, and a response-phase log on it is
-  lost without any sign in API Management.
+  is documented (README Issue 11): the request that was on such a connection is served without
+  inspection and is not sent again, by API Management or by the connector, and a response-phase log
+  sent on it is not delivered, with nothing recorded in API Management.
 - **Requests whose path matches no API at all now need one more step to be inspected.** API
   Management now answers such a request with its own `404` without running any policy, `<on-error>`
   included. Until October 2026 it ran `<on-error>`, which is how the connector inspected these
@@ -118,21 +207,22 @@ done
 **The policy changed in this release, and every v1.4.0 install must be updated**, in the order given
 in "Upgrading from v1.4.0" at the end of this section: API Management no longer accepts part of the
 v1.4.0 policy. What is new: the connector inspects the requests API Management answers itself
-(no matching operation, missing or invalid subscription key); SecurePath's answer can no longer hold
-an allowed request beyond `rdwr-app-ep-timeout-seconds`; the response-phase log no longer holds a
-response to measure it; configuration values the connector cannot use are reported instead of
-failing requests; and, with Bot Manager enabled, a visitor that Bot Manager challenges now reaches the
-CAPTCHA page (one API to add, README Step 4). `x-rdwr-plugin-info` becomes `700-v1.5.0`.
+(no matching operation, missing or invalid subscription key); SecurePath's answer cannot hold an
+allowed request beyond `rdwr-app-ep-timeout-seconds`; the response-phase log takes a response's size
+from its `Content-Length`, without holding it; configuration values the connector cannot use are
+reported at once, and the request is served; and, with Bot Manager enabled, a visitor that Bot
+Manager challenges now reaches the CAPTCHA page (one API to add, README Step 4).
+`x-rdwr-plugin-info` becomes `700-v1.5.0`.
 
-### The policy is accepted by API Management again
+### The policy passes API Management's current validation
 
 API Management no longer accepts a `<choose>` element inside `send-request` or
 `send-one-way-request`, which the v1.4.0 fragments and policy document used for the headers that are
 sent only in some cases. On an instance this affects:
 
 - registering the v1.4.0 fragments, or saving the v1.4.0 policy document, is refused
-  (*"The element 'send-request' has invalid child element 'choose'"*), so a new v1.4.0 install cannot
-  be completed;
+  (*"The element 'send-request' has invalid child element 'choose'"*), so a new install is made with
+  this release;
 - on an instance that already runs v1.4.0, a change to any Named Value the inbound fragment reads —
   the API key, `rdwr-bot-manager-enabled`, the application map, a timeout — is refused with
   *"... breaks policy fragments ..."*, and so is re-registering any single fragment.
@@ -160,10 +250,10 @@ reached or answers with an error, API Management's own 404 or 401 is returned un
 ### A visitor that Bot Manager challenges reaches the CAPTCHA page
 
 Bot Manager challenges a visitor by redirecting it to `/7f7c01e221604f25/` on the site's own
-hostname, where the application's SecurePath inspection endpoint serves the CAPTCHA page. API
-Management had nothing on that path, and the connector inspected it like any other request, so the
-challenged visitor got a block page, a `404`, or the page of the API that owns the root of the
-hostname instead of the CAPTCHA, and could not get past the challenge.
+hostname, where the application's SecurePath inspection endpoint serves the CAPTCHA page. In earlier
+versions API Management had nothing on that path and the connector inspected it like any other
+request, so the challenged visitor received a block page, a `404`, or the page of the API that owns
+the root of the hostname in place of the CAPTCHA page.
 
 - The connector now forwards requests for that path to the inspection endpoint of the request's
   application, over the connection it uses for inspection and within `rdwr-app-ep-timeout-seconds`:
@@ -186,26 +276,27 @@ hostname instead of the CAPTCHA, and could not get past the challenge.
 ### SecurePath's answer cannot hold an allowed request beyond the timeout
 
 `rdwr-app-ep-timeout-seconds` bounds the inspection call up to SecurePath's status and headers. The
-connector also read the body of every SecurePath answer, so an answer whose body arrived slowly, or
-whose connection stalled after the headers, held the request well beyond the timeout and could end
-it with a 500. The body is now read only for a block, which uses it (the JSON SecurePath sends, or
-the transaction ID on the block page). An allow and every fail-open complete within the timeout.
+body of SecurePath's answer is now read only for a block, which uses it (the JSON SecurePath sends,
+or the transaction ID on the block page). An allow and every fail-open complete within the timeout,
+also when an answer's body arrives slowly or its connection stalls after the headers. Earlier
+versions read the body of every answer, so such an answer held the request well beyond the timeout
+and could end it with a 500.
 
-### The response-phase log no longer holds the response
+### The response-phase log measures the response from its `Content-Length`
 
-To measure the response, the response-phase log read the whole response body, which makes API
-Management hold the response until the last byte has arrived before the client receives the first
-one: a stream (server-sent events, a long poll) could be delayed to its end, and a large download
-was held in the gateway's memory. Sizes now come from the origin's `Content-Length`; a response
-without one (chunked or streamed) is reported with a body size of 0. A body sample, when SecurePath
-asks for one, is taken only from a response that declares a length within
-`rdwr-body-max-size-bytes`. The log no longer carries empty `content-type` and
-`content-transfer-encoding` headers when it has no body sample.
+The response-phase log now takes the response's sizes from the origin's `Content-Length` and does
+not read the response body to measure it; a response without one (chunked or streamed) is reported
+with a body size of 0. Reading the whole body makes API Management hold the response until the last
+byte has arrived before the client receives the first one, so a stream (server-sent events, a long
+poll) can be delayed to its end and a large download held in the gateway's memory; earlier versions
+measured the response that way. A body sample, when SecurePath asks for one, is taken only from a
+response that declares a length within `rdwr-body-max-size-bytes`. The log no longer carries empty
+`content-type` and `content-transfer-encoding` headers when it has no body sample.
 
 ### Configuration the connector cannot use is reported at once
 
-An inspection endpoint or application-map entry the connector cannot use no longer costs the request
-an error or a wait: the request is served uninspected at once and the condition is reported
+When the connector cannot use an inspection endpoint or application-map entry, the request is now
+served without inspection at once and the condition is reported
 (`X-Rdwr-Diag: config_incomplete` or `app_map_invalid`, an error line in the trace, and the install
 check):
 
@@ -284,9 +375,9 @@ such as `/report.PNG` is inspected rather than bypassed.
 - `L08` / `L10` report an endpoint that is not a bare host name and a map port outside 1–65535.
 - `L17` reports a Bot Manager install without the API for the CAPTCHA path, or with one that the
   connector does not run for, or that requires a subscription key.
-- The Named Value pre-flight check (README 2a) and the Named Value check (3c) reported nothing in zsh,
-  the default shell on macOS (`collisions: 0` whatever existed): they now run the same in bash and
-  zsh, and 2a reports how many names it checked.
+- The Named Value pre-flight check (README 2a) and the Named Value check (3c) now run the same in
+  bash and in zsh, the default shell on macOS (in zsh, earlier versions reported `collisions: 0`
+  whatever existed), and 2a reports how many names it checked.
 
 ### Named Values and version
 
@@ -384,7 +475,7 @@ to be ordered by hand and no existing policy is edited. `deploy/securepath-apim.
 everything in one deployment. The whole-document form is now generated from the fragments
 (`rdwr-azureapim-securepath-connector-v1.4.xml`); the v1.3 documents are no longer shipped.
 
-### Existing policies, and the operations that could silently skip the connector
+### Existing policies, and operations whose own policy skips the connector
 
 The guide now answers the question a global install actually raises — *I have APIs that already
 carry their own `validate-jwt`; do I have to change them?* — where the person installing reads it
@@ -431,12 +522,13 @@ invalid custom Bot Manager status list.
   same meaning as `rdwr_custom_bot_block_statuses` in the Radware SecurePath connector for NGINX.
   README 3e.
 
-### A configuration problem no longer fails requests
+### A configuration problem is reported without affecting traffic
 
-An incomplete configuration, an unmatched request with no default application, or an invalid
-map used to be able to end a request with a 500. Such requests are now served without
-inspection and marked with `X-Rdwr-Diag` (`config_incomplete`, `no_app_mapping`,
-`app_map_invalid`) and a trace line, so the condition is visible without affecting traffic.
+When the configuration is incomplete, a request matches no application and there is no default
+application, or the map is invalid, the request is now served without inspection and marked with
+`X-Rdwr-Diag` (`config_incomplete`, `no_app_mapping`, `app_map_invalid`) and a trace line, so the
+condition is visible without affecting traffic. In earlier versions such a request could end with a
+500.
 
 ### Two behaviours aligned with the other SecurePath connectors
 
@@ -499,8 +591,8 @@ next candidate or the fallback is used.
 
 ### Robustness and hygiene
 
-- A numeric or boolean Named Value the policy cannot read (`10s`, `yes`) no longer fails every
-  request: the documented default is used and the trace names the value.
+- A numeric or boolean Named Value the policy cannot read (`10s`, `yes`) is now replaced by the
+  documented default, and the trace names the value.
 - A client-supplied `X-Rdwr-Diag` header is removed before the connector runs, so the signal your
   backend logs cannot be forged.
 - `rdwr-true-client-ip-header` now defaults to `##DISABLED##`; when set, only the first address in
@@ -512,8 +604,8 @@ next candidate or the fallback is used.
 - The response-phase log is sent once per request even when an outbound policy fails after it.
 - Block responses use standard HTTP reason phrases (`Forbidden`, `Found`, `Too Many Requests`).
 - An application-map entry that is not an object, or whose `port`, `ssl` or `bot_manager` has the
-  wrong type, is treated as an invalid map (served uninspected, `X-Rdwr-Diag: app_map_invalid`)
-  instead of failing the request; the install check names the entry.
+  wrong type, is treated as an invalid map (served without inspection,
+  `X-Rdwr-Diag: app_map_invalid`); the install check names the entry.
 
 ### `securepath-apim-sync render`: a change bundle instead of a direct write
 
@@ -532,12 +624,13 @@ next candidate or the fallback is used.
   trace saved any other way.
 - **`securepath-apim-lint.py --trace trace.json`** reads any trace (from the script, the Portal,
   or a colleague) and prints a readout: whether the connector ran, what ran before it, where the
-  inspection call went and how it ended, the verdict, and why a request was served uninspected.
-  Findings T01–T08 name the cause, the fix and the step of the README that covers it.
+  inspection call went and how it ended, the verdict, and why a request was served without
+  inspection. Findings T01–T08 name the cause, the fix and the step of the README that covers it.
 - The README Debugging section now leads with these, shows a healthy readout and the readout of the
-  most common field failure (the `.v1` front-end host in `rdwr-app-ep-addr`, which the backend
-  entity for the `.oop` host cannot cover), and adds a line-by-line table for reading a raw trace.
-  Both readouts were produced on a Standard v2 instance against a live SecurePath application.
+  most common configuration mistake (the `.v1` front-end host in `rdwr-app-ep-addr`, which the
+  backend entity for the `.oop` host cannot cover), and adds a line-by-line table for reading a raw
+  trace. Both readouts were produced on a Standard v2 instance against a live SecurePath
+  application.
 
 ### Named Values and version
 
@@ -612,12 +705,12 @@ at API, product and All APIs scope.
 ### Two pre-flight checks, added as a new Step 2
 
 - **Named Value collisions.** `az apim nv create` **overwrites an existing Named Value without any
-  error** — earlier revisions of this guide stated the opposite. Six of the twenty names the
-  connector uses carry no `rdwr-` prefix and can already exist on a shared instance. Step 2a lists
-  any collisions, with their current values, before anything is written.
+  error**. Six of the twenty names the connector uses carry no `rdwr-` prefix and can already exist
+  on a shared instance. Step 2a lists any collisions, with their current values, before anything is
+  written.
 - **Policies missing `<base />`.** If an API's own policy omits `<base />` from its inbound section,
   a policy installed at All APIs scope is **skipped for that API** — no error, no protection.
-  Step 2b audits every API.
+  Step 2b checks every API.
 
 ### Also
 
@@ -642,9 +735,9 @@ Step 1 cannot be performed on those tiers. Onboarding now documents a second pat
 **backend entity** for the SecurePath endpoint. API Management applies it automatically to the
 inspection call, so **no policy change is required**.
 
-Previous revisions described the v2 tiers as equivalent to Developer / Basic / Standard / Premium.
-They are not, and a deployment on a v2 tier without this step will serve traffic **uninspected**
-with no error surfaced. The tier table, Step 1 and the troubleshooting section now reflect this.
+On a v2 tier, a deployment without this step serves traffic **without inspection**. The tier table,
+Step 1 and the troubleshooting section now describe the v2 tiers separately from Developer / Basic /
+Standard / Premium.
 
 ### Onboarding guide rewritten
 
@@ -658,8 +751,8 @@ with no error surfaced. The tier table, Step 1 and the troubleshooting section n
 - **New debugging section** built around the API Management trace, including how to capture one and
   the exact strings to search for.
 - **Application ID guidance.** The portal also shows a `.v1.radwarecloud.net` hostname that this
-  connector does not use. Supplying it produces no error and results in uninspected traffic. Step 2c
-  now checks for it.
+  connector does not use. Supplying it results in traffic served without inspection. Step 2c now
+  checks for it.
 - Shell variables renamed to match the Named Values they populate.
 
 ### Packaging
@@ -672,7 +765,7 @@ with no error surfaced. The tier table, Step 1 and the troubleshooting section n
 
 ## v1.3.2 (GA 2026-05-04)
 
-### Bug Fixes
+### Changes
 
 - **`x-rdwr-o2v-bytes-sent` now reports total wire bytes** (status line + headers + body), not body length alone. `x-rdwr-o2v-body-bytes-sent` continues to report body bytes only.
 
@@ -688,10 +781,10 @@ Same XML policy file (`rdwr-azureapim-securepath-connector-v1.3.xml`). No new Na
 
 ## v1.3.1 (2026-03-31)
 
-**Bug fix and analytics enhancement.** Adds connector disposition reporting in the response-phase log, enables response-phase logging on block and redirect verdicts, and corrects large-body forwarding behavior.
+**Analytics enhancement and large-body handling.** Adds connector disposition reporting in the response-phase log, enables response-phase logging on block and redirect verdicts, and applies `rdwr-body-max-size-bytes` to request bodies forwarded to SecurePath.
 
-### Bug Fixes
-- **Large request body forwarding.** When `Content-Length` exceeded `rdwr-body-max-size-bytes`, the policy previously forwarded the full body to SecurePath instead of skipping it. The policy now correctly sends an empty body in that case, preserving the configured size limit.
+### Changes
+- **Large request body forwarding.** When `Content-Length` exceeds `rdwr-body-max-size-bytes`, the policy now sends an empty body to SecurePath, preserving the configured size limit; earlier versions forwarded the full body.
 
 ### Enhancements
 - **Connector disposition header.** The response-phase log POST now includes `x-rdwr-o2h-rdwr-response`, with value:
@@ -764,12 +857,13 @@ Initial release. Basic inspection call and verdict enforcement.
 
 | Version    | Date       | Status      | Highlights                                                       |
 |------------|------------|-------------|------------------------------------------------------------------|
-| **v1.5.0** | 2026-10-04 | **Current** | Policy accepted by API Management again, requests API Management answers itself inspected, SecurePath's answer and the response-phase log can no longer hold a response, unusable configuration reported instead of failing requests, Bot Manager CAPTCHA path served |
+| **v1.5.1** | 2026-11-04 | **Current** | Static-file bypass decided on the decoded path, Transaction ID from SecurePath's 403 page, a trace line for a block page without one |
+| v1.5.0     | 2026-10-04 | Superseded  | Policy passes API Management's current validation, requests API Management answers itself inspected, SecurePath's answer and the response-phase log do not hold a response, unusable configuration reported at once, Bot Manager CAPTCHA path served |
 | v1.4.0     | 2026-09-22 | Superseded  | Several applications on one instance, client-facing hostname, generated map and sync tool, on-error log, custom Bot Manager block responses, install check, trace tool |
 | v1.3.4     | 2026-08-16 | Superseded  | Three install forms, pre-flight checks (documentation and packaging; policy unchanged) |
 | v1.3.3     | 2026-08-14 | Superseded  | Certificate files shipped in the package (documentation and packaging) |
 | v1.3.2     | 2026-05-03 | Superseded  | `x-rdwr-o2v-bytes-sent` reports total wire bytes (status line + headers + body) |
-| v1.3.1     | 2026-03-31 | Superseded  | Disposition header, response-phase log on block/redirect, body-truncation fix |
+| v1.3.1     | 2026-03-31 | Superseded  | Disposition header, response-phase log on block/redirect, large request body handling |
 | v1.3.0     | 2026-03-12 | Superseded  | GA release, full feature coverage, response-phase logging        |
 | v1.2.0     | 2025-11-30 | Superseded  | Bot Manager support, reserved header enforcement                 |
 | v1.1.0     | 2025-09-15 | Superseded  | Body handling, chunked support                                   |

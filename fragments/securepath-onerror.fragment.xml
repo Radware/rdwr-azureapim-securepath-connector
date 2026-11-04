@@ -31,6 +31,37 @@
         <trace source="securepath" severity="error">
           <message>@("SecurePath answered a block but the body that came with it could not be read (" + (context.LastError != null ? (context.LastError.Message ?? "") : "") + "); the block was enforced with the connector's block page")</message>
         </trace>
+        <!-- The page above carries no Transaction ID (nothing is taken from a body that was not read
+             whole). For SecurePath's 200 implicit block or its 403 page, the same report line as the
+             inbound fragment writes. Built so that it cannot throw. -->
+        <set-variable name="rdwrBlockPageNoTidLine" value="@{
+          try {
+            int st = (int)context.Variables.GetValueOrDefault("rwStatus", 0);
+            if (st != 200 && st != 403) { return ""; }
+            if (((string)context.Variables.GetValueOrDefault("radwareCt", "") ?? "").StartsWith("application/json")) { return ""; }
+            if (st == 200 && ((string)context.Variables.GetValueOrDefault("oopRequestStatusHeader", "") == "allowed" || (bool)context.Variables.GetValueOrDefault("uzmcrHeaderPresent", false))) { return ""; }
+            string ct = "";
+            if (context.Variables.ContainsKey("radwareResponse") && context.Variables["radwareResponse"] != null) {
+              ct = ((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("Content-Type", default(string[]))?.FirstOrDefault() ?? "";
+            }
+            string target = (string)context.Variables.GetValueOrDefault("rdwrTargetRaw", "") ?? "";
+            int sep = target.IndexOf('\u0001');
+            string path = sep >= 0 ? target.Substring(0, sep) : (context.Request.OriginalUrl.Path ?? "");
+            var clean = new System.Text.StringBuilder(64);
+            foreach (char c in (ct.Length > 60 ? ct.Substring(0, 60) : ct)) { clean.Append(c >= ' ' && c <= '~' ? c : '?'); }
+            string ctOut = clean.Length == 0 ? "(none)" : clean.ToString();
+            clean.Clear();
+            foreach (char c in (path.Length > 256 ? path.Substring(0, 256) : path)) { clean.Append(c > ' ' && c <= '~' ? c : '?'); }
+            return "SecurePath: block page served without a Transaction ID: SecurePath answered " + st.ToString() + " (" + ctOut + ") for " + clean.ToString() + " without one";
+          } catch { return ""; }
+        }" />
+        <choose>
+          <when condition="@(((string)context.Variables.GetValueOrDefault("rdwrBlockPageNoTidLine", "")) != "")">
+            <trace source="securepath" severity="error">
+              <message>@((string)context.Variables["rdwrBlockPageNoTidLine"])</message>
+            </trace>
+          </when>
+        </choose>
         <choose>
           <when condition="@{
             var oop_log = (string)context.Variables.GetValueOrDefault("rdwrOopLog", "");
@@ -57,7 +88,7 @@
                 <value>log</value>
               </set-header>
               <set-header name="x-rdwr-plugin-info" exists-action="override">
-                <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.0"))</value>
+                <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
               </set-header>
               <set-header name="x-rdwr-app-id" exists-action="override">
                 <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -170,7 +201,7 @@
             <value>log</value>
           </set-header>
           <set-header name="x-rdwr-plugin-info" exists-action="override">
-            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.0"))</value>
+            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
           </set-header>
           <set-header name="x-rdwr-app-id" exists-action="override">
             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>

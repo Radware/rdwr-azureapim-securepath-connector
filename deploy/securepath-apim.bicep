@@ -81,7 +81,7 @@ var namedValues = [
   { name: 'rdwr-true-client-ip-header', value: trueClientIpHeader, secret: false }
   { name: 'rdwr-api-base-path', value: apiBasePath, secret: false }
   { name: 'rdwr-bot-manager-enabled', value: botManagerEnabled ? 'true' : 'false', secret: false }
-  { name: 'plugin-version-info', value: '700-v1.5.0', secret: false }
+  { name: 'plugin-version-info', value: '700-v1.5.1', secret: false }
   { name: 'static-extensions-enabled', value: 'true', secret: false }
   { name: 'static-list-of-methods-not-to-inspect', value: 'GET,HEAD', secret: false }
   { name: 'static-list-of-bypassed-extensions', value: 'png,jpg,css,js,jpeg,gif,ico,ttf,svg,woff,woff2,svc,swf,otf,eot,webp,avif', secret: false }

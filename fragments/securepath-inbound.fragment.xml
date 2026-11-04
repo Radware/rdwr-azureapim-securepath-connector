@@ -650,25 +650,40 @@
         <set-variable name="reqMethod" value="@(context.Request.Method.ToUpper())" />
         <set-variable name="reqQuery" value="@(context.Request.Url.QueryString)" />
         <set-variable name="fileExt" value="@{
+          // The extension of the request path's last segment, decided on the path as the application
+          // decodes it (matches the NGINX reference). API Management hands the policy the raw path; it
+          // is percent-decoded here (%XX with two hex digits becomes that byte, anything else is kept),
+          // in one pass. A last segment that decodes to something with ";" (a path parameter: many
+          // application servers drop ";..." before routing, so "/admin;.js" and "/admin%3b.js" reach
+          // the application as "/admin"), "\" or a NUL byte, or whose escapes hide a "/" (the
+          // application sees "/admin.php%2f.css" as "/admin.php" plus path info), is never a static
+          // asset and is inspected.
           string path = (string)context.Variables.GetValueOrDefault("reqPathForExt","");
-          string extension = "";
-          if (!string.IsNullOrEmpty(path))
-          {
-            // A last path segment that carries a path parameter (";") is never a static asset: many
-            // application servers drop ";..." before routing, so "/admin;.js" reaches the application
-            // as "/admin" -- a page, not a script -- and must be inspected (matches the NGINX reference).
-            int lastSlash = path.LastIndexOf('/');
-            string lastSeg = lastSlash >= 0 ? path.Substring(lastSlash + 1) : path;
-            if (lastSeg.IndexOf(';') < 0)
-            {
-              int lastDot = path.LastIndexOf('.');
-              if (lastDot != -1 && lastDot < path.Length - 1)
-              {
-                extension = path.Substring(lastDot + 1);   // case preserved -> compared case-sensitively
-              }
+          if (string.IsNullOrEmpty(path)) { return ""; }
+          int rawLastSlash = path.LastIndexOf('/');
+          int rawLastStart = 0;   // where the raw last segment starts in the decoded path
+          var dec = new System.Text.StringBuilder(path.Length);
+          for (int i = 0; i < path.Length; i++) {
+            if (i == rawLastSlash + 1) { rawLastStart = dec.Length; }
+            char c = path[i];
+            if (c == '%' && i + 2 < path.Length) {
+              char a = path[i + 1], b = path[i + 2];
+              int h1 = (a >= '0' && a <= '9') ? a - '0' : (a >= 'a' && a <= 'f') ? a - 'a' + 10 : (a >= 'A' && a <= 'F') ? a - 'A' + 10 : -1;
+              int h2 = (b >= '0' && b <= '9') ? b - '0' : (b >= 'a' && b <= 'f') ? b - 'a' + 10 : (b >= 'A' && b <= 'F') ? b - 'A' + 10 : -1;
+              if (h1 >= 0 && h2 >= 0) { dec.Append((char)(h1 * 16 + h2)); i += 2; continue; }
             }
+            dec.Append(c);
           }
-          return extension;
+          if (rawLastSlash + 1 >= path.Length) { rawLastStart = dec.Length; }   // the path ends with "/"
+          string decoded = dec.ToString();
+          int lastSlash = decoded.LastIndexOf('/');
+          string last = lastSlash >= 0 ? decoded.Substring(lastSlash + 1) : decoded;
+          // an escaped "/" in the raw last segment hid a segment boundary
+          if (last != decoded.Substring(rawLastStart)) { return ""; }
+          if (last.IndexOf(';') >= 0 || last.IndexOf('\\') >= 0 || last.IndexOf('\0') >= 0) { return ""; }
+          int dot = last.LastIndexOf('.');
+          if (dot < 0 || dot == last.Length - 1) { return ""; }
+          return last.Substring(dot + 1);   // case preserved -> compared case-sensitively
         }" />
 
         <!-- isBypassCandidateMethod (no LINQ .Contains) -->
@@ -1969,7 +1984,7 @@
                 }" />
                 <set-variable name="rdwrSpBodyRead" value="@(true)" />
                 <set-variable name="rdwrBlockBodyPending" value="@(0)" />
-                <set-variable name="rdwrRenderedBlockPage" value="@{
+                <set-variable name="rdwrTransactionId" value="@{
                   // Extract transaction ID from SP body
                   string transId = "";
                   try {
@@ -1993,10 +2008,66 @@
                           }
                         }
                       }
+                      // Pattern 3: SecurePath's 403 HTML page ("<h2>Transaction ID:</h2> 0a1b2c...").
+                      // After the first "Transaction ID" (case-sensitive), each following '>' is tried:
+                      // white space is skipped, and the first '>' followed by a letter or digit gives
+                      // the ID, that run of ASCII letters and digits (1 to 128; a longer run gives
+                      // none). One pass over the body; nothing but letters and digits reaches the page.
+                      if (string.IsNullOrEmpty(transId) && (int)context.Variables["rwStatus"] == 403
+                          && !((string)context.Variables["radwareCt"]).StartsWith("application/json")) {
+                        int t = body.IndexOf("Transaction ID", StringComparison.Ordinal);
+                        int p = t < 0 ? body.Length : t + 14;
+                        while (p < body.Length) {
+                          int gt = body.IndexOf('>', p);
+                          if (gt < 0) { break; }
+                          int s = gt + 1;
+                          while (s < body.Length && (body[s] == ' ' || body[s] == '\t' || body[s] == '\n' || body[s] == '\v' || body[s] == '\f' || body[s] == '\r')) { s++; }
+                          int e = s;
+                          while (e < body.Length && e - s <= 128 && ((body[e] >= '0' && body[e] <= '9') || (body[e] >= 'A' && body[e] <= 'Z') || (body[e] >= 'a' && body[e] <= 'z'))) { e++; }
+                          if (e > s) {
+                            if (e - s <= 128) { transId = body.Substring(s, e - s); }
+                            break;
+                          }
+                          p = s;
+                        }
+                      }
                     }
                   } catch {}
-                  return ((string)context.Variables["rdwrBlockPageBase"]).Replace("[%transaction_id%]", transId);
+                  return transId;
                 }" />
+                <set-variable name="rdwrRenderedBlockPage" value="@(((string)context.Variables["rdwrBlockPageBase"]).Replace("[%transaction_id%]", (string)context.Variables["rdwrTransactionId"]))" />
+              </when>
+            </choose>
+            <!-- A block page for SecurePath's 200 implicit block or its 403 page that carries no
+                 Transaction ID (SecurePath's answer had none, or its body was not or could not be
+                 read) is reported: one error-severity line in this request's trace. API Management
+                 has no warning severity, and a policy keeps no state from one request to the next
+                 to rate-limit with; like the fail-open lines (README 5f), the line is a field of the
+                 request's own log row. Built so that it cannot throw: this also runs from on-error. -->
+            <set-variable name="rdwrBlockPageNoTidLine" value="@{
+              try {
+                int st = (int)context.Variables["rwStatus"];
+                if (st != 200 && st != 403) { return ""; }
+                if (((string)context.Variables["radwareCt"]).StartsWith("application/json")) { return ""; }
+                if (st == 200 && ((string)context.Variables["oopRequestStatusHeader"] == "allowed" || (bool)context.Variables.GetValueOrDefault("uzmcrHeaderPresent", false))) { return ""; }
+                if (((string)context.Variables.GetValueOrDefault("rdwrTransactionId", "")) != "") { return ""; }
+                string ct = ((IResponse)context.Variables["radwareResponse"]).Headers.GetValueOrDefault("Content-Type", default(string[]))?.FirstOrDefault() ?? "";
+                string target = (string)context.Variables.GetValueOrDefault("rdwrTargetRaw", "") ?? "";
+                int sep = target.IndexOf('\u0001');
+                string path = sep >= 0 ? target.Substring(0, sep) : (context.Request.OriginalUrl.Path ?? "");
+                var clean = new System.Text.StringBuilder(64);
+                foreach (char c in (ct.Length > 60 ? ct.Substring(0, 60) : ct)) { clean.Append(c >= ' ' && c <= '~' ? c : '?'); }
+                string ctOut = clean.Length == 0 ? "(none)" : clean.ToString();
+                clean.Clear();
+                foreach (char c in (path.Length > 256 ? path.Substring(0, 256) : path)) { clean.Append(c > ' ' && c <= '~' ? c : '?'); }
+                return "SecurePath: block page served without a Transaction ID: SecurePath answered " + st.ToString() + " (" + ctOut + ") for " + clean.ToString() + " without one";
+              } catch { return ""; }
+            }" />
+            <choose>
+              <when condition="@(((string)context.Variables["rdwrBlockPageNoTidLine"]) != "")">
+                <trace source="securepath" severity="error">
+                  <message>@((string)context.Variables["rdwrBlockPageNoTidLine"])</message>
+                </trace>
               </when>
             </choose>
 
@@ -2049,7 +2120,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.0"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -2159,7 +2230,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.0"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -2294,7 +2365,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.0"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -2404,7 +2475,7 @@
                         <value>log</value>
                       </set-header>
                       <set-header name="x-rdwr-plugin-info" exists-action="override">
-                        <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.0"))</value>
+                        <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
                       </set-header>
                       <set-header name="x-rdwr-app-id" exists-action="override">
                         <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -2553,7 +2624,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.0"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>

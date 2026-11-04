@@ -53,9 +53,9 @@ def test_no_cloud_fetch_on_the_request_path():
     assert "api.radwarecloud.app" not in t and "cache-lookup-value" not in t and "rdwr-cloud" not in t
 
 
-def test_plugin_info_fallback_is_v150():
-    for name in ("outbound", "onerror"):
-        assert "700-v1.5.0" in frag(name) and "700-v1.4" not in frag(name) and "700-v1.3" not in frag(name)
+def test_plugin_info_fallback_is_v151():
+    for name in ("inbound", "outbound", "onerror"):
+        assert "700-v1.5.1" in frag(name) and "700-v1.5.0" not in frag(name) and "700-v1.4" not in frag(name) and "700-v1.3" not in frag(name)
 
 
 def test_unknown_securepath_status_fails_open_audibly():
@@ -322,20 +322,30 @@ def test_header_fit_never_targets_a_restricted_header():
         assert restricted not in t, restricted
 
 
-def test_static_bypass_ignores_path_parameters_and_is_case_sensitive():
-    """Fleet rule (matches the NGINX reference): a last path segment carrying a path parameter (';',
-    e.g. /admin;.js) is never static, and the extension is read from the raw path and compared
-    case-sensitively, so /x.PNG is inspected while the lowercase list is authored lowercase."""
+def test_static_bypass_is_decided_on_the_decoded_path_and_is_case_sensitive():
+    """Fleet rule (NGINX reference 1.1.6, static_extension()): the raw path API Management received is
+    percent-decoded (%XX with two hex digits -> that byte, anything else kept) in one pass. A last
+    segment that decodes to something with ';' (a path parameter: /admin;.js, /admin%3b.js), '\\' or a
+    NUL byte, or whose escapes hide a '/' (/admin.php%2f.css), is never static; otherwise the extension
+    follows the last '.' of the decoded last segment (/x%2ejs is x.js) and is compared case-sensitively,
+    so /x.PNG is inspected while the list is authored lowercase."""
     t = frag("inbound")
     fe = t[t.index('name="fileExt"'):]; fe = fe[:fe.index('}" />')]
-    assert "IndexOf(';')" in fe                      # a ';' in the last segment blocks the static treatment
-    assert "lastSlash" in fe and "lastSeg" in fe
-    # the extension source path is the raw OriginalUrl.Path, not a lowercased copy
+    # the source is the raw OriginalUrl.Path (API Management does not decode it), not a lowercased copy
     assert 'name="reqPathForExt" value="@(context.Request.OriginalUrl.Path ?? "")" />' in t
     assert 'context.Request.Url.Path.ToLower()' not in t
-    # the list comparison is case-sensitive (no ToLower on the configured list)
+    # one decoding pass: two hex digits after '%', anything else appended as it is
+    assert "if (c == '%' && i + 2 < path.Length)" in fe
+    assert "dec.Append((char)(h1 * 16 + h2)); i += 2; continue;" in fe
+    assert "UnescapeDataString" not in fe and "UrlDecode" not in fe and "Regex" not in fe
+    # the decoded last segment, compared with the raw last segment decoded on its own
+    assert "if (i == rawLastSlash + 1) { rawLastStart = dec.Length; }" in fe
+    assert "if (last != decoded.Substring(rawLastStart)) { return \"\"; }" in fe
+    assert "if (last.IndexOf(';') >= 0 || last.IndexOf('\\\\') >= 0 || last.IndexOf('\\0') >= 0) { return \"\"; }" in fe
+    assert "return last.Substring(dot + 1);" in fe and "path.LastIndexOf('.')" not in fe
+    # the list comparison is case-sensitive (no ToLower on the configured list or the extension)
     be = t[t.index('name="isBypassCandidateExtension"'):]; be = be[:be.index('}" />')]
-    assert '.ToLower()' not in be
+    assert '.ToLower()' not in be and ".ToLower()" not in fe
 
 
 def test_a_bare_percent_in_the_path_is_escaped_for_inspection_only():
@@ -516,3 +526,104 @@ def test_no_trace_line_uses_the_alert_phrase_failing_open():
     for name in ("inbound", "outbound", "onerror"):
         messages = re.findall(r"<message>(.*?)</message>", frag(name), flags=re.S)
         assert not [m for m in messages if "failing open" in m], name
+
+
+def _expr(t, name):
+    """The C# body of the set-variable expression named NAME (text between its @{ and the closing }")."""
+    i = t.index('<set-variable name="%s" value="@{' % name)
+    return t[i:t.index('}" />', i)]
+
+
+def test_block_page_takes_the_transaction_id_from_securepaths_403_page():
+    """SecurePath's own 403 HTML page carries the ID after the text "Transaction ID" ("<h2>Transaction
+    ID:</h2> 0a1b..."). Only for a 403 that is not JSON, only after patterns 1 and 2 found nothing,
+    each '>' after the first "Transaction ID" is tried, white space skipped, and the first run of ASCII
+    letters and digits is the ID, 1 to 128 characters (a longer run gives none)."""
+    e = _expr(frag("inbound"), "rdwrTransactionId")
+    i = e.index("Pattern 3")
+    p3 = e[i:]
+    assert 'string.IsNullOrEmpty(transId) && (int)context.Variables["rwStatus"] == 403' in p3
+    assert '!((string)context.Variables["radwareCt"]).StartsWith("application/json")' in p3
+    assert 'body.IndexOf("Transaction ID", StringComparison.Ordinal)' in p3
+    assert "body.IndexOf('>', p)" in p3
+    for ws in (r"' '", r"'\t'", r"'\n'", r"'\v'", r"'\f'", r"'\r'"):
+        assert "body[s] == " + ws in p3, ws
+    assert "(body[e] >= '0' && body[e] <= '9') || (body[e] >= 'A' && body[e] <= 'Z') || (body[e] >= 'a' && body[e] <= 'z')" in p3
+    assert "e - s <= 128" in p3 and "if (e - s <= 128) { transId = body.Substring(s, e - s); }" in p3
+    assert e.rstrip().endswith("return transId;")
+
+
+def test_existing_transaction_id_patterns_are_unchanged():
+    """The implicit block (_event_transid='...') and the "transid" pattern keep their v1.5.0 code
+    exactly, so every page they produce stays byte-identical."""
+    e = _expr(frag("inbound"), "rdwrTransactionId")
+    for line in ('int idx = body.IndexOf("_event_transid=\'");',
+                 "int start = idx + 16;",
+                 'int end = body.IndexOf("\'", start);',
+                 "if (end > start) { transId = body.Substring(start, end - start); }",
+                 'idx = body.IndexOf("\\"transid\\"");',
+                 'int qStart = body.IndexOf("\\"", idx + 9 + body.Substring(idx + 9).IndexOf(":") + 1);',
+                 'int qEnd = body.IndexOf("\\"", qStart + 1);',
+                 "if (qEnd > qStart + 1) { transId = body.Substring(qStart + 1, qEnd - qStart - 1); }"):
+        assert line in e, line
+    assert e.index("Pattern 1") < e.index("Pattern 2") < e.index("Pattern 3")
+
+
+def test_rendered_block_page_fills_the_existing_transaction_id_slot():
+    """The page is the connector's existing page; the ID goes in its Transaction ID slot, empty when
+    there is none (the page is then byte-identical to v1.5.0's)."""
+    t = frag("inbound")
+    assert '<p class=""transaction"">Transaction ID: [%transaction_id%]</p>' in t
+    assert ('<set-variable name="rdwrRenderedBlockPage" value="@(((string)context.Variables["rdwrBlockPageBase"])'
+            '.Replace("[%transaction_id%]", (string)context.Variables["rdwrTransactionId"]))" />') in t
+    assert t.count('name="rdwrRenderedBlockPage"') == 2  # before the body is read, and with the ID
+
+
+def test_block_page_without_a_transaction_id_is_reported():
+    """A block page for a 200 implicit block or a non-JSON 403 served without an ID writes one
+    error-severity line (API Management has no warning severity) in the text the other connectors
+    write: content type sanitized and at most 60 characters or "(none)", the path without the query
+    string, sanitized, at most 256. The expression cannot throw (it also runs from on-error)."""
+    t = frag("inbound")
+    e = _expr(t, "rdwrBlockPageNoTidLine")
+    assert e.lstrip().startswith('<set-variable name="rdwrBlockPageNoTidLine" value="@{\n              try {')
+    assert e.rstrip().endswith('} catch { return ""; }')
+    assert '"SecurePath: block page served without a Transaction ID: SecurePath answered " + st.ToString() + " (" + ctOut + ") for " + clean.ToString() + " without one"' in e
+    assert "if (st != 200 && st != 403) { return \"\"; }" in e
+    assert '.StartsWith("application/json")) { return ""; }' in e
+    assert '"allowed" || (bool)context.Variables.GetValueOrDefault("uzmcrHeaderPresent", false))) { return ""; }' in e
+    assert 'GetValueOrDefault("rdwrTransactionId", "")) != "") { return ""; }' in e
+    assert 'ct.Length > 60 ? ct.Substring(0, 60) : ct' in e and '"(none)"' in e
+    assert 'path.Length > 256 ? path.Substring(0, 256) : path' in e
+    assert "QueryString" not in e and "target.Substring(0, sep)" in e
+    i = t.index('<set-variable name="rdwrBlockPageNoTidLine"')
+    seg = t[i:t.index("</choose>", i)]
+    assert '<trace source="securepath" severity="error">' in seg
+    assert '<message>@((string)context.Variables["rdwrBlockPageNoTidLine"])</message>' in seg
+    # decided after the body read and before the verdict branches serve the page
+    assert t.index('name="rdwrTransactionId"') < i < t.index("<!-- ====== Fail-open: the inspection endpoint answered 5xx ====== -->")
+
+
+def test_block_page_served_by_on_error_without_a_transaction_id_is_reported_too():
+    """When SecurePath's block body is cut off mid-way, API Management ends the inbound section with an
+    error and the on-error fragment serves the block page (no ID: nothing is taken from an incomplete
+    body). For a 200 implicit block or a non-JSON 403 it writes the same report line, in addition to its
+    own line, and cannot throw (an error in on-error replaces the response with a 500)."""
+    t = frag("onerror")
+    rec = t[t.index('<when condition="@((int)context.Variables.GetValueOrDefault("rdwrBlockBodyPending", 0) > 0)">'):]
+    rec = rec[:rec.index("</when>\n    </choose>")]
+    e = _expr(rec, "rdwrBlockPageNoTidLine")
+    assert e.lstrip().startswith('<set-variable name="rdwrBlockPageNoTidLine" value="@{\n          try {')
+    assert e.rstrip().endswith('} catch { return ""; }')
+    assert '"SecurePath: block page served without a Transaction ID: SecurePath answered " + st.ToString() + " (" + ctOut + ") for " + clean.ToString() + " without one"' in e
+    assert 'context.Variables.GetValueOrDefault("rwStatus", 0)' in e
+    assert '.StartsWith("application/json")) { return ""; }' in e
+    assert '"allowed" || (bool)context.Variables.GetValueOrDefault("uzmcrHeaderPresent", false))) { return ""; }' in e
+    assert "QueryString" not in e and 'path.Length > 256' in e and 'ct.Length > 60' in e
+    i = rec.index('<set-variable name="rdwrBlockPageNoTidLine"')
+    seg = rec[i:]
+    assert '<trace source="securepath" severity="error">' in seg
+    assert '<message>@((string)context.Variables["rdwrBlockPageNoTidLine"])</message>' in seg
+    # the existing recovery line stays as it is
+    assert ("SecurePath answered a block but the body that came with it could not be read (\" + (context.LastError != null ? "
+            "(context.LastError.Message ?? \"\") : \"\") + \"); the block was enforced with the connector's block page\"") in rec

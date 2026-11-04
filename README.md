@@ -1,9 +1,9 @@
 # Radware SecurePath Connector for Azure API Management
 
-**Connector v1.5.0** (`x-rdwr-plugin-info` 700-v1.5.0), released 2026-10-04. Changes since v1.4.0
-are in `release-notes.md`; existing installs, see "Upgrading from v1.4.0" (or "Upgrading from v1.3.x")
-there. **A v1.4.0 install must be upgraded**: API Management no longer accepts part of the v1.4.0
-policy, and the upgrade has an order to follow.
+**Connector v1.5.1** (`x-rdwr-plugin-info` 700-v1.5.1), released 2026-11-04. Changes are in
+`release-notes.md`; a v1.5.0 install, see "Upgrading from v1.5.0" there (or "Upgrading from v1.4.0" /
+"Upgrading from v1.3.x"). **A v1.4.0 install must be upgraded**: API Management no longer accepts part
+of the v1.4.0 policy, and the upgrade has an order to follow.
 
 This guide takes you from an existing API Management instance to SecurePath inspecting your API
 traffic.
@@ -385,7 +385,7 @@ RDWR_NV=(
   "rdwr-true-client-ip-header=##DISABLED##"
   "rdwr-api-base-path=/"
   "rdwr-bot-manager-enabled=false"
-  "plugin-version-info=700-v1.5.0"
+  "plugin-version-info=700-v1.5.1"
   "static-extensions-enabled=true"
   "static-list-of-methods-not-to-inspect=GET,HEAD"
   "static-list-of-bypassed-extensions=png,jpg,css,js,jpeg,gif,ico,ttf,svg,woff,woff2,svc,swf,otf,eot,webp,avif"
@@ -420,6 +420,19 @@ headers-only. A multipart body above `rdwr-multipart-max-size-bytes` is inspecte
 plain text, XML, SOAP). `multipart/form-data` is not in the default on purpose: API Management can
 only read a body whole, so reading a chunked upload of unknown size holds all of it in the gateway.
 Add it if your chunked uploads are small and you want their contents inspected.
+
+**Static files.** A request whose method is in `static-list-of-methods-not-to-inspect` and whose path
+ends in an extension listed in `static-list-of-bypassed-extensions` (compared exactly, so `.PNG` is
+not `.png`) is not sent for inspection, unless it has a query string and
+`static-inspect-if-query-string-exists` is `true`. The extension is read from the last segment of the
+path as your application decodes it. A last segment whose decoded form contains `;`, `\` or a NUL
+byte is always inspected (`/admin;.js` and `/admin%3b.js` reach many application servers as
+`/admin`), and so is one whose percent-encoding hides a `/`. API Management itself decodes some
+escapes before any policy runs and forwards the decoded path to your backend (seen on Standard v2):
+`%2E` becomes `.`, and `%2F` and `%5C` become `/`, so `/x%2ejs` is handled as `/x.js` and
+`/admin.php%2f.css` as `/admin.php/.css`, which is what your backend receives. A path such as `/admin.php/.css` ends in a listed extension and is treated as a static file;
+if your application serves pages on paths like that (PHP path info, for example), remove the
+extension from `static-list-of-bypassed-extensions` or set `static-extensions-enabled` to `false`.
 
 Set `rdwr-bot-manager-enabled` to `true` if Bot Manager is enabled on your SecurePath application.
 If Bot Manager answers bots with a custom status (a `429` with a "slow down" page, say), list that
@@ -1304,6 +1317,14 @@ situations produce it:
 
 Only 5c distinguishes them.
 
+**What a blocked client receives.** For a block, the client receives the connector's `403 Forbidden`
+page with SecurePath's Transaction ID on it: the reference to the event in the Radware Cloud portal.
+The ID is taken from SecurePath's answer, whether that is its `200` block page or its `403` HTML page.
+A JSON block is relayed as SecurePath sent it. When a block page goes out without a Transaction ID
+(SecurePath's answer had none, or its body could not be read), the request's trace carries the error
+line `SecurePath: block page served without a Transaction ID: SecurePath answered <status>
+(<content type>) for <path> without one`; the path is given without its query string.
+
 ## 5e — Run the install check
 
 ```bash
@@ -1565,6 +1586,7 @@ they appear in the **Inbound** section:
 | `... resulted in error, error ignored: <reason>` | The inspection call failed and the request was served uninspected. The reason names the cause: a certificate rejection (trust, Step 1 — for the host actually called), a hostname that does not resolve (typo), `Underlying transport connection was unexpectedly closed` (the endpoint closed the connection before answering). | Issue 1, Issue 11 |
 | `... resulted in timeout.` | The inspection call got no answer within `rdwr-app-ep-timeout-seconds`; the request was served uninspected. | Issue 9 |
 | `SecurePath inspection call failed after <N> ms, before the <T> s timeout ...` or `... timed out after <N> ms ...` (source `securepath`) | The connector's own line for the same request, with the time the call took. Every request served without a verdict has one such line (5f). | 5f |
+| `SecurePath: block page served without a Transaction ID: ...` (source `securepath`) | The client received the connector's block page without SecurePath's Transaction ID: SecurePath's answer carried none, or its body could not be read. The block itself was enforced. | 5d |
 | `send-request` response with status `301`/`302` and a `location` containing `wrong-api-key` | SecurePath did not recognise the Application ID / API key pair. | Step 3a, Issue 3 |
 | `set-variable rwStatus = 200` and `oopRequestStatusHeader = allowed` | Inspection completed, verdict allow. `rwStatus = 403` is a block. `rwStatus >= 500` is a SecurePath-side error and the request is served uninspected. | — |
 | `set-header X-Rdwr-Diag: <value>` | The request was served **without** a completed inspection; the value says why (table in 5c). This header goes to your backend, so its access log is an ongoing health signal. | 5c |

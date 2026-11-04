@@ -12,7 +12,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "..")
-VERSION = "1.5"
+VERSION = "1.5"          # minor: names the document
+FULL_VERSION = "1.5.1"   # in its header
 OUT = os.path.join(ROOT, f"rdwr-azureapim-securepath-connector-v{VERSION}.xml")
 FRAGMENTS = {
     "inbound": "securepath-inbound.fragment.xml",
@@ -20,7 +21,7 @@ FRAGMENTS = {
     "on-error": "securepath-onerror.fragment.xml",
 }
 HEADER = (
-    "<!-- Radware SecurePath Connector for Azure API Management, v{v}.0 (policy document, API scope).\n"
+    "<!-- Radware SecurePath Connector for Azure API Management, v{v} (policy document, API scope).\n"
     "     GENERATED from fragments/ by tools/build_documents.py. Edit the fragments, then re-run\n"
     "     the tool. The fragments are the recommended install (README Step 4, Form 1); this\n"
     "     document is for an API that has no policy of its own (Form 3). -->\n"
@@ -40,7 +41,7 @@ def render():
     inbound = fragment_body("inbound")
     assert "include-fragment" not in inbound, "the whole document must not reference fragments"
     return (
-        HEADER.format(v=VERSION)
+        HEADER.format(v=FULL_VERSION)
         + "<policies>\n"
         + "    <inbound>\n        <base />\n" + inbound + "\n    </inbound>\n"
         + "    <backend>\n        <base />\n    </backend>\n"
