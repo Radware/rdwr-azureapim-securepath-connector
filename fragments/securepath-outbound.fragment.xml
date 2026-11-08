@@ -69,12 +69,16 @@
         var oop_id = (string)context.Variables.GetValueOrDefault("rdwrOopId", "");
         return (oop_log == "2" || oop_log == "3") && !string.IsNullOrEmpty(oop_id);
       }">
-        <!-- The response body is never read to measure it. Reading it makes API Management hold the
-             whole response before the client receives its first byte, so a stream (server-sent
-             events, a long poll, a large download) would be delayed or never delivered. Sizes come
-             from the origin's Content-Length; a response without one (chunked or streamed) is
-             reported with a body size of 0. A body sample (SecurePath asked for one) is taken only
-             from a response that declares a length within rdwr-body-max-size-bytes. -->
+        <!-- The response body is never read to measure it: sizes come from the origin's
+             Content-Length, and a response without one (chunked or streamed) is reported with a
+             body size of 0. API Management holds the whole response before the client receives its
+             first byte whenever it runs a policy step whose expressions refer to the response body,
+             even if that code path is not taken. So exactly one step below refers to it, the body
+             sample (rdwrRespSampleBody), and that step runs only when SecurePath asked for a sample
+             and the response declares a length within rdwr-body-max-size-bytes. Every other
+             response, including a stream (server-sent events, a long poll, a large download),
+             reaches the client as the origin sends it. Keep every reference to the response body
+             inside that step. -->
         <set-variable name="rdwrRespDeclaredLength" value="@{
           long v;
           if (context.Request.Method == "HEAD" || context.Response.StatusCode == 204 || context.Response.StatusCode == 304) { return 0L; }
@@ -86,6 +90,36 @@
           long maxBody = (long)context.Variables.GetValueOrDefault("rdwrBodyMaxSize", 100000L);
           return declared > 0 && declared <= maxBody;
         }" />
+        <choose>
+          <when condition="@((bool)context.Variables["rdwrRespSample"])">
+            <set-variable name="rdwrRespSampleBody" value="@{
+              try {
+                var body = context.Response.Body.As<byte[]>(preserveContent: true);
+                if (body != null && body.Length > 0) {
+                  // sample size requested by SecurePath ("2k", "1m" or a number of bytes), within
+                  // 1 .. rdwr-body-max-size-bytes; an unreadable value means the 2 KB default
+                  long limit = 2048;
+                  string limitStr = ((string)context.Variables.GetValueOrDefault("rdwrOopLogBody", "2k") ?? "").Trim().ToLower();
+                  long unit = limitStr.EndsWith("k") ? 1024L : limitStr.EndsWith("m") ? 1048576L : 1L;
+                  long n;
+                  if (long.TryParse(unit == 1L ? limitStr : limitStr.Substring(0, limitStr.Length - 1), out n) && n > 0 && n <= 1073741824L) { limit = n * unit; }
+                  long maxBody = (long)context.Variables.GetValueOrDefault("rdwrBodyMaxSize", 100000L);
+                  if (limit > maxBody) { limit = maxBody; }
+                  if (limit < 1) { limit = 1; }
+                  byte[] capture;
+                  if (body.Length > limit) {
+                    capture = new byte[(int)limit];
+                    System.Array.Copy(body, capture, (int)limit);
+                  } else {
+                    capture = body;
+                  }
+                  return Convert.ToBase64String(capture);
+                }
+              } catch { }
+              return "";
+            }" />
+          </when>
+        </choose>
         <send-one-way-request mode="new">
           <set-url>@{
             var ep_addr = (string)context.Variables.GetValueOrDefault("rdwrAppEpAddr", "");
@@ -224,34 +258,8 @@
           <set-header name="content-transfer-encoding" exists-action="@((bool)context.Variables["rdwrRespSample"] ? "override" : "delete")">
             <value>base64</value>
           </set-header>
-          <set-body>@{
-            if ((bool)context.Variables["rdwrRespSample"]) {
-              try {
-                var body = context.Response.Body.As<byte[]>(preserveContent: true);
-                if (body != null && body.Length > 0) {
-                  // sample size requested by SecurePath ("2k", "1m" or a number of bytes), within
-                  // 1 .. rdwr-body-max-size-bytes; an unreadable value means the 2 KB default
-                  long limit = 2048;
-                  string limitStr = ((string)context.Variables.GetValueOrDefault("rdwrOopLogBody", "2k") ?? "").Trim().ToLower();
-                  long unit = limitStr.EndsWith("k") ? 1024L : limitStr.EndsWith("m") ? 1048576L : 1L;
-                  long n;
-                  if (long.TryParse(unit == 1L ? limitStr : limitStr.Substring(0, limitStr.Length - 1), out n) && n > 0 && n <= 1073741824L) { limit = n * unit; }
-                  long maxBody = (long)context.Variables.GetValueOrDefault("rdwrBodyMaxSize", 100000L);
-                  if (limit > maxBody) { limit = maxBody; }
-                  if (limit < 1) { limit = 1; }
-                  byte[] capture;
-                  if (body.Length > limit) {
-                    capture = new byte[(int)limit];
-                    System.Array.Copy(body, capture, (int)limit);
-                  } else {
-                    capture = body;
-                  }
-                  return Convert.ToBase64String(capture);
-                }
-              } catch { }
-            }
-            return "";
-          }</set-body>
+          <!-- the sample taken above; empty when none was requested (this step must not refer to the response body) -->
+          <set-body>@((string)context.Variables.GetValueOrDefault("rdwrRespSampleBody", ""))</set-body>
         </send-one-way-request>
         <set-variable name="rdwrLogSent" value="@(true)" />
       </when>

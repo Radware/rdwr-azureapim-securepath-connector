@@ -2,6 +2,66 @@
 
 ## v1.5.1 (2026-11-04)
 
+### Package update, 2026-11-08
+
+The package was updated with the changes below. The connector still identifies itself as
+`700-v1.5.1`, and what it sends to SecurePath, to your backend and to your clients is unchanged.
+**If you installed the v1.5.1 package of 2026-11-04, re-register one fragment, `securepath-outbound`
+(or replace the policy document)**; the Named Values and your own policies are unchanged. Radware
+recommends it for every install that serves large downloads or streams. If you are upgrading from
+v1.5.0, follow "Upgrading from v1.5.0" below, from this package: it registers this fragment too.
+
+- **A response reaches the client as your backend sends it, also while the response-phase log is
+  sent.** API Management holds the whole response before passing on its first byte whenever it runs
+  a policy step that refers to the response body, whether or not that step goes on to read it. The
+  response-phase log now refers to the body only in a separate step, which runs when SecurePath asks
+  for a body sample and the response declares a length within `rdwr-body-max-size-bytes`. Every
+  other response, a large download, a server-sent-events stream or a long poll among them, is passed
+  on as it arrives, as without the connector (README Issue 9). Measured on Standard v2 with a 60 MB
+  download from a backend that takes 10 seconds to send it: first byte at the client after 0.4 s,
+  with or without the connector; with the outbound fragment of the 2026-11-04 package, after the
+  backend's last byte (10.4 s). What SecurePath receives in the log, the sizes and the body sample,
+  is unchanged.
+- **Radware Cloud WAF in front of the gateway** is documented (README Step 4, *Radware Cloud WAF in
+  front of the gateway*). Cloud WAF adds its own `X-RDWR-*` forwarding headers to every request it
+  forwards, and two of them are names the connector reserves, so such requests are refused with
+  `403` until they are handled. The section gives the lines that let SecurePath inspect that traffic
+  with the client address Cloud WAF saw, and the settings for a layout in which traffic Cloud WAF
+  has inspected skips SecurePath.
+- **`rdwr-inline-trusted-sources` and `rdwr-inline-headers-enabled`** are described with their
+  purpose, what each one matches, and why the address they compare is a proxy's behind Front Door
+  (README Step 3b and Issue 8). Their behaviour is unchanged.
+- **Form 3 on Standard v2:** Standard v2 refuses a policy document larger than 16 KB, the connector's
+  document included; use Form 1 or Form 2 there. An earlier connector installed as a policy document
+  on Standard v2 keeps running, but its document can no longer be saved; "Upgrading from v1.3.x"
+  moves it to fragments (README Step 4, Form 3).
+- README 3d: behind a proxy, keep the application's domain in the Radware Cloud portal and set
+  `rdwr-true-host-header`, rather than changing the domain to the gateway's hostname.
+
+**What to re-copy from this package:**
+
+1. Forms 1 and 2: register `securepath-outbound` again, from the directory that holds this package's
+   `fragments/` folder. The other three fragments are unchanged. Form 3: replace the document with
+   `rdwr-azureapim-securepath-connector-v1.5.xml` (README Step 4, Form 3).
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+SUB=$(az account show --query id -o tsv)
+BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
+jq -Rs "{properties:{format:\"rawxml\",description:\"Radware SecurePath outbound\",value:.}}" \
+   fragments/securepath-outbound.fragment.xml > rdwr-frag-outbound.json &&
+az rest --method PUT --uri "$BASE/policyFragments/securepath-outbound?api-version=2024-05-01" \
+        --headers "Content-Type=application/json" --body @rdwr-frag-outbound.json -o none > /dev/null &&
+echo "registered securepath-outbound" || echo "FAILED: securepath-outbound"
+```
+
+2. Run `python3 tools/securepath-apim-lint.py --live` (README 5e): it reports a fragment that did not
+   register as `L14`.
+
+### What v1.5.1 changes
+
 Two changes to what the connector does, and the identifier `700-v1.5.1`. **Upgrading is recommended
 for every install that keeps the static-file bypass on (`static-extensions-enabled` = `true`, the
 default).** The Named Values (other than `plugin-version-info`), the APIs and your own policies stay
@@ -209,7 +269,7 @@ in "Upgrading from v1.4.0" at the end of this section: API Management no longer 
 v1.4.0 policy. What is new: the connector inspects the requests API Management answers itself
 (no matching operation, missing or invalid subscription key); SecurePath's answer cannot hold an
 allowed request beyond `rdwr-app-ep-timeout-seconds`; the response-phase log takes a response's size
-from its `Content-Length`, without holding it; configuration values the connector cannot use are
+from its `Content-Length`, without reading the body (see also v1.5.1, *Package update, 2026-11-08*); configuration values the connector cannot use are
 reported at once, and the request is served; and, with Bot Manager enabled, a visitor that Bot
 Manager challenges now reaches the CAPTCHA page (one API to add, README Step 4).
 `x-rdwr-plugin-info` becomes `700-v1.5.0`.
@@ -292,6 +352,9 @@ poll) can be delayed to its end and a large download held in the gateway's memor
 measured the response that way. A body sample, when SecurePath asks for one, is taken only from a
 response that declares a length within `rdwr-body-max-size-bytes`. The log no longer carries empty
 `content-type` and `content-transfer-encoding` headers when it has no body sample.
+Until the v1.5.1 package of 2026-11-08 the body-sample code was part of the log step itself, and API
+Management held each response the log was sent for until its last byte had arrived; that package moves
+it into a step of its own (v1.5.1, *Package update, 2026-11-08*).
 
 ### Configuration the connector cannot use is reported at once
 

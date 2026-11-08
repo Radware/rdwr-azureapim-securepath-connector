@@ -202,15 +202,32 @@ def test_onerror_marks_only_the_proven_pre_policy_rejections():
     assert t.index('name="rdwrUnrouted"') < t.index("<send-one-way-request")
 
 
+def _strip_comments(text):
+    return re.sub(r"<!--.*?-->", "", text, flags=re.S)
+
+
 def test_outbound_never_reads_the_response_body_except_a_bounded_sample():
-    """Reading context.Response.Body makes API Management hold the whole response before the client
-    gets its first byte (a server-sent-events stream, a long poll, a large download). Byte counts come
-    from Content-Length; the one read is the body sample, and only for a response that declares a
-    length within rdwr-body-max-size-bytes (rdwrRespSample)."""
-    out = frag("outbound")
-    assert out.count("context.Response.Body.As<") == 1
-    i = out.index("context.Response.Body.As<")
-    assert 'if ((bool)context.Variables["rdwrRespSample"]) {' in out[out.rindex("<set-body>", 0, i):i]
+    """API Management holds the whole response before the client gets its first byte whenever it RUNS
+    a policy step whose expressions refer to the response body, even when the code that reads it is
+    not executed (measured 2026-11-08: a 60 MB download from a 10-second origin, first byte 10.4 s with
+    the reference inside a runtime if, 0.4 s with it in a step that does not run). So the reference may
+    exist in exactly one step, the body-sample set-variable, and that step may run only inside the
+    rdwrRespSample branch. Byte counts come from Content-Length."""
+    out = _strip_comments(frag("outbound"))
+    assert out.count("Response.Body") == 1, "the response body may be referred to in one step only"
+    i = out.index("Response.Body")
+    step = out.rindex("<set-variable ", 0, i)
+    assert out[step:].startswith('<set-variable name="rdwrRespSampleBody" value="@{')
+    assert out.index('}" />', step) > i, "the reference must sit inside the sample step"
+    when = '<choose>\n          <when condition="@((bool)context.Variables["rdwrRespSample"])">\n            '
+    assert out[step - len(when):step] == when, "the sample step must be the first step of the rdwrRespSample branch"
+    branch_end = out.index("</when>", step)
+    assert out[out.index('}" />', step) + len('}" />'):branch_end].strip() == "", "nothing else in that branch"
+    # the report itself never refers to the body: it sends the variable
+    report = out[out.index("<send-one-way-request"):out.index("</send-one-way-request>")]
+    assert "Response.Body" not in report
+    assert '<set-body>@((string)context.Variables.GetValueOrDefault("rdwrRespSampleBody", ""))</set-body>' in report
+    assert out.index("</choose>", step) < out.index("<send-one-way-request")
     decl = out[out.index('name="rdwrRespSample"'):]
     decl = decl[:decl.index('}" />')]
     assert "declared > 0 && declared <= maxBody" in decl and '!= "3"' in decl

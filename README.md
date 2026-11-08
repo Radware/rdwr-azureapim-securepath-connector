@@ -1,8 +1,9 @@
 # Radware SecurePath Connector for Azure API Management
 
-**Connector v1.5.1** (`x-rdwr-plugin-info` 700-v1.5.1), released 2026-11-04. Changes are in
-`release-notes.md`; a v1.5.0 install, see "Upgrading from v1.5.0" there (or "Upgrading from v1.4.0" /
-"Upgrading from v1.3.x"). **A v1.4.0 install must be upgraded**: API Management no longer accepts part
+**Connector v1.5.1** (`x-rdwr-plugin-info` 700-v1.5.1), released 2026-11-04, package updated
+2026-11-08. Changes are in `release-notes.md`; a v1.5.1 install from the 2026-11-04 package, see
+"Package update, 2026-11-08" there; a v1.5.0 install, see "Upgrading from v1.5.0" (or "Upgrading
+from v1.4.0" / "Upgrading from v1.3.x"). **A v1.4.0 install must be upgraded**: API Management no longer accepts part
 of the v1.4.0 policy, and the upgrade has an order to follow.
 
 This guide takes you from an existing API Management instance to SecurePath inspecting your API
@@ -115,7 +116,7 @@ Two things follow from that, and both are checked for you by `tools/securepath-a
 |---|---|---|---|
 | **1 — Fragments at All APIs scope** *(default)* | every API | untouched | almost always |
 | **2 — Fragments inside one API or product policy** | that API or product | untouched; you add four lines | you must limit the connector to some APIs and cannot use a product |
-| **3 — Policy document at API scope** | one API | **replaced** | the API has no policy of its own and never will |
+| **3 — Policy document at API scope** | one API | **replaced** | the API has no policy of its own and never will; not on Standard v2 (see Form 3) |
 
 If the instance serves several SecurePath applications, see 3d, "Protecting APIs that belong to
 different SecurePath applications".
@@ -452,10 +453,20 @@ below, which means "off":
   Front Door or a CDN (3d). Same rule: only when the proxy is the sole path to the gateway.
   `rdwr-host-fallback` decides what to use when none of them yields a usable hostname — `gateway`
   (the host API Management received) or a hostname of your own.
-- **`rdwr-inline-trusted-sources`** — the allow-list of source IPs that may bypass inspection
-  (traffic already inspected upstream). `rdwr-inline-headers-enabled=true` additionally requires
-  the bypass signature headers on such requests; it never works alone — headers can be forged,
-  so without the IP list there is no bypass.
+- **`rdwr-inline-trusted-sources`** and **`rdwr-inline-headers-enabled`** — **leave both off unless
+  some of your traffic has already been inspected by Radware Cloud WAF inline and must not be
+  inspected a second time** (some APIs published through Cloud WAF, others reaching the gateway
+  directly). `rdwr-inline-trusted-sources` lists the addresses that traffic arrives from
+  (comma-separated IPs or CIDR ranges); a request from a listed address **skips SecurePath**.
+  `rdwr-inline-headers-enabled=true` narrows that to the requests from a listed address that also
+  carry all five of Cloud WAF's forwarding headers (`X-RDWR-IP`, `X-RDWR-PORT`, `X-RDWR-PORT-MM`,
+  `X-RDWR-PORT-MM-ORIG-FE-PORT`, `X-RDWR-APP-ID`). The headers never work alone: any client can
+  send them, so without the address list nothing skips inspection, and a request carrying them is
+  refused with `403` (Issue 8). The address compared is the one API Management received the
+  connection from: behind Azure Front Door, Application Gateway or a CDN it is that proxy's address,
+  not Cloud WAF's, and these settings cannot tell Cloud WAF's traffic apart. **If all your API traffic
+  comes through Cloud WAF and SecurePath should inspect it, leave both off** and follow
+  [Radware Cloud WAF in front of the gateway](#radware-cloud-waf-in-front-of-the-gateway).
 - **`rdwr-app-map`** and **`rdwr-custom-bot-block-statuses`** — explained in 3d and 3e.
 
 Re-running this block over an earlier attempt simply overwrites each value; no error is reported
@@ -579,6 +590,11 @@ hostname, which is why the header above exists. If instead you onboarded the app
 gateway's own hostname, leave `rdwr-true-host-header` disabled and the gateway host is used. The
 setting exists because only you know which of the two your Radware Cloud application, its policies
 and any API schema were built around.
+
+Behind a proxy, keep the application's domain in the Radware Cloud portal as the domain your users
+call and set `rdwr-true-host-header`. Changing the application's domain to the gateway's
+`<your-instance>.azure-api.net` hostname, to make the two match without the header, also changes the
+identity every event and API protection rule of that application is recorded under.
 
 > **Enable it only when the proxy is the sole path to the gateway** — Front Door with a
 > `check-header` on `X-Azure-FDID`, an `ip-filter` for the proxy's ranges, or a private gateway.
@@ -1079,6 +1095,13 @@ echo "policy updated"
 Covers one API. **This replaces that API's entire policy document**, so only use it where the API
 has no policy of its own. If the API already has a policy, use Form 2 instead.
 
+**Not on Standard v2.** Standard v2 refuses a policy document larger than 16 KB (`Policy size exceeds
+allowed limit of 16 KB`, seen November 2026), and this document is about 250 KB; policy fragments
+are not affected by the limit, so use Form 1 or Form 2 there. An earlier connector installed as a
+policy document on Standard v2 keeps running, but its document can no longer be saved, not even with
+a one-line change: move it to Form 1 or Form 2 (release notes, "Upgrading from v1.3.x"). Basic v2 and
+Premium v2 were not checked; if the save is refused with that message, use Form 1 or Form 2.
+
 **Azure Portal:**
 
 1. Portal → your API Management instance → **APIs** → select your API.
@@ -1212,6 +1235,119 @@ the hostname (the trace says which). The install check (5e) reports a Bot Manage
 the API as `L17`. A request the endpoint answered cannot be traced with
 `tools/securepath-apim-trace.sh`: the connector returns the endpoint's response as it is, without
 API Management's trace header, so the script reports that no trace id came back.
+
+---
+
+## Radware Cloud WAF in front of the gateway
+
+**When this applies:** Radware Cloud WAF (inline) receives your API traffic and forwards it to API
+Management, directly or through Azure Front Door or another proxy.
+
+**What you see until it is handled:** every request that comes through Cloud WAF is answered `403`
+by the connector before SecurePath is called, and the trace shows `reserved-header-violation`.
+
+**Why.** When Cloud WAF forwards a request to its origin, it adds five headers of its own:
+
+```
+X-RDWR-IP: <the client address Cloud WAF received the request from>
+X-RDWR-PORT: <that client's port>
+X-RDWR-PORT-MM: <Cloud WAF's front-end port>
+X-RDWR-PORT-MM-ORIG-FE-PORT: <Cloud WAF's front-end port>
+X-RDWR-APP-ID: <the Cloud WAF application>
+```
+
+Your clients do not send these; Cloud WAF adds them to every request it forwards. Two of them,
+`X-RDWR-IP` and `X-RDWR-APP-ID`, are names the connector reserves for its own call to SecurePath, and
+a header that arrives at the gateway looks the same whether Cloud WAF or a client wrote it, so the
+connector refuses the request (Issue 8). Choose by what Cloud WAF already does for this traffic:
+
+| Your layout | Use |
+|---|---|
+| All API traffic comes through Cloud WAF, and SecurePath should inspect it (for example, for API protection that Cloud WAF does not apply to it) | **Layout A**: remove Cloud WAF's headers before the connector. Every request is inspected. |
+| Some APIs come through Cloud WAF and are inspected there; others reach the gateway directly, and only those should be inspected by SecurePath | **Layout B**: requests from Cloud WAF skip SecurePath. Only when Cloud WAF connects to API Management directly. |
+
+### Layout A — SecurePath inspects the traffic that comes through Cloud WAF
+
+1. Keep `rdwr-inline-headers-enabled` at `false` and `rdwr-inline-trusted-sources` at
+   `##DISABLED##` (3b).
+2. Add these lines **immediately before the connector's lines**: Form 1, first in `<inbound>` of the
+   All APIs policy; Form 2, right after `<base />` in the API's or product's policy (after your
+   `X-Azure-FDID` check, if you have one); Form 3, right after `<base />` in `<inbound>`.
+
+   ```xml
+   <!-- Radware Cloud WAF forwarding headers: keep the client address, remove the headers before SecurePath -->
+   <set-header name="X-Cloud-Waf-Client-Ip" exists-action="@(context.Request.Headers.ContainsKey("x-rdwr-ip") ? "override" : "delete")">
+       <value>@(context.Request.Headers.GetValueOrDefault("x-rdwr-ip", ""))</value>
+   </set-header>
+   <set-header name="x-rdwr-ip" exists-action="delete" />
+   <set-header name="x-rdwr-port" exists-action="delete" />
+   <set-header name="x-rdwr-port-mm" exists-action="delete" />
+   <set-header name="x-rdwr-port-mm-orig-fe-port" exists-action="delete" />
+   <set-header name="x-rdwr-app-id" exists-action="delete" />
+   ```
+
+3. Set `rdwr-true-client-ip-header` to `X-Cloud-Waf-Client-Ip`:
+
+   ```bash
+   RG="your-resource-group"
+   APIM="your-apim-instance"
+
+   az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-true-client-ip-header --value "X-Cloud-Waf-Client-Ip"
+   ```
+
+4. Behind Front Door or another proxy, set `rdwr-true-host-header` to the header that carries the
+   hostname your users called (`X-Forwarded-Host` with Front Door), as in 3d,
+   [The client-facing hostname](#the-client-facing-hostname).
+
+What the lines do: the first one copies `X-RDWR-IP`, the address Cloud WAF received the request from,
+into `X-Cloud-Waf-Client-Ip`, and removes an `X-Cloud-Waf-Client-Ip` that a request carries without
+`X-RDWR-IP`, so the header only ever holds Cloud WAF's value. The others remove Cloud WAF's five
+headers. Only those five are removed: a request carrying any other reserved header is still refused.
+Your backend receives `X-Cloud-Waf-Client-Ip` in place of Cloud WAF's headers; read it there if your
+application uses the client address.
+
+Why `X-Cloud-Waf-Client-Ip` and not `X-Forwarded-For`: Cloud WAF passes `X-Forwarded-For` on as the
+client sent it, so its first address is either a value the client chose or, when the client sent
+none, the address of a proxy in front of API Management. The same rule as for any client-IP header
+applies (3b): Cloud WAF, and any proxy between it and the gateway, must be the only path to the
+gateway, for example Front Door accepting only Cloud WAF's traffic and a `check-header` on
+`X-Azure-FDID` in API Management. Otherwise a client that reaches the gateway directly can send
+`X-RDWR-IP` itself.
+
+If Cloud WAF already applies to these requests the protections you want from SecurePath, inspecting
+them again adds a second call and nothing else: that is the case for Layout B.
+
+### Layout B — requests from Cloud WAF skip SecurePath
+
+1. Set `rdwr-inline-trusted-sources` to the addresses Cloud WAF connects to API Management from,
+   comma-separated (IPs or CIDR ranges).
+2. Set `rdwr-inline-headers-enabled` to `true`, so that only requests from those addresses that also
+   carry all five Cloud WAF headers skip SecurePath.
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+CLOUD_WAF_SOURCES="your-cloud-waf-addresses"
+
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-trusted-sources --value "$CLOUD_WAF_SOURCES" &&
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-headers-enabled --value "true" &&
+echo "inline bypass set"
+```
+
+Use one layout, not both: Layout A's lines remove Cloud WAF's headers before the connector reads the
+request, so with them in place no request carries the five headers and none skips SecurePath.
+
+Requests from any other address are inspected, and one from another address that carries Cloud WAF's
+headers is refused with `403`. The address compared is the one API Management received the
+connection from, so behind Front Door, Application Gateway or a CDN it is that proxy's address:
+these settings cannot recognise Cloud WAF there, and Layout A is the one to use.
+
+Both layouts were executed on Standard v2, Layout A with Forms 1 and 2. Form 3 cannot be installed
+on Standard v2, so its placement above was not executed.
+
+**Verify** either layout by tracing one request that came through Cloud WAF (Debugging, Option A).
+Layout A: the trace shows the inspection call and no `reserved-header-violation`. Layout B: the
+request is forwarded to your backend without an inspection call.
 
 ---
 ---
@@ -1692,7 +1828,13 @@ The request carried a reserved header. The connector rejects any request present
 `x-rdwr-ip`, or `x-rdwr-request-host-b60f5e78-5bc7-4441-aac8-20b1e7cddda5`, because a client sending
 them is attempting to impersonate the connector.
 
-If an upstream proxy or CDN adds any of these, strip them before the request reaches API Management.
+If an upstream proxy or CDN adds any of these, strip them before the request reaches API Management,
+or before the connector's lines. Radware Cloud WAF in front of the gateway adds `X-RDWR-IP` and
+`X-RDWR-APP-ID` to every request: see
+[Radware Cloud WAF in front of the gateway](#radware-cloud-waf-in-front-of-the-gateway) for the lines
+to add, and for when requests from Cloud WAF should skip SecurePath instead. Do not set
+`rdwr-inline-headers-enabled` to make the `403` go away: on its own it changes nothing, and with a
+trusted-source list it stops inspection for the requests it matches (3b).
 
 ## Issue 9 — Requests are slow
 
@@ -1704,6 +1846,22 @@ also has the connector's line `SecurePath inspection call timed out after <N> ms
 The timeout covers SecurePath's answer up to its headers. An allow or a fail-open needs nothing
 more, so it never waits longer. A block also reads the page or JSON that SecurePath sends with it;
 if SecurePath delivers that body slowly, the blocked request waits for it.
+
+**Large downloads and streams.** The connector does not hold a response: the response body is never
+sent to SecurePath, and the response-phase log is built from the status, the headers and
+`Content-Length`. The one exception is a body sample: when SecurePath asks for one and the response
+declares a length within `rdwr-body-max-size-bytes` (100 KB by default), API Management reads that
+response whole before passing it on. If a download reaches the client only once your backend has
+finished sending it:
+
+- check that the outbound fragment on the instance is this package's (`L14` in the install check,
+  5e); an outbound fragment from before the 2026-11-08 package makes API Management hold every
+  response the log is sent for;
+- check `forward-request` in the policy that forwards the request (the All APIs policy, or your
+  API's own `<backend>`): Microsoft documents that with `buffer-response="true"`, the default, the
+  gateway collects a chunked response in pieces of up to 8 KB before passing them on, and recommends
+  `buffer-response="false"` for server-sent events and other streams;
+- check your own policies for any that read the response body (`context.Response.Body`).
 
 ## Issue 10 — Nothing happened when you pasted a command block
 
