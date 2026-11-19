@@ -1,6 +1,6 @@
 # One-shot install with Bicep
 
-Installs the connector at **All APIs** scope on an existing API Management instance: the 24
+Installs the connector at **All APIs** scope on an existing API Management instance: the 27
 Named Values, the All APIs policy that references the four policy fragments, the backend entity
 that establishes trust for the inspection endpoint on Standard v2 / Premium v2, and, with Bot
 Manager enabled, the API for the Bot Manager CAPTCHA path (main README, Step 4). The fragments
@@ -30,10 +30,10 @@ az deployment group what-if -g "$RG" --template-file deploy/securepath-apim.bice
 ```
 
 `~ Modify` on a Named Value that already exists means the deployment will overwrite it. Six of
-the 24 names carry no `rdwr-` prefix (main README, Step 2a); check those before continuing. Secret
-Named Values (`rdwr-api-key`, `rdwr-app-map`) always show `NoChange` because `what-if` cannot read
-them; they are overwritten as well. The `apiKey` parameter can also be a Key Vault reference in the
-parameter file, so the key never sits in a repository or a pipeline log.
+the 27 names carry no `rdwr-` prefix (main README, Step 2a); check those before continuing. Secret
+Named Values (`rdwr-api-key`, `rdwr-app-map`, `rdwr-inline-proof-header`) always show `NoChange`
+because `what-if` cannot read them; they are overwritten as well. The `apiKey` parameter can also be
+a Key Vault reference in the parameter file, so the key never sits in a repository or a pipeline log.
 
 ## Install
 
@@ -70,7 +70,7 @@ Expect `clean`. Then follow main README Step 5: a request carrying a reserved he
 Re-register the four fragments from the new release (main README Step 4, Form 1, first block — and
 the upgrade order in `release-notes.md` when coming from v1.4.0), then re-run the same
 `az deployment group create` **with the same parameter values** (keep the parameter file): the
-template writes all 24 Named Values, so a value you tuned by hand is reset to the template's unless
+template writes all 27 Named Values, so a value you tuned by hand is reset to the template's unless
 it is a parameter. Run `what-if` first and read every `~ Modify`. The template no longer touches the
 `securepath-app-map` fragment, so a generated map written by `tools/securepath-apim-sync.py` is left
 as it is.
@@ -91,6 +91,9 @@ as it is.
 | `manageAppMapFragment` | `true` | accepted for compatibility and no longer used: the template does not register fragments, so it never replaces a sync-managed application-map fragment |
 | `trueHostHeader` | `##DISABLED##` | header(s) carrying the client-facing hostname when Front Door or a CDN fronts the gateway, comma-separated and tried in order (`x-forwarded-host,forwarded`); main README 3d |
 | `hostFallback` | `gateway` | used when none of those headers yields a valid hostname: `gateway` or a literal hostname |
+| `inlineMode` | `##DISABLED##` | Radware Cloud WAF (inline) in front of the gateway: `strip` (requests that carry its five forwarding headers are inspected, with those headers left out of what SecurePath receives) or `bypass` (such a request is not sent to SecurePath when it is proven to come from Cloud WAF). `##DISABLED##`: such requests are refused. Main README, Step 4, "Radware Cloud WAF in front of the gateway" |
+| `inlineProofHeader` | empty | proof for `inlineMode`: a header and value only Cloud WAF's traffic carries, as `Header-Name: value` (a secure parameter; empty = not used) |
+| `inlineProofAddresses` | `##DISABLED##` | proof for `inlineMode`: the addresses Cloud WAF connects to the gateway from, IPs or CIDR ranges, comma-separated |
 | `customBotBlockStatuses` | `##DISABLED##` | Bot Manager: SecurePath status codes beyond the standard verdicts to relay to the client as a Bot Manager block (`429`, `429,418`, or `*`). Only with `botManagerEnabled`. See the main README, 3e |
 
 `securepath-apim.parameters.example.json` shows the parameter-file form of the same values.

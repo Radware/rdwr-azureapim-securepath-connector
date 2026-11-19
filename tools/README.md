@@ -29,6 +29,7 @@ Exit code 0 means clean, 1 means findings, 2 means the instance or file could no
 | L14 | A connector fragment on the instance differs from the file shipped in this package, or is referenced but not registered | Re-register it from `fragments/` and run the check again. A fragment registration is asynchronous: the CLI reports success before validation, so a rejected upload silently keeps the previous fragment |
 | L16 | A fragment install's `<on-error>` does not carry the block that inspects the requests API Management answers itself (no matching operation, missing subscription key), or has `securepath-inbound` before `securepath-onerror` there | Those requests never reach SecurePath; add the `<choose>` block on `rdwrUnrouted` right after the `securepath-onerror` line (README Step 4, Requests API Management answers itself) |
 | L17 | Bot Manager is enabled (`rdwr-bot-manager-enabled`, or an application-map entry with `bot_manager: true`) and no API serves the CAPTCHA path `7f7c01e221604f25`, or that API requires a subscription key, or the connector does not run for it | A visitor that Bot Manager challenges never reaches the CAPTCHA page; create the API `securepath-captcha` (README Step 4, The Bot Manager CAPTCHA path), with no subscription key, and with Form 2 / Form 3 give it the connector |
+| L18 | A setting for requests that come through Radware Cloud WAF is not usable: `rdwr-inline-mode` (or an application-map entry's `inline`, or a policy's `rdwrInlineModeOverride`) is not `strip`, `bypass` or `off`; a `bypass` with neither `rdwr-inline-proof-addresses` nor `rdwr-inline-proof-header`; a proof header that is not `Header-Name: value` or whose value is short; a proof address that is not an IP or a CIDR range; `rdwrInlineModeOverride` set after the connector has run (operation policies are read with `--operations`); an older inline setting that is no longer read because `rdwr-inline-mode` is set | See README Step 4, "Radware Cloud WAF in front of the gateway". The proof header's value is never printed |
 
 Run it after every install and whenever a policy on the instance changes.
 
@@ -61,7 +62,7 @@ whether the response-phase log was sent, and what the origin answered. Findings:
 | T06 | SecurePath answered 5xx; served uninspected | usually transient; contact Radware with the trace if sustained |
 | T07 | Served uninspected for another reason (`X-Rdwr-Diag` value: `no_app_mapping`, `config_incomplete`, `app_map_invalid`, ...) | Step 3d, the `X-Rdwr-Diag` table in Step 5 |
 
-A request that matched a bypass rule (a static extension, an excluded method, an inline trusted source) is not a finding: the verdict line of the readout says so and the exit code is 0.
+A request that matched a bypass rule (a static extension, an excluded method, an inline bypass) is not a finding: the verdict line of the readout says so and the exit code is 0.
 
 `--redact trace.json` replaces, in place, the credential values inside a trace (the request's `Authorization`, subscription key and cookies, the debug token, the `x-rdwr-api-key` the connector sends, and the connector's variables that hold an API key or the application map) so the file can be shared. `securepath-apim-trace.sh` does this for every trace it saves.
 

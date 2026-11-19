@@ -53,9 +53,9 @@ def test_no_cloud_fetch_on_the_request_path():
     assert "api.radwarecloud.app" not in t and "cache-lookup-value" not in t and "rdwr-cloud" not in t
 
 
-def test_plugin_info_fallback_is_v151():
+def test_plugin_info_fallback_is_v160():
     for name in ("inbound", "outbound", "onerror"):
-        assert "700-v1.5.1" in frag(name) and "700-v1.5.0" not in frag(name) and "700-v1.4" not in frag(name) and "700-v1.3" not in frag(name)
+        assert "700-v1.6.0" in frag(name) and "700-v1.5" not in frag(name) and "700-v1.4" not in frag(name) and "700-v1.3" not in frag(name)
 
 
 def test_unknown_securepath_status_fails_open_audibly():
@@ -434,7 +434,11 @@ def test_bot_manager_captcha_path_is_forwarded_not_inspected():
     i_route = t.index('response-variable-name="rdwrBmPathResponse"')
     assert i_reserved < i_route < t.index("<!-- ====== Static bypass ====== -->") < t.index("<!-- ====== Inspected path ====== -->")
     send = t[t.rindex("<send-request", 0, i_route):t.index("</send-request>", i_route)]
-    assert "X-Rdwr-" not in send and "x-rdwr-" not in send  # not an inspection call: no connector headers
+    # not an inspection call: no connector header is set. The only x-rdwr-* lines are the removals
+    # of the Radware Cloud WAF forwarding headers in rdwr-inline-mode strip.
+    for m in re.finditer(r'<set-header name="x-rdwr-[^"]*" exists-action="(@\((?:[^"]|"[^"]*")*?\)|[^"]*)">', send, re.I):
+        assert 'GetValueOrDefault("rdwrInlineStrip", false)' in m.group(0) and '"delete" : "skip"' in m.group(0), m.group(0)
+    assert len(re.findall(r'<set-header name="x-rdwr-', send, re.I)) == 5
     assert '<set-header name="Host" exists-action="override">' in send
     assert '<set-header name="X-ORIG-XFF" exists-action="@(' in send and 'GetValueOrDefault("X-Forwarded-For", "")' in send
     assert 'timeout="@((int)context.Variables["rdwrAppEpTimeout"])" ignore-error="true"' in send
@@ -644,3 +648,242 @@ def test_block_page_served_by_on_error_without_a_transaction_id_is_reported_too(
     # the existing recovery line stays as it is
     assert ("SecurePath answered a block but the body that came with it could not be read (\" + (context.LastError != null ? "
             "(context.LastError.Message ?? \"\") : \"\") + \"); the block was enforced with the connector's block page\"") in rec
+
+
+# ---------------------------------------------------------------- rdwr-inline-mode (strip / bypass)
+
+INLINE_FORWARDING_HEADERS = ("X-Rdwr-Ip", "X-Rdwr-Port", "X-Rdwr-Port-Mm", "X-Rdwr-Port-Mm-Orig-Fe-Port")
+
+
+def _copy_requests(t):
+    """Every <send-request mode="copy"> block: the two inspection calls and the CAPTCHA path."""
+    out, i = [], 0
+    while True:
+        i = t.find('<send-request mode="copy"', i)
+        if i < 0:
+            return out
+        j = t.index("</send-request>", i)
+        out.append(t[i:j])
+        i = j
+
+
+def test_inbound_declares_the_inline_mode_named_values():
+    t = frag("inbound")
+    for nv in ("rdwr-inline-mode", "rdwr-inline-proof-header", "rdwr-inline-proof-addresses"):
+        assert "{{" + nv + "}}" in t, nv
+
+
+def test_inline_mode_is_resolved_per_api_then_per_application_then_instance():
+    """The most specific setting wins: the API's own rdwrInlineModeOverride variable, then the
+    application-map entry's "inline", then the rdwr-inline-mode Named Value. Only strip, bypass
+    and (per API or per application) off are modes; anything else is reported and not used."""
+    e = _expr(frag("inbound"), "rdwrInlineMode")
+    i_ov, i_entry, i_nv = e.index("rdwrInlineModeOverride"), e.index('["inline"]'), e.index("rdwrInlineModeNv")
+    assert i_ov < i_entry < i_nv
+    for mode in ('"strip"', '"bypass"', '"off"'):
+        assert mode in e, mode
+    assert 'name="rdwrInlineModeProblem"' in frag("inbound")
+
+
+def test_bypass_mode_needs_the_five_headers_and_a_proof():
+    e = _expr(frag("inbound"), "isInlineBypass")
+    assert 'if (mode == "bypass") { return headersMatch && proof.Length > 0; }' in e
+    assert 'if (mode == "strip" || mode == "off") { return false; }' in e
+
+
+def test_older_inline_settings_decide_exactly_as_before_when_no_mode_is_set():
+    """Without rdwr-inline-mode the two older settings behave as in every release since v1.4.0:
+    headers + list -> both must match; headers alone -> never; list alone -> the list."""
+    e = _expr(frag("inbound"), "isInlineBypass")
+    legacy = e[e.index('if (mode == "strip" || mode == "off")'):]
+    assert "if (headersEnabled && ipConfigured)" in legacy and "return headersMatch && ipMatch;" in legacy
+    assert "else if (headersEnabled && !ipConfigured)" in legacy and "headers alone are forgeable" in legacy
+    assert "else if (!headersEnabled && ipConfigured)" in legacy and "return ipMatch;" in legacy
+    # the proofs belong to the modes only; they never widen the older settings
+    assert "rdwrInlineProof" not in legacy and "secret" not in legacy.lower()
+
+
+def test_the_modes_and_the_older_settings_never_share_an_address_list():
+    """rdwr-inline-trusted-sources alone means "every request from these addresses skips SecurePath".
+    If the modes used the same list as their proof, setting it for one API's mode would switch that
+    older rule on for every API without a mode. So the modes have a list of their own
+    (rdwr-inline-proof-addresses), and one request reads exactly one of the two: the proof list when
+    a mode applies to it, the older list when none does, neither when its mode is off."""
+    t = frag("inbound")
+    e = _expr(t, "rdwrInlineListInUse")
+    assert 'if (mode == "strip" || mode == "bypass") { return (string)context.Variables.GetValueOrDefault("rdwrInlineProofAddressesCfg", ""); }' in e
+    assert 'if (mode == "off") { return ""; }' in e
+    assert 'return (string)context.Variables.GetValueOrDefault("trustedInlineSourcesCfg", "");' in e
+    for name in ("isTrustedInlineSource", "ipListConfigured"):
+        x = _expr(t, name)
+        assert 'GetValueOrDefault("rdwrInlineListInUse", "")' in x and "trustedInlineSourcesCfg" not in x, name
+    assert t.index('name="rdwrInlineMode"') < t.index('name="rdwrInlineListInUse"') < t.index('name="isTrustedInlineSource"')
+
+
+def test_proof_is_the_source_list_and_or_the_secret_header_and_every_configured_one_must_match():
+    e = _expr(frag("inbound"), "rdwrInlineProof")
+    assert "bool ok = (ipCfg || secCfg) && (!ipCfg || ipOk) && (!secCfg || secOk);" in e
+    # the trace names the proof by its Named Value
+    assert 'return ipCfg && secCfg ? "rdwr-inline-proof-addresses + rdwr-inline-proof-header" : (ipCfg ? "rdwr-inline-proof-addresses" : "rdwr-inline-proof-header");' in e
+
+
+def test_secret_header_matches_one_exact_value_and_a_setting_that_cannot_be_read_never_matches():
+    t = frag("inbound")
+    e = _expr(t, "rdwrInlineSecretMatch")
+    assert "vals.Length != 1" in e                      # a repeated header is not a match
+    assert "diff |= given[i] ^ w[i]" in e               # compared in full, not up to the first difference
+    assert 'name="rdwrInlineSecretConfigured"' in t and 'name="rdwrInlineSecretProblem"' in t
+    cfg = _expr(t, "rdwrInlineSecretConfigured")
+    # configured = anything but a disable token, so a malformed value still demands a match it cannot get
+    assert "IndexOf(':')" not in cfg
+
+
+def test_a_mode_applies_to_the_five_headers_and_trusts_their_values_only_with_a_proof():
+    """strip and bypass both handle a request that carries all five forwarding headers the same way
+    when it is inspected: the headers are left out of what SecurePath receives. bypass differs only
+    for a PROVEN request (it skips SecurePath). So a request that carries the headers but cannot be
+    proven is inspected, never refused: a changed Cloud WAF address or a rotated secret costs a
+    second inspection, not a 403."""
+    t = frag("inbound")
+    e = _expr(t, "rdwrInlineStrip")
+    assert 'return (mode == "strip" || mode == "bypass") && (bool)context.Variables["hasInlineHeaderSignature"];' in e
+    assert '<set-variable name="rdwrInlineTrusted" value="@((bool)context.Variables["rdwrInlineStrip"] && ((string)context.Variables["rdwrInlineProof"]).Length > 0)" />' in t
+    # the 403 for a reserved name is lifted by rdwrInlineStrip, so it covers bypass mode as well
+    assert 'bool strip = (bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false);' in _expr(t, "hasReservedHeader")
+
+
+def test_secret_header_takes_a_list_of_values_so_it_can_be_rotated():
+    """'Header-Name: old-value, new-value': either value proves the request, so the value Cloud WAF
+    sends can be changed without a moment in which no request is proven."""
+    t = frag("inbound")
+    m = _expr(t, "rdwrInlineSecretMatch")
+    assert "Split(',')" in m and "foreach (string part in" in m and "string w = part.Trim();" in m
+    assert "if (diff == 0) { hit = true; }" in m      # every listed value is compared, none short-circuits
+    pr = _expr(t, "rdwrInlineSecretProblem")
+    assert "Split(',')" in pr and "n > 5" in pr
+
+
+def test_strip_mode_lifts_the_reserved_check_for_the_two_inline_names_only():
+    e = _expr(frag("inbound"), "hasReservedHeader")
+    assert 'if (strip && (k == "x-rdwr-ip" || k == "x-rdwr-app-id")) { continue; }' in e
+    for name in ("x-rdwr-app-id", "x-rdwr-api-key", "x-rdwr-connector-ip", "x-rdwr-partial-body", "x-rdwr-cdn-ip",
+                 "x-rdwr-ip", "x-rdwr-request-host-b60f5e78-5bc7-4441-aac8-20b1e7cddda5"):
+        assert 'k == "%s"' % name in e, name
+
+
+def test_strip_mode_keeps_the_inline_headers_out_of_every_request_to_securepath():
+    """Inspection (both branches) and the CAPTCHA path copy the client's request; in strip mode the
+    four forwarding headers are removed from that copy (X-Rdwr-App-Id is always the connector's own)."""
+    blocks = _copy_requests(frag("inbound"))
+    assert len(blocks) == 3
+    for b in blocks:
+        for h in INLINE_FORWARDING_HEADERS:
+            m = re.search(r'<set-header name="%s" exists-action="@\(([^"]|"[^"]*")*?\)">' % re.escape(h), b)
+            assert m, h
+            assert 'GetValueOrDefault("rdwrInlineStrip", false)' in m.group(0) and '"delete" : "skip"' in m.group(0), h
+            assert 'ContainsKey("%s")' % h in m.group(0), h   # an absent header is never added
+
+
+def test_the_request_to_the_backend_is_never_changed_by_the_inline_modes():
+    """The backend keeps receiving what the client-side proxy sent: the forwarding headers are
+    removed only inside the copies sent to SecurePath."""
+    t = frag("inbound")
+    # what is left once every request the connector itself sends (inspection, CAPTCHA path,
+    # response-phase log) is taken out is what acts on the client's request and so on the backend
+    outside = re.sub(r"<send-request\b.*?</send-request>|<send-one-way-request\b.*?</send-one-way-request>", "", t, flags=re.S)
+    assert "<send-request" not in outside and "<send-one-way-request" not in outside
+    for h in INLINE_FORWARDING_HEADERS + ("X-Rdwr-App-Id",):
+        assert not re.search(r'<set-header name="%s"' % re.escape(h), outside, re.I), h
+    # and the CAPTCHA path copy, which sets no application id of its own, drops Cloud WAF's too
+    captcha = [b for b in _copy_requests(t) if "rdwrBmPathResponse" in b]
+    assert len(captcha) == 1 and '<set-header name="X-Rdwr-App-Id" exists-action="@(' in captcha[0]
+
+
+def test_client_address_is_taken_from_x_rdwr_ip_only_for_a_proven_request():
+    t = frag("inbound")
+    i = t.index("<!-- True client IP selection")
+    j = t.index("<!-- Build the inspection URL -->", i)
+    block = t[i:j]
+    k = block.index('GetValueOrDefault("rdwrInlineTrusted", false)')
+    tail = block[k:]
+    assert 'name="clientIpToSend"' in tail
+    assert 'GetValueOrDefault("X-Rdwr-Ip", default(string[]))' in tail
+    assert "vals.Length == 1" in tail and "System.Net.IPAddress.TryParse" in tail
+    # it comes after the configured-header choice, so a proven address wins over it
+    assert block.index('name="ipFromConfiguredHeader"') < k
+
+
+def test_every_inline_decision_is_traced():
+    t = frag("inbound")
+    for text in ("not inspected: inline bypass",
+                 "is bypass but neither rdwr-inline-proof-addresses nor rdwr-inline-proof-header is set",
+                 "is not proven to come from it",
+                 "inspected like any other request",
+                 "are not sent to SecurePath (inline mode ",
+                 "is not strip, bypass or off",
+                 "rdwr-inline-proof-header is not 'Header-Name: value'"):
+        assert text in t, text
+
+
+def test_map_entry_inline_must_be_a_string():
+    e = _expr(frag("inbound"), "rdwrAppSelection")
+    assert '"app_id", "api_key", "endpoint", "base_path", "bot_block_statuses", "inline"' in e
+
+
+def test_bicep_and_readme_create_the_inline_mode_named_values():
+    root = os.path.join(HERE, "..", "..")
+    with open(os.path.join(root, "deploy", "securepath-apim.bicep"), encoding="utf-8") as f:
+        bicep = f.read()
+    # parameters, so a redeploy does not reset a mode that was set (deploy/README, Update the connector later)
+    assert "{ name: 'rdwr-inline-mode', value: inlineMode, secret: false }" in bicep
+    assert "{ name: 'rdwr-inline-proof-header', value: empty(inlineProofHeader) ? '##DISABLED##' : inlineProofHeader, secret: true }" in bicep
+    assert "{ name: 'rdwr-inline-proof-addresses', value: inlineProofAddresses, secret: false }" in bicep
+    for p in ("param inlineMode string = '##DISABLED##'", "param inlineProofHeader string = ''",
+              "param inlineProofAddresses string = '##DISABLED##'"):
+        assert p in bicep, p
+    with open(os.path.join(root, "deploy", "README.md"), encoding="utf-8") as f:
+        dr = f.read()
+    for p in ("`inlineMode`", "`inlineProofHeader`", "`inlineProofAddresses`"):
+        assert p in dr, p
+    with open(os.path.join(root, "README.md"), encoding="utf-8") as f:
+        readme = f.read()
+    assert '"rdwr-inline-mode=##DISABLED##"' in readme and '"rdwr-inline-proof-header=##DISABLED##"' in readme
+    assert '"rdwr-inline-proof-addresses=##DISABLED##"' in readme
+
+
+def test_the_secret_header_is_not_passed_on_to_securepath():
+    """The header that proves a request comes from Cloud WAF is a secret between the sender and the
+    gateway. It is left out of every copy of the request the connector sends to SecurePath (the
+    backend still receives it). The name comes from the Named Value; with none set, the name is one
+    no request carries, and removing an absent header does nothing."""
+    t = frag("inbound")
+    e = _expr(t, "rdwrInlineSecretName")
+    assert 'return "X-Rdwr-Inline-Secret-Unset";' in e and "rdwrInlineSecretProblem" in e
+    blocks = _copy_requests(t)
+    assert len(blocks) == 3
+    for b in blocks:
+        assert '<set-header name="@((string)context.Variables["rdwrInlineSecretName"])" exists-action="delete" />' in b
+
+
+def test_a_per_api_setting_of_the_wrong_type_never_fails_the_request():
+    """rdwrInlineModeOverride is written by the customer's own policy. A value that is not text (an
+    expression that returns true, a number) must not throw in the connector's expressions, which
+    would fail the request: it is treated as not set, and reported."""
+    t = frag("inbound")
+    for name in ("rdwrInlineMode", "rdwrInlineModeProblem"):
+        e = _expr(t, name)
+        assert 'context.Variables.TryGetValue("rdwrInlineModeOverride", out ovo);' in e, name
+        assert "(ovo as string)" in e, name
+        assert '(string)context.Variables.GetValueOrDefault("rdwrInlineModeOverride"' not in e, name
+    assert 'if (ovo != null && !(ovo is string)) { bad.Add("the rdwrInlineModeOverride variable (its value is not text)"); }' in _expr(t, "rdwrInlineModeProblem")
+
+
+def test_no_per_api_setting_written_by_the_customer_is_cast_to_text():
+    """Every variable an API's own policy may set for the connector (the two host settings and the
+    inline mode) is read with TryGetValue and "as string": a value that is not text is not used and
+    is reported. A (string) cast would throw, and a throw in a policy expression fails the request."""
+    t = frag("inbound")
+    for var in ("rdwrTrueHostHeaderOverride", "rdwrHostFallbackOverride", "rdwrInlineModeOverride"):
+        assert '(string)context.Variables.GetValueOrDefault("%s"' % var not in t, var
+        assert 'context.Variables.TryGetValue("%s", out ' % var in t, var
+    assert "is set to a value that is not text: not used" in t

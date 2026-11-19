@@ -13,7 +13,7 @@ import re
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "..", "..")
 FRAGMENTS = ["fragments/securepath-%s.fragment.xml" % n for n in ("app-map", "inbound", "outbound", "onerror")]
-DOCUMENTS = ["rdwr-azureapim-securepath-connector-v1.5.xml"]
+DOCUMENTS = ["rdwr-azureapim-securepath-connector-v1.6.xml"]
 SEND_CHILDREN = {"set-url", "set-method", "set-header", "set-body", "authentication-certificate",
                  "authentication-token", "authentication-token-store", "authentication-managed-identity",
                  "proxy"}

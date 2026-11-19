@@ -66,7 +66,7 @@ def test_inline_connector_counts_as_present():
 
 def test_shipped_v15_document_lints_clean_at_api_scope():
     root = os.path.join(HERE, "..", "..")
-    with open(os.path.join(root, "rdwr-azureapim-securepath-connector-v1.5.xml"), encoding="utf-8") as f:
+    with open(os.path.join(root, "rdwr-azureapim-securepath-connector-v1.6.xml"), encoding="utf-8") as f:
         doc = f.read()
     assert lint.document_has_connector(doc)
     assert lint.lint_document(doc, "api", "v1.5") == []

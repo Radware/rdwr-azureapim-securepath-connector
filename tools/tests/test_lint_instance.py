@@ -18,7 +18,9 @@ NV_OK.update({"rdwr-app-id": "0123456789abcdef0123456789abcdef",
               "rdwr-app-ep-addr": "0123456789abcdef0123456789abcdef.oop.radwarecloud.net",
               "rdwr-app-ep-ssl": "true",
               "rdwr-app-map": "##DISABLED##", "rdwr-true-host-header": "##DISABLED##",
-              "rdwr-custom-bot-block-statuses": "##DISABLED##"})
+              "rdwr-custom-bot-block-statuses": "##DISABLED##",
+              "rdwr-inline-mode": "##DISABLED##", "rdwr-inline-proof-header": "##DISABLED##",
+              "rdwr-inline-proof-addresses": "##DISABLED##"})
 
 
 class FakeReader(lint.Reader):
@@ -449,3 +451,199 @@ def test_l02_not_reported_for_two_different_apis():
     passes through both, so nothing is inspected twice."""
     r = FakeReader(glob=None, apis={"orders": fx("clean_api.xml"), "billing": fx("clean_api.xml")})
     assert "L02" not in codes(lint.lint_instance(r))
+
+
+# ---------------------------------------------------------------- L18 inline mode settings
+
+def _l18(nvs):
+    r = FakeReader(glob=fx("clean_global.xml"), nvs=nvs, backends=["https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net"])
+    return [f for f in lint.lint_instance(r) if f.code == "L18"]
+
+
+def _inline(**over):
+    d = _nv(**{"rdwr-inline-trusted-sources": "##DISABLED##", "rdwr-inline-headers-enabled": "false"})
+    d.update({k.replace("_", "-"): v for k, v in over.items()})
+    return d
+
+
+def test_L18_clean_when_unset_and_for_complete_settings():
+    assert _l18(_inline()) == []
+    assert _l18(_inline(rdwr_inline_mode="strip")) == []
+    assert _l18(_inline(rdwr_inline_mode="Bypass", rdwr_inline_proof_addresses="203.0.113.0/24, 198.51.100.17,2001:db8::/32")) == []
+    assert _l18(_inline(rdwr_inline_mode="bypass", rdwr_inline_proof_header="X-Edge-Auth: 0123456789abcdef0123")) == []
+    assert _l18(_inline(rdwr_inline_mode="strip", rdwr_inline_proof_header="X-Azure-FDID: 11111111-2222-3333-4444-555555555555")) == []
+    # two values while the value Cloud WAF sends is being changed
+    assert _l18(_inline(rdwr_inline_mode="bypass", rdwr_inline_proof_header="X-Edge-Auth: 0123456789abcdef0123, fedcba9876543210fedc")) == []
+
+
+def test_L18_mode_that_is_not_a_mode():
+    f = _l18(_inline(rdwr_inline_mode="stripp"))
+    assert len(f) == 1 and "rdwr-inline-mode 'stripp'" in f[0].message and "strip or bypass" in f[0].message
+
+
+def test_L18_bypass_without_a_proof_bypasses_nothing():
+    f = _l18(_inline(rdwr_inline_mode="bypass"))
+    assert len(f) == 1 and "no request is bypassed" in f[0].message
+
+
+def test_L18_secret_header_that_cannot_be_read():
+    for bad in ("X-Edge-Auth", "X-Edge-Auth:", ": value", "X Edge: 0123456789abcdef", "X-Edge-Auth: 0123456789abcdef0123,,x",
+                "X-Edge-Auth: " + ", ".join(["0123456789abcdef0123"] * 6)):
+        f = _l18(_inline(rdwr_inline_mode="strip", rdwr_inline_proof_header=bad))
+        assert len(f) == 1 and "Header-Name: value" in f[0].message, bad
+
+
+def test_L18_short_secret_and_secret_without_a_mode():
+    f = _l18(_inline(rdwr_inline_mode="bypass", rdwr_inline_proof_header="X-Edge-Auth: abc"))
+    assert len(f) == 1 and "shorter than 16 characters" in f[0].message
+    f = _l18(_inline(rdwr_inline_proof_header="X-Edge-Auth: 0123456789abcdef0123"))
+    assert len(f) == 1 and "has no effect until rdwr-inline-mode" in f[0].message
+
+
+def test_L18_map_entry_inline_value():
+    m = "{'orders-api': {'app_id': 'a1', 'api_key': 'k', 'endpoint': 'a1.oop.radwarecloud.net', 'inline': 'bypas'}}"
+    f = _l18(_inline(**{"rdwr-app-map": m}))
+    assert len(f) == 1 and "rdwr-app-map entry 'orders-api' inline 'bypas'" in f[0].message
+    ok = m.replace("bypas'", "off'")
+    assert _l18(_inline(**{"rdwr-app-map": ok})) == []
+    # an entry that asks for bypass needs a proof like the instance setting does
+    byp = m.replace("bypas'", "bypass'")
+    f = _l18(_inline(**{"rdwr-app-map": byp}))
+    assert len(f) == 1 and "no request is bypassed" in f[0].message
+
+
+def test_L07_names_the_inline_mode_values_as_new():
+    nvs = _inline()
+    del nvs["rdwr-inline-mode"]
+    r = FakeReader(glob=fx("clean_global.xml"), nvs=nvs)
+    f = [x for x in lint.lint_instance(r) if x.code == "L07"]
+    assert len(f) == 1 and "rdwr-inline-mode" in f[0].message and "new in v1.6.0" in f[0].message
+
+
+_API_WITH_OVERRIDE = """<policies>
+    <inbound>
+        %s
+        <base />
+        %s
+    </inbound>
+    <backend><base /></backend>
+    <outbound><base /></outbound>
+    <on-error><base /></on-error>
+</policies>"""
+
+
+def _l18_api(before="", after="", **nv):
+    r = FakeReader(glob=fx("clean_global.xml"), apis={"orders": _API_WITH_OVERRIDE % (before, after)}, nvs=_inline(**nv),
+                   backends=["https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net"])
+    return [f for f in lint.lint_instance(r) if f.code == "L18"]
+
+
+def test_L18_per_api_override_is_checked_where_it_is_written():
+    ok = '<set-variable name="rdwrInlineModeOverride" value="strip" />'
+    assert _l18_api(before=ok) == []
+    assert _l18_api(before=ok.replace("strip", "off")) == []
+    f = _l18_api(before=ok.replace("strip", "striip"))
+    assert len(f) == 1 and f[0].scope == "api:orders" and "rdwrInlineModeOverride 'striip'" in f[0].message
+    f = _l18_api(before=ok.replace("strip", "bypass"))
+    assert len(f) == 1 and "rdwrInlineModeOverride is bypass" in f[0].message and "no request is bypassed" in f[0].message
+    assert _l18_api(before=ok.replace("strip", "bypass"), rdwr_inline_proof_addresses="203.0.113.7") == []
+
+
+def test_L18_per_api_override_after_the_connector_has_no_effect():
+    f = _l18_api(after='<set-variable name="rdwrInlineModeOverride" value="strip" />')
+    assert len(f) == 1 and "after the connector has run" in f[0].message and f[0].line == 5
+
+
+def test_L18_secret_header_counts_as_used_by_a_per_api_or_per_application_mode():
+    sec = "X-Edge-Auth: 0123456789abcdef0123"
+    assert _l18_api(before='<set-variable name="rdwrInlineModeOverride" value="strip" />', rdwr_inline_proof_header=sec) == []
+    m = "{'orders-api': {'app_id': 'a1', 'api_key': 'k', 'endpoint': 'a1.oop.radwarecloud.net', 'inline': 'bypass'}}"
+    assert _l18(_inline(**{"rdwr-app-map": m, "rdwr-inline-proof-header": sec})) == []
+
+
+def test_L18_never_prints_the_secret_value():
+    for bad in ("X-Edge-Auth: abc", "X Edge: TOPSECRETVALUE123456", "X-Edge-Auth: TOPSECRET,VALUE123456"):
+        for f in _l18(_inline(rdwr_inline_mode="bypass", rdwr_inline_proof_header=bad)):
+            assert "TOPSECRET" not in f.message + f.fix and "abc" not in f.message, bad
+
+
+def test_L10_map_entry_inline_must_be_a_string():
+    m = "{'orders-api': {'app_id': 'a1', 'api_key': 'k', 'endpoint': 'a1.oop.radwarecloud.net', 'inline': true}}"
+    r = FakeReader(glob=fx("clean_global.xml"), nvs=_inline(**{"rdwr-app-map": m}), backends=["https://a1.oop.radwarecloud.net"])
+    f = [x for x in lint.lint_instance(r) if x.code == "L10"]
+    assert len(f) == 1 and "inline is true" in f[0].message
+
+
+def test_trace_redaction_covers_the_secret_header_setting():
+    import inspect
+    src = inspect.getsource(lint)
+    assert '"rdwrinlinesecretheadercfg"' in src
+
+
+def test_L18_proof_addresses_must_be_addresses_or_ranges():
+    f = _l18(_inline(rdwr_inline_mode="bypass", rdwr_inline_proof_addresses="203.0.113.0/24, cloudwaf.example.com, 10.0.0.300"))
+    assert len(f) == 1 and "cloudwaf.example.com" in f[0].message and "10.0.0.300" in f[0].message and "203.0.113.0/24" not in f[0].message
+
+
+def test_L18_older_list_is_not_the_proof_of_a_mode():
+    """Someone moving to rdwr-inline-mode who leaves the addresses in the older Named Value gets a
+    mode with no proof: say which Named Value the modes read."""
+    f = _l18(_inline(rdwr_inline_mode="bypass", rdwr_inline_trusted_sources="203.0.113.0/24"))
+    msgs = " | ".join(x.message for x in f)
+    assert "no request is bypassed" in msgs and "rdwr-inline-trusted-sources is not read where a mode applies" in msgs and len(f) == 2
+    f = _l18(_inline(rdwr_inline_mode="strip", rdwr_inline_headers_enabled="true"))
+    assert len(f) == 1 and "rdwr-inline-headers-enabled is not read where a mode applies" in f[0].message
+    # the older settings on their own are not a finding
+    assert _l18(_inline(rdwr_inline_trusted_sources="203.0.113.0/24", rdwr_inline_headers_enabled="true")) == []
+
+
+OP_INLINE = ('<policies><inbound>%s<base />%s</inbound>'
+             "<backend><base /></backend><outbound><base /></outbound><on-error><base /></on-error></policies>")
+
+
+def test_L18_reads_operation_policies_when_operations_are_checked():
+    """A per-operation rdwrInlineModeOverride is checked like a per-API one, with --operations."""
+    line = '<set-variable name="rdwrInlineModeOverride" value="%s" />\n'
+    r = _op_reader(OP_INLINE % (line % "bypass", ""))
+    assert [f for f in lint.lint_instance(r) if f.code == "L18"] == []            # default: operations are not read
+    f = [x for x in lint.lint_instance(r, check_operations=True) if x.code == "L18"]
+    assert len(f) == 1 and "operation get-item" in f[0].scope and "no request is bypassed" in f[0].message
+    r = _op_reader(OP_INLINE % ("", "\n" + line % "strip"))
+    f = [x for x in lint.lint_instance(r, check_operations=True) if x.code == "L18"]
+    assert len(f) == 1 and "after the connector has run" in f[0].message
+    r = _op_reader(OP_INLINE % (line % "strip", ""))
+    assert [x for x in lint.lint_instance(r, check_operations=True) if x.code == "L18"] == []
+
+
+_FORM2 = """<policies>
+    <inbound>
+        <base />
+%s        <include-fragment fragment-id="securepath-app-map" />
+%s        <include-fragment fragment-id="securepath-inbound" />
+%s    </inbound>
+    <backend><base /></backend>
+    <outbound><base /><include-fragment fragment-id="securepath-outbound" /></outbound>
+    <on-error><base /><include-fragment fragment-id="securepath-onerror" /></on-error>
+</policies>"""
+_LINE = '        <set-variable name="rdwrInlineModeOverride" value="strip" />\n'
+
+
+def _l18_doc(doc):
+    r = FakeReader(glob=None, apis={"orders": doc}, nvs=_inline(),
+                   backends=["https://0123456789abcdef0123456789abcdef.oop.radwarecloud.net"])
+    return [f for f in lint.lint_instance(r) if f.code == "L18"]
+
+
+def test_L18_placement_when_the_document_itself_carries_the_connector():
+    """Form 2 and Form 3: the connector's lines are in this document, after <base />. The per-API line
+    belongs above THOSE lines; being below <base /> is where the README puts it, and it works there."""
+    assert _l18_doc(_FORM2 % (_LINE, "", "")) == []          # right after <base />, above the connector's lines
+    assert _l18_doc(_FORM2 % ("", _LINE, "")) == []          # between the two connector lines: still before the mode is read
+    f = _l18_doc(_FORM2 % ("", "", _LINE))                   # below securepath-inbound: too late
+    assert len(f) == 1 and "after the connector has run" in f[0].message
+    form3 = ('<policies>\n    <inbound>\n        <base />\n%s        <set-variable name="rdwrInboundEntered" value="@(true)" />\n'
+             '        <set-variable name="rdwrAppEpAddr" value="{{rdwr-app-ep-addr}}" />\n%s    </inbound>\n'
+             "    <backend><base /></backend>\n    <outbound><base /></outbound>\n    <on-error><base /></on-error>\n</policies>")
+    assert _l18_doc(form3 % (_LINE, "")) == []
+    f = _l18_doc(form3 % ("", _LINE))
+    assert len(f) == 1 and "after the connector has run" in f[0].message

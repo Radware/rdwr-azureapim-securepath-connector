@@ -365,3 +365,19 @@ def test_T04_connection_closed_before_answering_classified():
         assert codes(f) == ["T04"], reason
         assert "closed or reset the connection before answering" in f[0].message
         assert "does not send the inspection call again" in f[0].message and "Issue 11" in f[0].fix
+
+
+def test_redact_removes_the_inline_secret_header_value_wherever_it_appears():
+    """rdwr-inline-proof-header holds a header name and its value(s). The trace records the Named
+    Value in a variable, and the value again in every copy of the request's headers (the request
+    the gateway received, the inspection call, the request to the backend). All of them go."""
+    s1, s2 = "4f9c2d7a81b34e6f9a0c5d2e7b18c3aa", "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
+    t = trace([inspector(),
+               e("api-inspector", {"request": {"headers": [{"name": "X-Edge-Auth", "value": s2}, {"name": "Accept", "value": "*/*"}]}}),
+               enter_fragment(), setvar("rdwrInlineSecretHeaderCfg", f"X-Edge-Auth: {s1}, {s2}"),
+               e("send-request", {"message": "Request is being sent", "request": {"headers": [{"name": "x-edge-auth", "value": s2}]}}),
+               e("forward-request", {"message": f"forwarding with X-Edge-Auth: {s2}"})] + sideband_sent() + verdict_allow())
+    lint.redact_trace(t)
+    text = json.dumps(t)
+    assert s1 not in text and s2 not in text
+    assert "*/*" in text and lint.summarize_trace(t)["connector_ran"]   # nothing else is touched

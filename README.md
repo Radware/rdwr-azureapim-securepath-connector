@@ -1,10 +1,9 @@
 # Radware SecurePath Connector for Azure API Management
 
-**Connector v1.5.1** (`x-rdwr-plugin-info` 700-v1.5.1), released 2026-11-04, package updated
-2026-11-08. Changes are in `release-notes.md`; a v1.5.1 install from the 2026-11-04 package, see
-"Package update, 2026-11-08" there; a v1.5.0 install, see "Upgrading from v1.5.0" (or "Upgrading
-from v1.4.0" / "Upgrading from v1.3.x"). **A v1.4.0 install must be upgraded**: API Management no longer accepts part
-of the v1.4.0 policy, and the upgrade has an order to follow.
+**Connector v1.6.0** (`x-rdwr-plugin-info` 700-v1.6.0), released 2026-11-20. Changes are in
+`release-notes.md`; a v1.5.1 or v1.5.0 install, see "Upgrading from v1.5.1 or v1.5.0" there (or
+"Upgrading from v1.4.0 or v1.3.x"). **A v1.4.0 install must be upgraded**: API Management no longer
+accepts part of the v1.4.0 policy, and the upgrade has an order to follow.
 
 This guide takes you from an existing API Management instance to SecurePath inspecting your API
 traffic.
@@ -79,7 +78,7 @@ use:
 | 1 | Establish TLS trust | Until this is in place, every inspection call fails and traffic is served **uninspected**. On some tiers it takes 15+ minutes to provision, so start it early. |
 | 2 | Pre-flight checks | Two things can silently damage an existing configuration or silently disable protection. Both are checked before anything is created. |
 | 3 | Create the Named Values | The policy resolves them when it is saved. If one is missing, Step 4 is rejected outright. |
-| 4 | Install the connector | Needs an existing API and all 24 Named Values already in place. Choose an install form — see below. |
+| 4 | Install the connector | Needs an existing API and all 27 Named Values already in place. Choose an install form — see below. |
 | 5 | Verify | Only meaningful once Step 1 has finished provisioning. Running it earlier reports a false failure. |
 
 ### Permissions you need
@@ -129,7 +128,7 @@ XML. If you would rather not install `jq`, the Azure Portal paths need no local 
 | File | What it is |
 |---|---|
 | `fragments/securepath-app-map.fragment.xml`, `-inbound`, `-outbound`, `-onerror` | the connector, as four policy fragments (Forms 1 and 2) |
-| `rdwr-azureapim-securepath-connector-v1.5.xml` | the same connector as one policy document, generated from the fragments (Form 3) |
+| `rdwr-azureapim-securepath-connector-v1.6.xml` | the same connector as one policy document, generated from the fragments (Form 3) |
 | `deploy/securepath-apim.bicep`, `deploy/README.md` | one-command install of Form 1 |
 | `tools/securepath-apim-lint.py`, `securepath-apim-sync.py`, `securepath-apim-trace.sh`, `tools/README.md` | the install check, the application sync, the trace tool |
 | `certs/rdwr-root-ca.pem`, `certs/rdwr-intermediate-ca.pem`, `certs/rdwr-ca-chain.pem`, `certs/README.md` | the Radware certificate authority, for Step 1 Path A |
@@ -270,7 +269,7 @@ silently disable protection. Run both before creating anything.
 ## 2a — Named Value collisions
 
 Named Values share one namespace across the whole instance, and **`az apim nv create` overwrites an
-existing name without warning or error**. Six of the 24 names the connector uses carry no
+existing name without warning or error**. Six of the 27 names the connector uses carry no
 `rdwr-` prefix and are generic enough to already exist:
 
 `plugin-version-info`, `static-extensions-enabled`, `static-list-of-methods-not-to-inspect`,
@@ -287,7 +286,7 @@ APIM="your-apim-instance"
 EXISTING=$(az apim nv list -g "$RG" --service-name "$APIM" --query "[].name" -o tsv)
 CHECKED=0
 FOUND=0
-for n in rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled rdwr-app-map rdwr-true-host-header rdwr-custom-bot-block-statuses rdwr-host-fallback; do
+for n in rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled rdwr-inline-mode rdwr-inline-proof-header rdwr-inline-proof-addresses rdwr-app-map rdwr-true-host-header rdwr-custom-bot-block-statuses rdwr-host-fallback; do
   CHECKED=$((CHECKED+1))
   if echo "$EXISTING" | grep -qx "$n"; then
     V=$(az apim nv show -g "$RG" --service-name "$APIM" --named-value-id "$n" --query value -o tsv 2>/dev/null)
@@ -298,7 +297,7 @@ done
 echo "names checked: $CHECKED, collisions: $FOUND"
 ```
 
-`names checked: 24, collisions: 0` means Step 3 is safe to run. Any other number of names checked
+`names checked: 27, collisions: 0` means Step 3 is safe to run. Any other number of names checked
 means the block did not run as written. A collision belongs to another workload or to a previous
 install — decide what that value is for before you overwrite it.
 
@@ -346,8 +345,8 @@ The block above reads API policies only; after the install, run the check in 5e 
 
 # ▶ STEP 3 — Create the Named Values
 
-**What this does:** creates the 24 settings the policy reads — the 3 application values in 3a and
-the 21 configuration values in 3b. All 24 must exist before Step 4, or the install is rejected.
+**What this does:** creates the 27 settings the policy reads — the 3 application values in 3a and
+the 24 configuration values in 3b. All 27 must exist before Step 4, or the install is rejected.
 
 ## 3a — Your three application values
 
@@ -366,7 +365,7 @@ az apim nv create -g "$RG" --service-name "$APIM" \
   --named-value-id rdwr-api-key --display-name rdwr-api-key --secret true --value "$API_KEY"
 ```
 
-## 3b — The 21 configuration values
+## 3b — The 24 configuration values
 
 `RDWR_NV` below is a temporary **shell variable** used to build the list. It has nothing to do with
 API Management Named Values, and clearing it affects nothing in Azure.
@@ -386,7 +385,7 @@ RDWR_NV=(
   "rdwr-true-client-ip-header=##DISABLED##"
   "rdwr-api-base-path=/"
   "rdwr-bot-manager-enabled=false"
-  "plugin-version-info=700-v1.5.1"
+  "plugin-version-info=700-v1.6.0"
   "static-extensions-enabled=true"
   "static-list-of-methods-not-to-inspect=GET,HEAD"
   "static-list-of-bypassed-extensions=png,jpg,css,js,jpeg,gif,ico,ttf,svg,woff,woff2,svc,swf,otf,eot,webp,avif"
@@ -394,6 +393,9 @@ RDWR_NV=(
   "chunked-request-allowed-content-types=application/json,application/x-www-form-urlencoded,text/plain,application/soap+xml,text/xml,application/xml,xml/text"
   "rdwr-inline-trusted-sources=##DISABLED##"
   "rdwr-inline-headers-enabled=false"
+  "rdwr-inline-mode=##DISABLED##"
+  "rdwr-inline-proof-header=##DISABLED##"
+  "rdwr-inline-proof-addresses=##DISABLED##"
   "rdwr-app-map=##DISABLED##"
   "rdwr-true-host-header=##DISABLED##"
   "rdwr-host-fallback=gateway"
@@ -453,20 +455,20 @@ below, which means "off":
   Front Door or a CDN (3d). Same rule: only when the proxy is the sole path to the gateway.
   `rdwr-host-fallback` decides what to use when none of them yields a usable hostname — `gateway`
   (the host API Management received) or a hostname of your own.
-- **`rdwr-inline-trusted-sources`** and **`rdwr-inline-headers-enabled`** — **leave both off unless
-  some of your traffic has already been inspected by Radware Cloud WAF inline and must not be
-  inspected a second time** (some APIs published through Cloud WAF, others reaching the gateway
-  directly). `rdwr-inline-trusted-sources` lists the addresses that traffic arrives from
-  (comma-separated IPs or CIDR ranges); a request from a listed address **skips SecurePath**.
-  `rdwr-inline-headers-enabled=true` narrows that to the requests from a listed address that also
-  carry all five of Cloud WAF's forwarding headers (`X-RDWR-IP`, `X-RDWR-PORT`, `X-RDWR-PORT-MM`,
-  `X-RDWR-PORT-MM-ORIG-FE-PORT`, `X-RDWR-APP-ID`). The headers never work alone: any client can
-  send them, so without the address list nothing skips inspection, and a request carrying them is
-  refused with `403` (Issue 8). The address compared is the one API Management received the
-  connection from: behind Azure Front Door, Application Gateway or a CDN it is that proxy's address,
-  not Cloud WAF's, and these settings cannot tell Cloud WAF's traffic apart. **If all your API traffic
-  comes through Cloud WAF and SecurePath should inspect it, leave both off** and follow
+- **`rdwr-inline-mode`**, **`rdwr-inline-proof-header`** and **`rdwr-inline-proof-addresses`** —
+  **leave all three off unless Radware Cloud WAF (inline) forwards traffic to this gateway.** Cloud
+  WAF adds five headers of its own to every request it forwards, two of them under names the
+  connector reserves, so such a request is refused with `403` (Issue 8) until `rdwr-inline-mode`
+  says what to do with it: `strip` (SecurePath inspects it, with those headers left out of what
+  SecurePath receives) or `bypass` (it is not sent to SecurePath when it is proven to come from
+  Cloud WAF). The other two are the proof: a header and value only Cloud WAF's traffic carries, and
+  the addresses Cloud WAF connects from. The mode can also be set per application, per API, per
+  operation or per request. All of it, with a worked example for each case, is in
   [Radware Cloud WAF in front of the gateway](#radware-cloud-waf-in-front-of-the-gateway).
+- **`rdwr-inline-trusted-sources`** and **`rdwr-inline-headers-enabled`** — the earlier way to skip
+  SecurePath for traffic Cloud WAF already inspected. Leave both off on a new install and use
+  `rdwr-inline-mode`. An install that already uses them keeps working exactly as before; what they
+  do, and the mode that replaces them, is in the same section, under "The two older settings".
 - **`rdwr-app-map`** and **`rdwr-custom-bot-block-statuses`** — explained in 3d and 3e.
 
 Re-running this block over an earlier attempt simply overwrites each value; no error is reported
@@ -479,7 +481,7 @@ RG="your-resource-group"
 APIM="your-apim-instance"
 
 HAVE=$(az apim nv list -g "$RG" --service-name "$APIM" --query "[].name" -o tsv)
-for n in rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled rdwr-app-map rdwr-true-host-header rdwr-custom-bot-block-statuses rdwr-host-fallback; do
+for n in rdwr-app-id rdwr-app-ep-addr rdwr-api-key rdwr-app-ep-port rdwr-app-ep-ssl rdwr-app-ep-timeout-seconds rdwr-body-max-size-bytes rdwr-partial-body-size-bytes rdwr-multipart-max-size-bytes rdwr-true-client-ip-header rdwr-api-base-path rdwr-bot-manager-enabled plugin-version-info static-extensions-enabled static-list-of-methods-not-to-inspect static-list-of-bypassed-extensions static-inspect-if-query-string-exists chunked-request-allowed-content-types rdwr-inline-trusted-sources rdwr-inline-headers-enabled rdwr-inline-mode rdwr-inline-proof-header rdwr-inline-proof-addresses rdwr-app-map rdwr-true-host-header rdwr-custom-bot-block-statuses rdwr-host-fallback; do
   echo "$HAVE" | grep -qx "$n" || echo "MISSING: $n"
 done
 ID=$(az apim nv show -g "$RG" --service-name "$APIM" --named-value-id rdwr-app-id --query value -o tsv)
@@ -498,7 +500,7 @@ esac
 Only `OK:` lines means you are ready for Step 4. Any `MISSING:` line will cause the policy upload to
 be rejected.
 
-> **Your other Named Values are none of our business.** This check looks only for the 24 names above
+> **Your other Named Values are none of our business.** This check looks only for the 27 names above
 > and ignores everything else on your instance. If you see unrelated Named Values in the portal,
 > leave them alone — the connector neither reads nor modifies them.
 
@@ -518,7 +520,7 @@ STRAY="0"
 az apim nv show -g "$RG" --service-name "$APIM" --named-value-id "$STRAY"
 ```
 
-Only if the value it prints is clearly paste debris, and the name is not one of the 24 above,
+Only if the value it prints is clearly paste debris, and the name is not one of the 27 above,
 remove it:
 
 ```bash
@@ -627,7 +629,9 @@ install check reports it as `L04`).
 
 Which SecurePath **application** an API uses is not set this way — it comes from the application
 map below, keyed by API id, which also carries that application's endpoint, credentials and per-app
-options.
+options. One more setting can be overridden per API in the same way: what to do with requests that
+come through Radware Cloud WAF (`rdwrInlineModeOverride`, Step 4,
+[Radware Cloud WAF in front of the gateway](#radware-cloud-waf-in-front-of-the-gateway), Example 4).
 
 ### The application map
 
@@ -643,8 +647,9 @@ Named Value is inserted into the policy text, where a double quote is not allowe
 Each entry needs `app_id`, `api_key` and `endpoint`. Optional per entry: `base_path` (the path
 prefix to strip before inspection, for an API that lives under a prefix SecurePath does not
 know; overrides `rdwr-api-base-path`), `port`, `ssl`, `bot_manager` and `bot_block_statuses`
-(override the instance values; `bot_block_statuses` is explained in 3e). Mark the Named Value
-**secret**.
+(override the instance values; `bot_block_statuses` is explained in 3e), and `inline` (`strip`,
+`bypass` or `off` for requests that come through Radware Cloud WAF; overrides `rdwr-inline-mode`,
+Step 4, Radware Cloud WAF in front of the gateway, Example 6). Mark the Named Value **secret**.
 
 ```bash
 RG="your-resource-group"
@@ -1110,7 +1115,7 @@ Premium v2 were not checked; if the save is refused with that message, use Form 
    editor shows the whole document, not only the inbound section.
 4. If the editor already contains policies of your own, **stop and use Form 2 instead** — continuing
    will discard them. Otherwise replace the contents with
-   `rdwr-azureapim-securepath-connector-v1.5.xml`.
+   `rdwr-azureapim-securepath-connector-v1.6.xml`.
 5. **Save.**
 
 If the save is rejected, the error names the missing Named Value or the offending line. Go back to
@@ -1132,7 +1137,7 @@ SUB=$(az account show --query id -o tsv)
 URI="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM/apis/$API_ID/policies/policy?api-version=2024-05-01"
 
 jq -Rs '{properties: {format: "rawxml", value: .}}' \
-   rdwr-azureapim-securepath-connector-v1.5.xml > rdwr-policy-body.json &&
+   rdwr-azureapim-securepath-connector-v1.6.xml > rdwr-policy-body.json &&
 az rest --method PUT --uri "$URI" \
         --headers "Content-Type=application/json" \
         --body @rdwr-policy-body.json
@@ -1144,7 +1149,7 @@ bash form above was):
 ```powershell
 $ctx = New-AzApiManagementContext -ResourceGroupName "your-resource-group" -ServiceName "your-apim-instance"
 Set-AzApiManagementPolicy -Context $ctx -ApiId "your-api-resource-name" `
-    -PolicyFilePath ".\rdwr-azureapim-securepath-connector-v1.5.xml" `
+    -PolicyFilePath ".\rdwr-azureapim-securepath-connector-v1.6.xml" `
     -Format "application/vnd.ms-azure-apim.policy.raw+xml"
 ```
 
@@ -1240,8 +1245,8 @@ API Management's trace header, so the script reports that no trace id came back.
 
 ## Radware Cloud WAF in front of the gateway
 
-**When this applies:** Radware Cloud WAF (inline) receives your API traffic and forwards it to API
-Management, directly or through Azure Front Door or another proxy.
+**When this applies:** Radware Cloud WAF (inline) receives some or all of your API traffic and
+forwards it to API Management, directly or through Azure Front Door or another proxy.
 
 **What you see until it is handled:** every request that comes through Cloud WAF is answered `403`
 by the connector before SecurePath is called, and the trace shows `reserved-header-violation`.
@@ -1259,95 +1264,442 @@ X-RDWR-APP-ID: <the Cloud WAF application>
 Your clients do not send these; Cloud WAF adds them to every request it forwards. Two of them,
 `X-RDWR-IP` and `X-RDWR-APP-ID`, are names the connector reserves for its own call to SecurePath, and
 a header that arrives at the gateway looks the same whether Cloud WAF or a client wrote it, so the
-connector refuses the request (Issue 8). Choose by what Cloud WAF already does for this traffic:
+connector refuses the request (Issue 8) until you tell it what to do with this traffic.
 
-| Your layout | Use |
+### The setting: `rdwr-inline-mode`
+
+| `rdwr-inline-mode` | What happens to a request that carries all five Cloud WAF headers | Use it when |
+|---|---|---|
+| `##DISABLED##` (default) | Refused with `403`. | No traffic reaches this gateway through Cloud WAF. |
+| `strip` | **Inspected by SecurePath** like any other request. The five headers are left out of what SecurePath receives. | Traffic comes through Cloud WAF and SecurePath should inspect it as well, for example for API protection that Cloud WAF does not apply to it. |
+| `bypass` | **Not sent to SecurePath** when the request is proven to come from Cloud WAF (next section). A request that is not proven is inspected, exactly as in `strip`. | Cloud WAF already applies to that traffic everything you want, and a second inspection would add nothing. Requests that do not come through Cloud WAF are inspected as always. |
+
+Four things hold in both modes:
+
+- **The mode acts only on a request that carries all five headers.** A request with only some of
+  them, or with any other reserved header, is refused as before (Issue 8).
+- **The five headers prove nothing by themselves.** Any client can send them. Whether a request may
+  skip SecurePath, and whether its `X-RDWR-IP` is believed, depends on the proof in the next section,
+  never on the headers.
+- **A request is never refused for failing the proof.** It is inspected instead. When Cloud WAF
+  starts connecting from an address that is not in your list yet, or while the proof header's value
+  is being changed, those requests are inspected by SecurePath until the setting catches up.
+- **Your backend receives the request unchanged**, Cloud WAF's headers included, as it did before
+  the connector was installed.
+
+The mode can be set for the whole instance, for one application, for one API, for one operation,
+or decided per request. The examples below cover each.
+
+### Proving that a request comes from Cloud WAF
+
+| Proof | Named Value | Works when |
+|---|---|---|
+| The address the request arrives from | `rdwr-inline-proof-addresses`: the addresses Cloud WAF connects from, as IPs or CIDR ranges, comma-separated | Cloud WAF connects **straight to the gateway**. Behind Front Door, Application Gateway or a CDN the gateway sees that proxy's address on every request, so this proof cannot tell Cloud WAF's traffic apart there. |
+| A header and value that only Cloud WAF's traffic carries | `rdwr-inline-proof-header`: `Header-Name: value` (the value is a secret: store the Named Value as one) | Anywhere, including behind a proxy. The header must reach the gateway **only** on requests that came through Cloud WAF: a header your Cloud WAF application is set to add to the requests it forwards, or the proxy's own identifier when that proxy accepts traffic from Cloud WAF only and is the only way to reach the gateway (with Front Door: `X-Azure-FDID` and your Front Door ID). |
+
+Set one, or both. **Every proof that is set must match.** With none set, no request is proven.
+
+| | The request is **not** proven | The request **is** proven |
+|---|---|---|
+| `strip` | Inspected. The client address SecurePath sees is the one the gateway would use for any request (the connection's, or `rdwr-true-client-ip-header`). | Inspected. The client address SecurePath sees is `X-RDWR-IP`, the address Cloud WAF received the request from. |
+| `bypass` | Inspected, as in `strip`. | Not sent to SecurePath. Served by your backend. |
+
+`rdwr-inline-proof-header` takes one value, or up to five separated by commas
+(`Header-Name: value, next-value`); a request carrying any one of them is proven. That is what makes
+it possible to change the value without a gap (Example 8). Use a long random value, 32 characters or
+more. A request that repeats the header, or sends two values in it, is not proven. The connector
+leaves this header out of what it sends to SecurePath; your backend still receives it.
+
+### Example 1 — All API traffic comes through Cloud WAF, and SecurePath inspects all of it
+
+One setting, no policy change:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-mode --value "strip" &&
+echo "inline mode: strip"
+```
+
+| Request | Result |
 |---|---|
-| All API traffic comes through Cloud WAF, and SecurePath should inspect it (for example, for API protection that Cloud WAF does not apply to it) | **Layout A**: remove Cloud WAF's headers before the connector. Every request is inspected. |
-| Some APIs come through Cloud WAF and are inspected there; others reach the gateway directly, and only those should be inspected by SecurePath | **Layout B**: requests from Cloud WAF skip SecurePath. Only when Cloud WAF connects to API Management directly. |
+| Through Cloud WAF (all five headers) | Inspected by SecurePath; its verdict is enforced. |
+| Through Cloud WAF, and SecurePath blocks it | `403`, the connector's block page. |
+| Without Cloud WAF's headers | Inspected, as always. |
+| Only some of the five headers, or another reserved header | `403` (Issue 8). |
 
-### Layout A — SecurePath inspects the traffic that comes through Cloud WAF
+With no proof set, SecurePath is told the client address the gateway would use for any request.
+Behind Cloud WAF that is usually Cloud WAF's own address, or a proxy's. Example 2 fixes that.
 
-1. Keep `rdwr-inline-headers-enabled` at `false` and `rdwr-inline-trusted-sources` at
-   `##DISABLED##` (3b).
-2. Add these lines **immediately before the connector's lines**: Form 1, first in `<inbound>` of the
-   All APIs policy; Form 2, right after `<base />` in the API's or product's policy (after your
-   `X-Azure-FDID` check, if you have one); Form 3, right after `<base />` in `<inbound>`.
+### Example 2 — The same, and SecurePath sees the address of the real client
 
-   ```xml
-   <!-- Radware Cloud WAF forwarding headers: keep the client address, remove the headers before SecurePath -->
-   <set-header name="X-Cloud-Waf-Client-Ip" exists-action="@(context.Request.Headers.ContainsKey("x-rdwr-ip") ? "override" : "delete")">
-       <value>@(context.Request.Headers.GetValueOrDefault("x-rdwr-ip", ""))</value>
-   </set-header>
-   <set-header name="x-rdwr-ip" exists-action="delete" />
-   <set-header name="x-rdwr-port" exists-action="delete" />
-   <set-header name="x-rdwr-port-mm" exists-action="delete" />
-   <set-header name="x-rdwr-port-mm-orig-fe-port" exists-action="delete" />
-   <set-header name="x-rdwr-app-id" exists-action="delete" />
-   ```
+Add a proof, and for every proven request the connector reports `X-RDWR-IP` to SecurePath as the
+client address. Rate limiting, geolocation and source reputation then act on your users' addresses.
 
-3. Set `rdwr-true-client-ip-header` to `X-Cloud-Waf-Client-Ip`:
-
-   ```bash
-   RG="your-resource-group"
-   APIM="your-apim-instance"
-
-   az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-true-client-ip-header --value "X-Cloud-Waf-Client-Ip"
-   ```
-
-4. Behind Front Door or another proxy, set `rdwr-true-host-header` to the header that carries the
-   hostname your users called (`X-Forwarded-Host` with Front Door), as in 3d,
-   [The client-facing hostname](#the-client-facing-hostname).
-
-What the lines do: the first one copies `X-RDWR-IP`, the address Cloud WAF received the request from,
-into `X-Cloud-Waf-Client-Ip`, and removes an `X-Cloud-Waf-Client-Ip` that a request carries without
-`X-RDWR-IP`, so the header only ever holds Cloud WAF's value. The others remove Cloud WAF's five
-headers. Only those five are removed: a request carrying any other reserved header is still refused.
-Your backend receives `X-Cloud-Waf-Client-Ip` in place of Cloud WAF's headers; read it there if your
-application uses the client address.
-
-Why `X-Cloud-Waf-Client-Ip` and not `X-Forwarded-For`: Cloud WAF passes `X-Forwarded-For` on as the
-client sent it, so its first address is either a value the client chose or, when the client sent
-none, the address of a proxy in front of API Management. The same rule as for any client-IP header
-applies (3b): Cloud WAF, and any proxy between it and the gateway, must be the only path to the
-gateway, for example Front Door accepting only Cloud WAF's traffic and a `check-header` on
-`X-Azure-FDID` in API Management. Otherwise a client that reaches the gateway directly can send
-`X-RDWR-IP` itself.
-
-If Cloud WAF already applies to these requests the protections you want from SecurePath, inspecting
-them again adds a second call and nothing else: that is the case for Layout B.
-
-### Layout B — requests from Cloud WAF skip SecurePath
-
-1. Set `rdwr-inline-trusted-sources` to the addresses Cloud WAF connects to API Management from,
-   comma-separated (IPs or CIDR ranges).
-2. Set `rdwr-inline-headers-enabled` to `true`, so that only requests from those addresses that also
-   carry all five Cloud WAF headers skip SecurePath.
+**2a. Cloud WAF connects straight to the gateway:**
 
 ```bash
 RG="your-resource-group"
 APIM="your-apim-instance"
 CLOUD_WAF_SOURCES="your-cloud-waf-addresses"
 
-az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-trusted-sources --value "$CLOUD_WAF_SOURCES" &&
-az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-headers-enabled --value "true" &&
-echo "inline bypass set"
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-proof-addresses --value "$CLOUD_WAF_SOURCES" &&
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-mode --value "strip" &&
+echo "inline mode: strip, proof: source addresses"
 ```
 
-Use one layout, not both: Layout A's lines remove Cloud WAF's headers before the connector reads the
-request, so with them in place no request carries the five headers and none skips SecurePath.
+`CLOUD_WAF_SOURCES` is a comma-separated list such as `203.0.113.0/24,198.51.100.17`.
 
-Requests from any other address are inspected, and one from another address that carries Cloud WAF's
-headers is refused with `403`. The address compared is the one API Management received the
-connection from, so behind Front Door, Application Gateway or a CDN it is that proxy's address:
-these settings cannot recognise Cloud WAF there, and Layout A is the one to use.
+**2b. Front Door, Application Gateway or a CDN sits between Cloud WAF and the gateway:**
 
-Both layouts were executed on Standard v2, Layout A with Forms 1 and 2. Form 3 cannot be installed
-on Standard v2, so its placement above was not executed.
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+PROOF_HEADER="your-header-name: your-long-random-value"
 
-**Verify** either layout by tracing one request that came through Cloud WAF (Debugging, Option A).
-Layout A: the trace shows the inspection call and no `reserved-header-violation`. Layout B: the
-request is forwarded to your backend without an inspection call.
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-proof-header --secret true --value "$PROOF_HEADER" &&
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-mode --value "strip" &&
+echo "inline mode: strip, proof: header"
+```
+
+`PROOF_HEADER` is the header name, a colon and the value, for example
+`X-Edge-Auth: 4f9c2d7a81b34e6f9a0c5d2e7b18c3aa`. With Front Door admitting only Cloud WAF's traffic,
+and the gateway reachable only from that Front Door, the Front Door ID does the same job with no
+extra header: `X-Azure-FDID: 11111111-2222-3333-4444-555555555555` (your own ID).
+
+Behind a proxy, also set `rdwr-true-host-header` to the header that carries the hostname your users
+called, as in 3d, [The client-facing hostname](#the-client-facing-hostname).
+
+| Request | Result |
+|---|---|
+| Through Cloud WAF, proof matches | Inspected. Client address reported to SecurePath: `X-RDWR-IP`. |
+| All five headers, proof does not match | Inspected. Client address: the gateway's usual choice. The value of `X-RDWR-IP` is not used. |
+| Without Cloud WAF's headers | Inspected, as always. |
+
+### Example 3 — Requests from Cloud WAF skip SecurePath; everything else is inspected
+
+For an instance where some APIs are published through Cloud WAF and are fully protected there,
+while other traffic reaches the gateway directly.
+
+**3a. Cloud WAF connects straight to the gateway:**
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+CLOUD_WAF_SOURCES="your-cloud-waf-addresses"
+
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-proof-addresses --value "$CLOUD_WAF_SOURCES" &&
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-mode --value "bypass" &&
+echo "inline mode: bypass, proof: source addresses"
+```
+
+**3b. Behind Front Door, Application Gateway or a CDN:**
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+PROOF_HEADER="your-header-name: your-long-random-value"
+
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-proof-header --secret true --value "$PROOF_HEADER" &&
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-mode --value "bypass" &&
+echo "inline mode: bypass, proof: header"
+```
+
+For both proofs at once, set `rdwr-inline-proof-addresses` as in 3a and `rdwr-inline-proof-header`
+as in 3b. A request must then arrive from a listed address **and** carry the header.
+
+| Request | Result |
+|---|---|
+| All five headers, proof matches | **Not sent to SecurePath.** Served by your backend. No response-phase log either. |
+| All five headers, proof does not match | Inspected by SecurePath. Not refused. |
+| Without Cloud WAF's headers, even from a listed address or with the proof header | Inspected, as always. The proof alone skips nothing. |
+| `bypass` set, but neither proof is set | Nothing is bypassed: every request is inspected, and the trace and the install check (`L18`) say so. |
+
+### Example 4 — A different mode for one API
+
+One instance, three kinds of API: most come through Cloud WAF and should also be inspected by
+SecurePath (`strip` for the instance, Example 1 or 2); one API is fully protected by Cloud WAF and
+should skip SecurePath; one API never comes through Cloud WAF and should keep refusing its headers.
+
+In the policy of the API that should skip SecurePath, add one line as the first line of
+`<inbound>`, **before `<base />`**. A policy that has nothing else looks like this:
+
+```xml
+<policies>
+  <inbound>
+    <set-variable name="rdwrInlineModeOverride" value="bypass" />
+    <base />
+  </inbound>
+  <backend><base /></backend>
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>
+```
+
+In the policy of the API that should keep refusing Cloud WAF's headers:
+
+```xml
+<policies>
+  <inbound>
+    <set-variable name="rdwrInlineModeOverride" value="off" />
+    <base />
+  </inbound>
+  <backend><base /></backend>
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>
+```
+
+The value is `strip`, `bypass` or `off`. `off` means no inline handling for this API at all. Only
+`set-variable` belongs before `<base />`: anything that can end a request must stay after it (Step
+4, `L04`). With Form 2 or Form 3, where the connector's lines are in this same policy, put the
+`set-variable` line above the connector's lines. A line placed after the connector has run changes
+nothing, and the install check reports it (`L18`).
+
+Edit the policy in the Portal (APIs, the API, All operations, the policy code editor), or from the
+CLI with the two blocks at the end of [Form 2](#form-2--fragments-inside-an-existing-api-or-product-policy):
+fetch, edit, upload.
+
+The proof is the same for the whole instance: `bypass` on one API still needs
+`rdwr-inline-proof-addresses` or `rdwr-inline-proof-header` (Example 3).
+
+### Example 5 — A different mode for one operation
+
+For example: everything is inspected (`strip`), except one large-download operation that Cloud WAF
+already inspects. Open that **operation's** policy, not the API's, and add the same line (Portal:
+APIs, the API, the operation, the policy code editor; CLI: the Form 2 blocks with
+`apis/$API_ID/operations/your-operation-id` in place of `apis/$API_ID`):
+
+```xml
+<policies>
+  <inbound>
+    <set-variable name="rdwrInlineModeOverride" value="bypass" />
+    <base />
+  </inbound>
+  <backend><base /></backend>
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>
+```
+
+The install check reads operation policies only when asked: run it with `--operations` to have a
+per-operation line checked like a per-API one (5e).
+
+**If the API's own policy also sets the variable, the API's line runs last and wins.** To let an
+operation decide while the API sets a default for its other operations, write the API's line so that
+it keeps a value an operation has already set:
+
+```xml
+<policies>
+  <inbound>
+    <set-variable name="rdwrInlineModeOverride" value="@(context.Variables.ContainsKey("rdwrInlineModeOverride") ? (string)context.Variables["rdwrInlineModeOverride"] : "strip")" />
+    <base />
+  </inbound>
+  <backend><base /></backend>
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>
+```
+
+### Example 6 — A different mode for one SecurePath application
+
+When the instance uses the application map (3d), an entry can carry the mode for every request that
+belongs to that application: add `'inline': 'strip'`, `'inline': 'bypass'` or `'inline': 'off'`.
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+MAP="{'orders-api': {'app_id': 'first-application-id', 'api_key': 'first-api-key', 'endpoint': 'first-application-id.oop.radwarecloud.net', 'inline': 'bypass'}, 'shop.example.com': {'app_id': 'second-application-id', 'api_key': 'second-api-key', 'endpoint': 'second-application-id.oop.radwarecloud.net', 'inline': 'strip'}, '*': {'app_id': 'third-application-id', 'api_key': 'third-api-key', 'endpoint': 'third-application-id.oop.radwarecloud.net'}}"
+
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-app-map --secret true --value "$MAP"
+```
+
+Here requests of the API `orders-api` skip SecurePath when proven, requests for `shop.example.com`
+are inspected with Cloud WAF's headers left out, and everything else follows `rdwr-inline-mode`.
+The field belongs to hand-written entries (`rdwr-app-map`). For applications that come from the
+generated map, use the per-API setting of Example 4.
+
+### Example 7 — Decide per request
+
+The value of the variable can be an expression, so the mode can follow anything in the request.
+Only what one particular Cloud WAF application inspected skips SecurePath; anything else that
+comes through Cloud WAF is inspected:
+
+```xml
+<policies>
+  <inbound>
+    <set-variable name="rdwrInlineModeOverride" value="@(context.Request.Headers.GetValueOrDefault("X-RDWR-APP-ID", "") == "your-cloud-waf-application-id" ? "bypass" : "strip")" />
+    <base />
+  </inbound>
+  <backend><base /></backend>
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>
+```
+
+By path: the downloads of an API published under `/docs` skip SecurePath, everything else is
+inspected. The path is the one the client called, API prefix included:
+
+```xml
+<policies>
+  <inbound>
+    <set-variable name="rdwrInlineModeOverride" value="@(context.Request.OriginalUrl.Path.StartsWith("/docs/download/") ? "bypass" : "strip")" />
+    <base />
+  </inbound>
+  <backend><base /></backend>
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>
+```
+
+The expression chooses the mode; it does not replace the proof. A request the expression marks
+`bypass` skips SecurePath only if it is proven, so a client that writes `X-RDWR-APP-ID` itself
+gains nothing.
+
+### Example 8 — Changing the proof header's value without a gap
+
+1. Add the new value next to the current one. Requests carrying either are proven:
+
+   ```bash
+   RG="your-resource-group"
+   APIM="your-apim-instance"
+   HEADER_NAME="your-header-name"
+   CURRENT_VALUE="your-current-value"
+   NEW_VALUE="your-new-value"
+
+   az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-proof-header --secret true --value "$HEADER_NAME: $CURRENT_VALUE, $NEW_VALUE"
+   ```
+
+2. Change the value at the sender (Cloud WAF, or the proxy that adds the header).
+3. Remove the old value:
+
+   ```bash
+   RG="your-resource-group"
+   APIM="your-apim-instance"
+   HEADER_NAME="your-header-name"
+   NEW_VALUE="your-new-value"
+
+   az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-proof-header --secret true --value "$HEADER_NAME: $NEW_VALUE"
+   ```
+
+A Named Value change usually takes effect within seconds; allow a minute. If a step is missed,
+nothing is refused: requests that are not proven for a while are inspected by SecurePath.
+
+### Example 9 — Turning it off
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-mode --value "##DISABLED##" &&
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-proof-header --secret true --value "##DISABLED##" &&
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id rdwr-inline-proof-addresses --value "##DISABLED##" &&
+echo "inline handling off"
+```
+
+Requests that carry Cloud WAF's headers are refused again (Issue 8), except in APIs, operations or
+applications that set a mode of their own.
+
+### Which setting wins
+
+The most specific setting that names a mode decides, per request:
+
+1. `rdwrInlineModeOverride`, set by the policy of the operation or the API the request belongs to:
+   `strip`, `bypass` or `off`.
+2. The `inline` field of the application-map entry the request belongs to: `strip`, `bypass` or `off`.
+3. The Named Value `rdwr-inline-mode`: `strip` or `bypass`.
+4. Otherwise no mode applies: the two older settings decide (below), and by default they are off.
+
+A value that is not one of these words is not used, the next level decides, and the trace and the
+install check (`L18`) name the value. `rdwr-inline-mode` set to `off`, `false`, `-` or `##DISABLED##`
+means the Named Value is not set.
+
+### What the trace says
+
+Trace one request (Debugging, Option A) and look for the connector's own lines (source
+`securepath`):
+
+| Line | Meaning |
+|---|---|
+| `the Radware Cloud WAF forwarding headers of this request are not sent to SecurePath (inline mode strip); the client address is taken from x-rdwr-ip (proof: ...)` | `strip`, proven. |
+| `... (inline mode strip); their values are not used (no proof is configured)` or `(the request is not proven to come from Radware Cloud WAF)` | `strip`, not proven: inspected, the gateway's usual client address. |
+| `not inspected: inline bypass (inline mode bypass; ... proof: rdwr-inline-proof-addresses)`, or `rdwr-inline-proof-header`, or both | `bypass`, proven by the Named Value named. No inspection call follows. |
+| `this request carries the Radware Cloud WAF forwarding headers but is not proven to come from it (...): not bypassed, inspected like any other request` | `bypass`, not proven. The text in brackets says which proof failed. |
+| `the inline mode is bypass but neither rdwr-inline-proof-addresses nor rdwr-inline-proof-header is set: no request is bypassed` | `bypass` without a proof. Set one (Example 3). |
+| `request refused with 403: it carries a header name reserved for the connector (inline mode ... applies only to a request that carries all five ...)` | The request has some of the five headers, not all. |
+| `... is not strip, bypass or off: not used` | A mode value that is not a mode; the line names where it was set. |
+| `rdwr-inline-proof-header is not 'Header-Name: value' ...` | The Named Value cannot be read, so no request is proven. |
+
+The value of `rdwr-inline-proof-header` never appears in the connector's lines, and
+`tools/securepath-apim-trace.sh` removes it from the trace file it saves, wherever the trace repeats it.
+
+### Check it yourself
+
+You can send Cloud WAF's five headers yourself to see what the gateway does with them. Replace the
+URL with one of your API's:
+
+```bash
+URL="https://your-gateway-host/your/api/path"
+
+curl -s -o /dev/null -w "%{http_code}\n" "$URL" -H "X-RDWR-IP: 198.51.100.7" -H "X-RDWR-PORT: 50000" -H "X-RDWR-PORT-MM: 443" -H "X-RDWR-PORT-MM-ORIG-FE-PORT: 443" -H "X-RDWR-APP-ID: test"
+```
+
+With no mode: `403`. With `strip` or `bypass`: your API's usual answer. To see which of the two
+happened and why, send the same request through `tools/securepath-apim-trace.sh` (add the five
+`-H` options after the script name) and read the lines in the table above. Add your proof header
+to the request to see the proven case.
+
+### The two older settings
+
+`rdwr-inline-trusted-sources` and `rdwr-inline-headers-enabled` are the earlier way to skip
+SecurePath for traffic that Cloud WAF already inspected. They keep working exactly as before, and
+they are a separate mechanism:
+
+- A request that a mode applies to **never reads the older settings**. With `rdwr-inline-mode` set,
+  that is every request of the instance, and the install check reports the older settings as unused
+  (`L18`).
+- A request that no mode applies to **never reads the proofs**. `rdwr-inline-proof-addresses` does
+  not behave like `rdwr-inline-trusted-sources` anywhere.
+
+| Older settings | What they do | The mode that replaces them |
+|---|---|---|
+| `rdwr-inline-trusted-sources` set, `rdwr-inline-headers-enabled=true` | A request from a listed address that carries all five headers skips SecurePath. All five headers from any other address: `403`. | `rdwr-inline-mode=bypass` with the same list in `rdwr-inline-proof-addresses` (Example 3a). Listed addresses skip SecurePath as before; the others are inspected instead of refused. Then set the two older settings back to `##DISABLED##` and `false`. |
+| `rdwr-inline-trusted-sources` set, `rdwr-inline-headers-enabled=false` | **Every** request from a listed address skips SecurePath, with or without the headers. | None. The modes act only on requests that carry all five headers. Keep the older setting if this is what you need. |
+| `rdwr-inline-headers-enabled=true` alone | Nothing is bypassed; requests carrying the headers are refused. | — |
+
+### If your backend must not receive Cloud WAF's headers
+
+The modes leave the request to your backend as it is. To remove Cloud WAF's headers from it as well,
+do it in your own policy **instead of** setting a mode: add these lines immediately before the
+connector's lines (Form 1, first in `<inbound>` of the All APIs policy; Form 2, right after
+`<base />` in the API's or product's policy, after your `X-Azure-FDID` check if you have one), and
+set `rdwr-true-client-ip-header` to `X-Cloud-Waf-Client-Ip`.
+
+```xml
+<!-- Radware Cloud WAF forwarding headers: keep the client address, remove the headers before SecurePath -->
+<set-header name="X-Cloud-Waf-Client-Ip" exists-action="@(context.Request.Headers.ContainsKey("x-rdwr-ip") ? "override" : "delete")">
+    <value>@(context.Request.Headers.GetValueOrDefault("x-rdwr-ip", ""))</value>
+</set-header>
+<set-header name="x-rdwr-ip" exists-action="delete" />
+<set-header name="x-rdwr-port" exists-action="delete" />
+<set-header name="x-rdwr-port-mm" exists-action="delete" />
+<set-header name="x-rdwr-port-mm-orig-fe-port" exists-action="delete" />
+<set-header name="x-rdwr-app-id" exists-action="delete" />
+```
+
+Every request is then inspected, your backend receives `X-Cloud-Waf-Client-Ip` in place of Cloud
+WAF's headers, and no mode has anything left to act on. Cloud WAF, and any proxy between it and the
+gateway, must be the only path to the gateway, because these lines believe `X-RDWR-IP` from whoever
+sends it.
+
+### What was executed
+
+Every command and policy in this section was executed as written: on Standard v2 with the connector
+installed as Form 1, the per-API setting also as Form 2, and on a Developer-tier instance as Form 3
+(the policy document, which Standard v2 does not accept). The requests "through Cloud WAF" were sent
+with the five headers as Cloud WAF writes them; a Cloud WAF application was not placed in front of
+the test gateway.
 
 ---
 ---
@@ -1725,6 +2077,7 @@ they appear in the **Inbound** section:
 | `SecurePath: block page served without a Transaction ID: ...` (source `securepath`) | The client received the connector's block page without SecurePath's Transaction ID: SecurePath's answer carried none, or its body could not be read. The block itself was enforced. | 5d |
 | `send-request` response with status `301`/`302` and a `location` containing `wrong-api-key` | SecurePath did not recognise the Application ID / API key pair. | Step 3a, Issue 3 |
 | `set-variable rwStatus = 200` and `oopRequestStatusHeader = allowed` | Inspection completed, verdict allow. `rwStatus = 403` is a block. `rwStatus >= 500` is a SecurePath-side error and the request is served uninspected. | — |
+| `the Radware Cloud WAF forwarding headers of this request are not sent to SecurePath ...`, `not inspected: inline bypass (...)`, or `... is not proven to come from it ...` (source `securepath`) | The request carries Cloud WAF's five forwarding headers and `rdwr-inline-mode` acted on it: inspected with the headers left out, not sent to SecurePath, or not proven and therefore inspected. | Step 4, Radware Cloud WAF in front of the gateway, "What the trace says" |
 | `set-header X-Rdwr-Diag: <value>` | The request was served **without** a completed inspection; the value says why (table in 5c). This header goes to your backend, so its access log is an ongoing health signal. | 5c |
 | `One way request was successfully send to https://<host>/...` in **Outbound** (or **On error**) | The response-phase log was sent. Absent when SecurePath did not request it (`x-rdwr-oop-log` other than `2`/`3`) — that is normal. | — |
 
@@ -1801,7 +2154,7 @@ after a Named Value edit rather than after a policy change.
 
 ## Issue 6 — The policy upload is rejected
 
-*"Named Value not found"* means one of the 24 is missing. Run Step 3c, which names it.
+*"Named Value not found"* means one of the 27 is missing. Run Step 3c, which names it.
 
 If the upload failed with a validation error instead, confirm the request used `format: rawxml`.
 
@@ -1828,13 +2181,16 @@ The request carried a reserved header. The connector rejects any request present
 `x-rdwr-ip`, or `x-rdwr-request-host-b60f5e78-5bc7-4441-aac8-20b1e7cddda5`, because a client sending
 them is attempting to impersonate the connector.
 
-If an upstream proxy or CDN adds any of these, strip them before the request reaches API Management,
-or before the connector's lines. Radware Cloud WAF in front of the gateway adds `X-RDWR-IP` and
-`X-RDWR-APP-ID` to every request: see
-[Radware Cloud WAF in front of the gateway](#radware-cloud-waf-in-front-of-the-gateway) for the lines
-to add, and for when requests from Cloud WAF should skip SecurePath instead. Do not set
-`rdwr-inline-headers-enabled` to make the `403` go away: on its own it changes nothing, and with a
-trusted-source list it stops inspection for the requests it matches (3b).
+Radware Cloud WAF (inline) in front of the gateway adds `X-RDWR-IP` and `X-RDWR-APP-ID` to every
+request it forwards, so all of that traffic is refused until `rdwr-inline-mode` is set: see
+[Radware Cloud WAF in front of the gateway](#radware-cloud-waf-in-front-of-the-gateway), which
+covers both inspecting that traffic and letting it skip SecurePath, for the whole instance or for
+single APIs. The trace of a refused request says so in the connector's own line (`request refused
+with 403: it carries a header name reserved for the connector`), and with a mode set it also says
+why the mode did not apply.
+
+If another upstream proxy or CDN adds any of the reserved names, remove them before the request
+reaches API Management, or before the connector's lines.
 
 ## Issue 9 — Requests are slow
 
@@ -1971,7 +2327,7 @@ APIM="your-apim-instance"
 az apim api delete -g "$RG" --service-name "$APIM" --api-id securepath-captcha --yes
 ```
 
-The 24 Named Values and the backend entities are inert once the connector is removed. Delete them
+The 27 Named Values and the backend entities are inert once the connector is removed. Delete them
 after the fragments are gone (API Management refuses while a fragment references them) — and check
 first whether any of the six non-`rdwr-` names were already yours before installation (Step 2a
 lists them).

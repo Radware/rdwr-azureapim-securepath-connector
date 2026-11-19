@@ -1,4 +1,4 @@
-<!-- Radware SecurePath Connector for Azure API Management, v1.5.1 (policy document, API scope).
+<!-- Radware SecurePath Connector for Azure API Management, v1.6.0 (policy document, API scope).
      GENERATED from fragments/ by tools/build_documents.py. Edit the fragments, then re-run
      the tool. The fragments are the recommended install (README Step 4, Form 1); this
      document is for an API that has no policy of its own (Form 3). -->
@@ -85,12 +85,35 @@
              a disable token. Used only when Bot Manager is enabled; never applied to 5xx. -->
         <set-variable name="rdwrCustomBotBlockStatuses" value="{{rdwr-custom-bot-block-statuses}}" />
 
-        <!-- ====== Inline-bypass knobs ======
-             Using Named Values by default.
+        <!-- ====== Requests that already passed Radware Cloud WAF inline ======
+             Radware Cloud WAF (inline) adds five forwarding headers to every request it sends on:
+             x-rdwr-ip, x-rdwr-port, x-rdwr-port-mm, x-rdwr-port-mm-orig-fe-port and x-rdwr-app-id.
+             Two of those names are reserved by this connector, so such a request is refused with 403
+             unless rdwr-inline-mode says what to do with it (README Step 4, "Radware Cloud WAF in
+             front of the gateway"):
+               strip  - the request is inspected by SecurePath like any other request; the five
+                        headers are left out of what SecurePath receives. The backend still
+                        receives them, as before.
+               bypass - as strip, except that a request PROVEN to come from Cloud WAF is not sent
+                        to SecurePath. The five headers alone never prove that; a request that
+                        carries them and is not proven is inspected, never refused.
+             Proof: the address the request arrives from is in rdwr-inline-proof-addresses, and/or
+             the request carries the header and value of rdwr-inline-proof-header ("Header-Name:
+             value", or "Header-Name: value, next-value" while the value is being changed). Every
+             proof that is configured must match.
+             A mode applies only to a request that carries all five headers. The mode can differ per
+             API (a set-variable named rdwrInlineModeOverride before that API's base element) and
+             per application (the application-map entry's "inline"); there, "off" turns inline
+             handling off. Where no mode applies, the two older settings decide exactly as before
+             (rdwr-inline-trusted-sources, rdwr-inline-headers-enabled). The modes never read the
+             older settings, and the older settings never read the proofs.
              DISABLE TOKENS (case-insensitive): "", "-", "disabled", "off", "false", "none", "~", "##DISABLED##"
              If you prefer inline literals, uncomment the two inline lines and comment the NV lines. -->
         <set-variable name="trustedInlineSourcesCfg" value="{{rdwr-inline-trusted-sources}}" />
         <set-variable name="inlineHeadersEnabledStr" value="{{rdwr-inline-headers-enabled}}" />
+        <set-variable name="rdwrInlineModeNv" value="{{rdwr-inline-mode}}" />
+        <set-variable name="rdwrInlineSecretHeaderCfg" value="{{rdwr-inline-proof-header}}" />
+        <set-variable name="rdwrInlineProofAddressesCfg" value="{{rdwr-inline-proof-addresses}}" />
         <!-- Inline literal fallbacks (commented by default):
         <set-variable name="trustedInlineSourcesCfg" value="" />
         <set-variable name="inlineHeadersEnabledStr" value="false" />
@@ -126,12 +149,34 @@
              anything that can end a request must stay after it. README 3d, "Different front ends on
              one instance". Which SecurePath application an API uses comes from the application map
              instead, keyed by API id or hostname. -->
+        <!-- These variables are written by the API's own policy: a value that is not text is not used
+             and is reported, and never throws here (which would fail the request). -->
         <set-variable name="rdwrTrueHostHeaderName" value="@{
-          string ov = ((string)context.Variables.GetValueOrDefault("rdwrTrueHostHeaderOverride", "") ?? "").Trim();
+          object ovo;
+          context.Variables.TryGetValue("rdwrTrueHostHeaderOverride", out ovo);
+          string ov = ((ovo as string) ?? "").Trim();
           return ov.Length > 0 ? ov : "{{rdwr-true-host-header}}";
         }" />
+        <choose>
+          <when condition="@{
+            object a; object b;
+            context.Variables.TryGetValue("rdwrTrueHostHeaderOverride", out a);
+            context.Variables.TryGetValue("rdwrHostFallbackOverride", out b);
+            return (a != null && !(a is string)) || (b != null && !(b is string));
+          }">
+            <trace source="securepath" severity="error">
+              <message>@{
+                object a;
+                context.Variables.TryGetValue("rdwrTrueHostHeaderOverride", out a);
+                return ((a != null && !(a is string)) ? "rdwrTrueHostHeaderOverride" : "rdwrHostFallbackOverride") + " is set to a value that is not text: not used (README 3d, Different front ends on one instance)";
+              }</message>
+            </trace>
+          </when>
+        </choose>
         <set-variable name="rdwrHostFallback" value="@{
-          string ov = ((string)context.Variables.GetValueOrDefault("rdwrHostFallbackOverride", "") ?? "").Trim();
+          object ovo;
+          context.Variables.TryGetValue("rdwrHostFallbackOverride", out ovo);
+          string ov = ((ovo as string) ?? "").Trim();
           return ov.Length > 0 ? ov : "{{rdwr-host-fallback}}";
         }" />
         <set-variable name="rdwrHostResolved" value="@{
@@ -254,7 +299,7 @@
             // an entry must be an object with the right value types; anything else is an invalid map
             if (hit.Type != JTokenType.Object) { return "##INVALID##"; }
             JObject e = (JObject)hit;
-            foreach (string f in new[] { "app_id", "api_key", "endpoint", "base_path", "bot_block_statuses" }) {
+            foreach (string f in new[] { "app_id", "api_key", "endpoint", "base_path", "bot_block_statuses", "inline" }) {
               if (e[f] != null && e[f].Type != JTokenType.String) { return "##INVALID##"; }
             }
             // a port that is not a TCP port would make the inspection URL invalid, and an invalid URL
@@ -374,6 +419,72 @@
           </when>
         </choose>
 
+        <!-- ====== Inline mode for this request ======
+             The most specific setting that names a mode wins: this API's own rdwrInlineModeOverride
+             variable, then the application-map entry's "inline", then the rdwr-inline-mode Named
+             Value. "off" is a mode for an API or an application (no inline handling there, the older
+             settings included); for the Named Value it is a disable token like the others, and the
+             two older settings then decide as before. Empty = no mode. -->
+        <set-variable name="rdwrInlineMode" value="@{
+          // the variable is written by the API's own policy: a value that is not text is not a mode
+          // (and must never throw here, which would fail the request)
+          object ovo;
+          context.Variables.TryGetValue("rdwrInlineModeOverride", out ovo);
+          string ov = ((ovo as string) ?? "").Trim().ToLower();
+          if (ov == "strip" || ov == "bypass" || ov == "off") { return ov; }
+          string sel = (string)context.Variables.GetValueOrDefault("rdwrAppSelection", "") ?? "";
+          if (sel.Length > 0 && sel != "##INVALID##")
+          {
+            try
+            {
+              string en = ((string)JObject.Parse(sel)["inline"] ?? "").Trim().ToLower();
+              if (en == "strip" || en == "bypass" || en == "off") { return en; }
+            }
+            catch { }
+          }
+          string nv = ((string)context.Variables.GetValueOrDefault("rdwrInlineModeNv", "") ?? "").Trim().ToLower();
+          return (nv == "strip" || nv == "bypass") ? nv : "";
+        }" />
+        <!-- A value that is neither a mode nor a disable token is not used, and is reported. -->
+        <set-variable name="rdwrInlineModeProblem" value="@{
+          var bad = new System.Collections.Generic.List<string>();
+          object ovo;
+          context.Variables.TryGetValue("rdwrInlineModeOverride", out ovo);
+          string ov = ((ovo as string) ?? "").Trim();
+          if (ovo != null && !(ovo is string)) { bad.Add("the rdwrInlineModeOverride variable (its value is not text)"); }
+          string en = "";
+          string sel = (string)context.Variables.GetValueOrDefault("rdwrAppSelection", "") ?? "";
+          if (sel.Length > 0 && sel != "##INVALID##") { try { en = ((string)JObject.Parse(sel)["inline"] ?? "").Trim(); } catch { } }
+          string nv = ((string)context.Variables.GetValueOrDefault("rdwrInlineModeNv", "") ?? "").Trim();
+          string[] names = new[] { "the rdwrInlineModeOverride variable", "the application-map entry's inline", "rdwr-inline-mode" };
+          string[] vals = new[] { ov, en, nv };
+          for (int i = 0; i < 3; i++)
+          {
+            string l = vals[i].ToLower();
+            bool known = l == "strip" || l == "bypass" || l == "" || l == "-" || l == "disabled" || l == "off" || l == "false" || l == "none" || l == "~" || l == "##disabled##";
+            if (!known) { bad.Add(names[i] + " '" + (vals[i].Length > 40 ? vals[i].Substring(0, 40) : vals[i]) + "'"); }
+          }
+          return string.Join("; ", bad);
+        }" />
+        <choose>
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables["rdwrInlineModeProblem"]))">
+            <trace source="securepath" severity="error">
+              <message>@((string)context.Variables["rdwrInlineModeProblem"] + " is not strip, bypass or off: not used (README Step 4, Radware Cloud WAF in front of the gateway)")</message>
+            </trace>
+          </when>
+        </choose>
+
+        <!-- The address list this request is checked against: the proof list when a mode applies to
+             it, the older list when none does, no list when its mode is off. One request reads exactly
+             one of the two, so setting the proof list for a mode never switches on the older "every
+             request from these addresses skips SecurePath" rule anywhere. -->
+        <set-variable name="rdwrInlineListInUse" value="@{
+          string mode = (string)context.Variables["rdwrInlineMode"];
+          if (mode == "strip" || mode == "bypass") { return (string)context.Variables.GetValueOrDefault("rdwrInlineProofAddressesCfg", ""); }
+          if (mode == "off") { return ""; }
+          return (string)context.Variables.GetValueOrDefault("trustedInlineSourcesCfg", "");
+        }" />
+
         <!-- ====== Parse 'inline headers enabled' safely ====== -->
         <set-variable name="inlineHeadersEnabled" value="@{
           var s = (string)context.Variables.GetValueOrDefault("inlineHeadersEnabledStr", "");
@@ -396,11 +507,12 @@
           return h1 && h2 && h3 && h4 && h5;
         }" />
 
-        <!-- ====== IP allow-list (CIDR + single IPs). True if client socket IP matches. ====== -->
+        <!-- ====== IP allow-list (CIDR + single IPs). True if client socket IP matches. ======
+             The list is rdwrInlineListInUse (above): the proof list or the older list. -->
         <set-variable name="isTrustedInlineSource" value="@{
           try
           {
-            string rawCfg = (string)context.Variables.GetValueOrDefault("trustedInlineSourcesCfg", "");
+            string rawCfg = (string)context.Variables.GetValueOrDefault("rdwrInlineListInUse", "");
             string cfg = (rawCfg ?? "").Trim();
             string lc = cfg.ToLower();
             // treat common tokens as DISABLED
@@ -486,7 +598,7 @@
 
         <!-- Track whether an IP list is configured at all -->
         <set-variable name="ipListConfigured" value="@{
-          string rawCfg = (string)context.Variables.GetValueOrDefault("trustedInlineSourcesCfg", "");
+          string rawCfg = (string)context.Variables.GetValueOrDefault("rdwrInlineListInUse", "");
           string cfg = (rawCfg ?? "").Trim();
           string lc = cfg.ToLower();
           if (string.IsNullOrWhiteSpace(cfg) || lc == "-" || lc == "disabled" || lc == "off" || lc == "false" || lc == "none" || lc == "~" || lc == "##disabled##")
@@ -499,13 +611,100 @@
           }
         }" />
 
+        <!-- ====== The secret header: a header and value only Radware Cloud WAF's traffic carries ======
+             rdwr-inline-proof-header is "Header-Name: value", or "Header-Name: value, next-value":
+             up to five values, any of which proves the request, so the value can be changed at Cloud
+             WAF without a moment in which no request is proven. Configured = anything but a disable
+             token. A setting that cannot be read (no name, no value, an empty value in the list)
+             counts as configured and is never matched, so it can only make the proof stricter; it is
+             reported. -->
+        <set-variable name="rdwrInlineSecretConfigured" value="@{
+          string lc = ((string)context.Variables.GetValueOrDefault("rdwrInlineSecretHeaderCfg", "") ?? "").Trim().ToLower();
+          return !(lc == "" || lc == "-" || lc == "disabled" || lc == "off" || lc == "false" || lc == "none" || lc == "~" || lc == "##disabled##");
+        }" />
+        <set-variable name="rdwrInlineSecretProblem" value="@{
+          if (!(bool)context.Variables["rdwrInlineSecretConfigured"]) { return false; }
+          string raw = ((string)context.Variables.GetValueOrDefault("rdwrInlineSecretHeaderCfg", "") ?? "").Trim();
+          int c = raw.IndexOf(':');
+          if (c <= 0) { return true; }
+          string name = raw.Substring(0, c).Trim();
+          string val = raw.Substring(c + 1).Trim();
+          if (name.Length == 0 || name.Length > 64 || val.Length == 0) { return true; }
+          foreach (char ch in name)
+          {
+            if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_')) { return true; }
+          }
+          foreach (char ch in val) { if (ch < (char)0x20 || ch == (char)0x7f) { return true; } }
+          int n = 0;
+          foreach (string part in val.Split(','))
+          {
+            if (part.Trim().Length == 0) { return true; }
+            n++;
+          }
+          return n > 5;
+        }" />
+        <set-variable name="rdwrInlineSecretMatch" value="@{
+          if (!(bool)context.Variables["rdwrInlineSecretConfigured"] || (bool)context.Variables["rdwrInlineSecretProblem"]) { return false; }
+          string raw = ((string)context.Variables["rdwrInlineSecretHeaderCfg"]).Trim();
+          int c = raw.IndexOf(':');
+          string name = raw.Substring(0, c).Trim();
+          // exactly one value in the request: a request that repeats the header is not a match
+          string[] vals = context.Request.Headers.GetValueOrDefault(name, default(string[]));
+          if (vals == null || vals.Length != 1) { return false; }
+          string given = (vals[0] ?? "").Trim();
+          bool hit = false;
+          foreach (string part in raw.Substring(c + 1).Split(','))
+          {
+            string w = part.Trim();
+            if (given.Length != w.Length) { continue; }
+            int diff = 0;
+            for (int i = 0; i < w.Length; i++) { diff |= given[i] ^ w[i]; }
+            if (diff == 0) { hit = true; }
+          }
+          return hit;
+        }" />
+        <!-- The secret header is between the sender and the gateway: it is left out of every copy of
+             the request sent to SecurePath (the backend still receives it). With no usable setting the
+             name is one no request carries; removing an absent header does nothing. -->
+        <set-variable name="rdwrInlineSecretName" value="@{
+          if (!(bool)context.Variables["rdwrInlineSecretConfigured"] || (bool)context.Variables["rdwrInlineSecretProblem"]) { return "X-Rdwr-Inline-Secret-Unset"; }
+          string raw = ((string)context.Variables["rdwrInlineSecretHeaderCfg"]).Trim();
+          return raw.Substring(0, raw.IndexOf(':')).Trim();
+        }" />
+        <choose>
+          <when condition="@((bool)context.Variables["rdwrInlineSecretProblem"])">
+            <trace source="securepath" severity="error">
+              <message>rdwr-inline-proof-header is not 'Header-Name: value' (one header name, a colon, then one value or up to five separated by commas): no request can match it, so no request is treated as coming from Radware Cloud WAF (README Step 4, Radware Cloud WAF in front of the gateway)</message>
+            </trace>
+          </when>
+        </choose>
+
+        <!-- Which proof showed that this request comes from Radware Cloud WAF; empty = none. Every
+             proof that is configured must match. -->
+        <set-variable name="rdwrInlineProof" value="@{
+          bool ipCfg = (bool)context.Variables["ipListConfigured"];
+          bool ipOk = (bool)context.Variables["isTrustedInlineSource"];
+          bool secCfg = (bool)context.Variables["rdwrInlineSecretConfigured"];
+          bool secOk = (bool)context.Variables["rdwrInlineSecretMatch"];
+          bool ok = (ipCfg || secCfg) && (!ipCfg || ipOk) && (!secCfg || secOk);
+          if (!ok) { return ""; }
+          return ipCfg && secCfg ? "rdwr-inline-proof-addresses + rdwr-inline-proof-header" : (ipCfg ? "rdwr-inline-proof-addresses" : "rdwr-inline-proof-header");
+        }" />
+
         <!-- ====== Combine logic for inline bypass ====== -->
         <set-variable name="isInlineBypass" value="@{
           bool headersEnabled = (bool)context.Variables.GetValueOrDefault("inlineHeadersEnabled", false);
           bool ipConfigured   = (bool)context.Variables.GetValueOrDefault("ipListConfigured", false);
           bool ipMatch        = (bool)context.Variables.GetValueOrDefault("isTrustedInlineSource", false);
           bool headersMatch   = (bool)context.Variables.GetValueOrDefault("hasInlineHeaderSignature", false);
+          string mode  = (string)context.Variables["rdwrInlineMode"];
+          string proof = (string)context.Variables["rdwrInlineProof"];
 
+          // rdwr-inline-mode: bypass needs the five headers AND a proof; strip and off never bypass
+          if (mode == "bypass") { return headersMatch && proof.Length > 0; }
+          if (mode == "strip" || mode == "off") { return false; }
+
+          // no mode: the two older settings decide, as before
           if (headersEnabled && ipConfigured)
           {
             return headersMatch && ipMatch;
@@ -525,19 +724,69 @@
           }
         }" />
 
-        <!-- If inline bypass criteria met, set bypass before any reserved-header enforcement -->
+        <!-- Either mode, on a request that carries all five forwarding headers: when the request is
+             inspected, the headers are left out of what SecurePath receives and their two reserved
+             names are not a violation. Their values are used (the client address) only when the
+             request is also proven to come from Cloud WAF. In bypass mode this is what happens to a
+             request that carries the headers and is NOT proven: it is inspected, never refused. -->
+        <set-variable name="rdwrInlineStrip" value="@{
+          string mode = (string)context.Variables["rdwrInlineMode"];
+          return (mode == "strip" || mode == "bypass") && (bool)context.Variables["hasInlineHeaderSignature"];
+        }" />
+        <set-variable name="rdwrInlineTrusted" value="@((bool)context.Variables["rdwrInlineStrip"] && ((string)context.Variables["rdwrInlineProof"]).Length > 0)" />
+
+        <!-- If inline bypass criteria met, set bypass before any reserved-header enforcement. Every
+             inline decision is written to the trace. -->
         <choose>
           <when condition="@(context.Variables.GetValueOrDefault("isInlineBypass", false))">
             <set-variable name="shouldBypassRadware" value="@(true)" />
+            <trace source="securepath" severity="information">
+              <message>@{
+                string mode = (string)context.Variables["rdwrInlineMode"];
+                if (mode == "bypass") { return "not inspected: inline bypass (inline mode bypass; the request carries the Radware Cloud WAF forwarding headers; proof: " + (string)context.Variables["rdwrInlineProof"] + ")"; }
+                return "not inspected: inline bypass (rdwr-inline-trusted-sources" + ((bool)context.Variables["inlineHeadersEnabled"] ? " with rdwr-inline-headers-enabled" : "") + ")";
+              }</message>
+            </trace>
+          </when>
+          <when condition="@((bool)context.Variables["rdwrInlineStrip"] && ((string)context.Variables["rdwrInlineMode"]) == "bypass" && !(bool)context.Variables["ipListConfigured"] && !(bool)context.Variables["rdwrInlineSecretConfigured"])">
+            <trace source="securepath" severity="error">
+              <message>the inline mode is bypass but neither rdwr-inline-proof-addresses nor rdwr-inline-proof-header is set: no request is bypassed. This request carries the Radware Cloud WAF forwarding headers and is inspected like any other request; the headers are not sent to SecurePath (inline mode bypass) and their values are not used (README Step 4, Radware Cloud WAF in front of the gateway)</message>
+            </trace>
+          </when>
+          <when condition="@((bool)context.Variables["rdwrInlineStrip"] && ((string)context.Variables["rdwrInlineMode"]) == "bypass")">
+            <trace source="securepath" severity="information">
+              <message>@{
+                var failed = new System.Collections.Generic.List<string>();
+                if ((bool)context.Variables["ipListConfigured"] && !(bool)context.Variables["isTrustedInlineSource"]) { failed.Add("the address it arrives from (" + (context.Request.IpAddress ?? "") + ") is not in rdwr-inline-proof-addresses"); }
+                if ((bool)context.Variables["rdwrInlineSecretConfigured"] && !(bool)context.Variables["rdwrInlineSecretMatch"]) { failed.Add("it does not carry the header and value of rdwr-inline-proof-header"); }
+                return "this request carries the Radware Cloud WAF forwarding headers but is not proven to come from it (" + string.Join("; ", failed) + "): not bypassed, inspected like any other request; the headers are not sent to SecurePath (inline mode bypass) and their values are not used";
+              }</message>
+            </trace>
+          </when>
+          <when condition="@((bool)context.Variables["rdwrInlineStrip"])">
+            <trace source="securepath" severity="information">
+              <message>@{
+                string how;
+                if ((bool)context.Variables["rdwrInlineTrusted"]) { how = "the client address is taken from x-rdwr-ip (proof: " + (string)context.Variables["rdwrInlineProof"] + ")"; }
+                else if ((bool)context.Variables["ipListConfigured"] || (bool)context.Variables["rdwrInlineSecretConfigured"]) { how = "their values are not used (the request is not proven to come from Radware Cloud WAF)"; }
+                else { how = "their values are not used (no proof is configured)"; }
+                return "the Radware Cloud WAF forwarding headers of this request are not sent to SecurePath (inline mode strip); " + how;
+              }</message>
+            </trace>
           </when>
         </choose>
 
         <!-- ====== Reserved-header enforcement (enumerated; plugin-info allowed) ====== -->
         <set-variable name="hasReservedHeader" value="@{
           bool found = false;
+          // an inline mode (strip or bypass), on a request that carries all five Cloud WAF forwarding headers:
+          // the two of them that are reserved names are not a violation (they are left out of what
+          // SecurePath receives). Every other reserved name still is.
+          bool strip = (bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false);
           foreach (var kv in context.Request.Headers)
           {
             var k = (kv.Key ?? "").ToLower();
+            if (strip && (k == "x-rdwr-ip" || k == "x-rdwr-app-id")) { continue; }
             if (k == "x-rdwr-app-id" || k == "x-rdwr-api-key" || k == "x-rdwr-connector-ip" ||
                 k == "x-rdwr-partial-body" || k == "x-rdwr-cdn-ip" || k == "x-rdwr-ip" ||
                 k == "x-rdwr-request-host-b60f5e78-5bc7-4441-aac8-20b1e7cddda5")
@@ -551,6 +800,15 @@
         <!-- Skip this block when inline bypass is active -->
         <choose>
           <when condition="@(!context.Variables.GetValueOrDefault("isInlineBypass", false) && context.Variables.GetValueOrDefault("hasReservedHeader", false))">
+            <trace source="securepath" severity="information">
+              <message>@{
+                string mode = (string)context.Variables["rdwrInlineMode"];
+                string why = "";
+                if ((mode == "strip" || mode == "bypass") && !(bool)context.Variables["hasInlineHeaderSignature"]) { why = " (inline mode " + mode + " applies only to a request that carries all five Radware Cloud WAF forwarding headers; this one does not)"; }
+                else if (mode == "strip" || mode == "bypass") { why = " (a reserved header other than the Radware Cloud WAF forwarding headers)"; }
+                return "request refused with 403: it carries a header name reserved for the connector" + why;
+              }</message>
+            </trace>
             <return-response>
               <set-status code="403" reason="Forbidden" />
               <set-header name="Content-Type" exists-action="override">
@@ -639,6 +897,24 @@
                 <value>@(context.Request.Headers.GetValueOrDefault("X-Forwarded-For", ""))</value>
               </set-header>
               <set-header name="Expect" exists-action="delete" />
+              <!-- inline mode strip or bypass: the Radware Cloud WAF forwarding headers are left out of this
+                   copy (an absent header is never added; without a mode a present one is copied as before) -->
+              <set-header name="@((string)context.Variables["rdwrInlineSecretName"])" exists-action="delete" />
+              <set-header name="X-Rdwr-Ip" exists-action="@(((bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false) || !context.Request.Headers.ContainsKey("X-Rdwr-Ip")) ? "delete" : "skip")">
+                <value>@(context.Request.Headers.GetValueOrDefault("X-Rdwr-Ip", ""))</value>
+              </set-header>
+              <set-header name="X-Rdwr-Port" exists-action="@(((bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false) || !context.Request.Headers.ContainsKey("X-Rdwr-Port")) ? "delete" : "skip")">
+                <value>@(context.Request.Headers.GetValueOrDefault("X-Rdwr-Port", ""))</value>
+              </set-header>
+              <set-header name="X-Rdwr-Port-Mm" exists-action="@(((bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false) || !context.Request.Headers.ContainsKey("X-Rdwr-Port-Mm")) ? "delete" : "skip")">
+                <value>@(context.Request.Headers.GetValueOrDefault("X-Rdwr-Port-Mm", ""))</value>
+              </set-header>
+              <set-header name="X-Rdwr-Port-Mm-Orig-Fe-Port" exists-action="@(((bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false) || !context.Request.Headers.ContainsKey("X-Rdwr-Port-Mm-Orig-Fe-Port")) ? "delete" : "skip")">
+                <value>@(context.Request.Headers.GetValueOrDefault("X-Rdwr-Port-Mm-Orig-Fe-Port", ""))</value>
+              </set-header>
+              <set-header name="X-Rdwr-App-Id" exists-action="@(((bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false) || !context.Request.Headers.ContainsKey("X-Rdwr-App-Id")) ? "delete" : "skip")">
+                <value>@(context.Request.Headers.GetValueOrDefault("X-Rdwr-App-Id", ""))</value>
+              </set-header>
             </send-request>
             <choose>
               <when condition="@(context.Variables.ContainsKey("rdwrBmPathResponse") && context.Variables["rdwrBmPathResponse"] != null)">
@@ -911,6 +1187,23 @@
                     <set-variable name="clientIpToSend" value="@(((string)context.Variables["ipFromConfiguredHeader"]).Split(',')[0].Trim())" />
                   </when>
                 </choose>
+              </when>
+            </choose>
+
+            <!-- An inspected request proven to come from Radware Cloud WAF (inline mode strip, with a proof):
+                 x-rdwr-ip is the client address Cloud WAF received the request from, and it wins over
+                 the setting above. Used only when it is exactly one valid address. -->
+            <choose>
+              <when condition="@((bool)context.Variables.GetValueOrDefault("rdwrInlineTrusted", false))">
+                <set-variable name="clientIpToSend" value="@{
+                  string[] vals = context.Request.Headers.GetValueOrDefault("X-Rdwr-Ip", default(string[]));
+                  System.Net.IPAddress parsed;
+                  if (vals != null && vals.Length == 1 && (vals[0] ?? "").IndexOf(',') < 0 && System.Net.IPAddress.TryParse((vals[0] ?? "").Trim(), out parsed))
+                  {
+                    return (vals[0] ?? "").Trim();
+                  }
+                  return (string)context.Variables["clientIpToSend"];
+                }" />
               </when>
             </choose>
 
@@ -1267,6 +1560,21 @@
                   <!-- Transfer-Encoding is not set or deleted here: API Management restricts that header
                        from policy modification (a set-header on it is rejected at save) and frames the
                        inspection call's body itself. -->
+                  <!-- inline mode strip or bypass: the Radware Cloud WAF forwarding headers are left out of this
+                       copy (an absent header is never added; without a mode a present one is copied as before) -->
+                  <set-header name="@((string)context.Variables["rdwrInlineSecretName"])" exists-action="delete" />
+                  <set-header name="X-Rdwr-Ip" exists-action="@(((bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false) || !context.Request.Headers.ContainsKey("X-Rdwr-Ip")) ? "delete" : "skip")">
+                    <value>@(context.Request.Headers.GetValueOrDefault("X-Rdwr-Ip", ""))</value>
+                  </set-header>
+                  <set-header name="X-Rdwr-Port" exists-action="@(((bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false) || !context.Request.Headers.ContainsKey("X-Rdwr-Port")) ? "delete" : "skip")">
+                    <value>@(context.Request.Headers.GetValueOrDefault("X-Rdwr-Port", ""))</value>
+                  </set-header>
+                  <set-header name="X-Rdwr-Port-Mm" exists-action="@(((bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false) || !context.Request.Headers.ContainsKey("X-Rdwr-Port-Mm")) ? "delete" : "skip")">
+                    <value>@(context.Request.Headers.GetValueOrDefault("X-Rdwr-Port-Mm", ""))</value>
+                  </set-header>
+                  <set-header name="X-Rdwr-Port-Mm-Orig-Fe-Port" exists-action="@(((bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false) || !context.Request.Headers.ContainsKey("X-Rdwr-Port-Mm-Orig-Fe-Port")) ? "delete" : "skip")">
+                    <value>@(context.Request.Headers.GetValueOrDefault("X-Rdwr-Port-Mm-Orig-Fe-Port", ""))</value>
+                  </set-header>
                   <set-header name="X-Rdwr-App-Id" exists-action="override">
                     <value>@((string)context.Variables["rdwrAppId"])</value>
                   </set-header>
@@ -1514,6 +1822,21 @@
                   <!-- Transfer-Encoding is not set or deleted here: API Management restricts that header
                        from policy modification (a set-header on it is rejected at save) and frames the
                        inspection call's body itself. -->
+                  <!-- inline mode strip or bypass: the Radware Cloud WAF forwarding headers are left out of this
+                       copy (an absent header is never added; without a mode a present one is copied as before) -->
+                  <set-header name="@((string)context.Variables["rdwrInlineSecretName"])" exists-action="delete" />
+                  <set-header name="X-Rdwr-Ip" exists-action="@(((bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false) || !context.Request.Headers.ContainsKey("X-Rdwr-Ip")) ? "delete" : "skip")">
+                    <value>@(context.Request.Headers.GetValueOrDefault("X-Rdwr-Ip", ""))</value>
+                  </set-header>
+                  <set-header name="X-Rdwr-Port" exists-action="@(((bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false) || !context.Request.Headers.ContainsKey("X-Rdwr-Port")) ? "delete" : "skip")">
+                    <value>@(context.Request.Headers.GetValueOrDefault("X-Rdwr-Port", ""))</value>
+                  </set-header>
+                  <set-header name="X-Rdwr-Port-Mm" exists-action="@(((bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false) || !context.Request.Headers.ContainsKey("X-Rdwr-Port-Mm")) ? "delete" : "skip")">
+                    <value>@(context.Request.Headers.GetValueOrDefault("X-Rdwr-Port-Mm", ""))</value>
+                  </set-header>
+                  <set-header name="X-Rdwr-Port-Mm-Orig-Fe-Port" exists-action="@(((bool)context.Variables.GetValueOrDefault("rdwrInlineStrip", false) || !context.Request.Headers.ContainsKey("X-Rdwr-Port-Mm-Orig-Fe-Port")) ? "delete" : "skip")">
+                    <value>@(context.Request.Headers.GetValueOrDefault("X-Rdwr-Port-Mm-Orig-Fe-Port", ""))</value>
+                  </set-header>
                   <set-header name="X-Rdwr-App-Id" exists-action="override">
                     <value>@((string)context.Variables["rdwrAppId"])</value>
                   </set-header>
@@ -2086,7 +2409,7 @@
                                 <value>log</value>
                               </set-header>
                               <set-header name="x-rdwr-plugin-info" exists-action="override">
-                                <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
+                                <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.6.0"))</value>
                               </set-header>
                               <set-header name="x-rdwr-app-id" exists-action="override">
                                 <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -2196,7 +2519,7 @@
                                 <value>log</value>
                               </set-header>
                               <set-header name="x-rdwr-plugin-info" exists-action="override">
-                                <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
+                                <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.6.0"))</value>
                               </set-header>
                               <set-header name="x-rdwr-app-id" exists-action="override">
                                 <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -2331,7 +2654,7 @@
                                 <value>log</value>
                               </set-header>
                               <set-header name="x-rdwr-plugin-info" exists-action="override">
-                                <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
+                                <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.6.0"))</value>
                               </set-header>
                               <set-header name="x-rdwr-app-id" exists-action="override">
                                 <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -2441,7 +2764,7 @@
                             <value>log</value>
                           </set-header>
                           <set-header name="x-rdwr-plugin-info" exists-action="override">
-                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
+                            <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.6.0"))</value>
                           </set-header>
                           <set-header name="x-rdwr-app-id" exists-action="override">
                             <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -2590,7 +2913,7 @@
                                 <value>log</value>
                               </set-header>
                               <set-header name="x-rdwr-plugin-info" exists-action="override">
-                                <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
+                                <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.6.0"))</value>
                               </set-header>
                               <set-header name="x-rdwr-app-id" exists-action="override">
                                 <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -2885,7 +3208,7 @@
                 <value>log</value>
               </set-header>
               <set-header name="x-rdwr-plugin-info" exists-action="override">
-                <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
+                <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.6.0"))</value>
               </set-header>
               <set-header name="x-rdwr-app-id" exists-action="override">
                 <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -3100,7 +3423,7 @@
                     <value>log</value>
                   </set-header>
                   <set-header name="x-rdwr-plugin-info" exists-action="override">
-                    <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
+                    <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.6.0"))</value>
                   </set-header>
                   <set-header name="x-rdwr-app-id" exists-action="override">
                     <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>
@@ -3213,7 +3536,7 @@
                 <value>log</value>
               </set-header>
               <set-header name="x-rdwr-plugin-info" exists-action="override">
-                <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.5.1"))</value>
+                <value>@((string)context.Variables.GetValueOrDefault("pluginInfo", "700-v1.6.0"))</value>
               </set-header>
               <set-header name="x-rdwr-app-id" exists-action="override">
                 <value>@((string)context.Variables.GetValueOrDefault("rdwrAppId", ""))</value>

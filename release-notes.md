@@ -1,5 +1,146 @@
 # Release Notes — Radware SecurePath Connector for Azure API Management
 
+## v1.6.0 (2026-11-20)
+
+Adds settings for traffic that reaches the gateway through Radware Cloud WAF (inline), and the
+identifier `700-v1.6.0`. **With the new settings left at their default, nothing changes**: what the
+connector sends to SecurePath, to your backend and to your clients is the same as with v1.5.1, and
+the two existing inline settings behave as before. Three Named Values are new and must exist before
+the fragments are registered; "Upgrading from v1.5.1 or v1.5.0" below has the steps.
+
+### Requests that come through Radware Cloud WAF: `rdwr-inline-mode`
+
+- **`rdwr-inline-mode` (new Named Value)** says what the connector does with a request that carries
+  the five forwarding headers Radware Cloud WAF adds (`X-RDWR-IP`, `X-RDWR-PORT`, `X-RDWR-PORT-MM`,
+  `X-RDWR-PORT-MM-ORIG-FE-PORT`, `X-RDWR-APP-ID`). Until now such a request was refused with `403`,
+  because two of those names are reserved for the connector, unless your own policy removed the
+  headers first. `strip`: the request is inspected by SecurePath like any other, with the five
+  headers left out of what SecurePath receives. `bypass`: the request is not sent to SecurePath when
+  it is proven to come from Cloud WAF. `##DISABLED##` (the default): as before.
+- **The proof (two new Named Values).** The five headers never prove anything by themselves.
+  `rdwr-inline-proof-addresses` lists the addresses Cloud WAF connects to the gateway from;
+  `rdwr-inline-proof-header` holds a header and value that only Cloud WAF's traffic carries, for a
+  gateway behind Front Door, Application Gateway or a CDN, where every request arrives from the
+  proxy's address. Every proof that is set must match. A proven request skips SecurePath in `bypass`,
+  and in `strip` SecurePath is told the client address Cloud WAF saw (`X-RDWR-IP`).
+- **A request that carries the five headers and is not proven is inspected, not refused.** A Cloud
+  WAF address that is not in the list yet, or a header value that is being changed, costs an
+  inspection, never a `403`. The proof header takes up to five values, so its value can be changed
+  without a gap.
+- **Per application, per API, per operation, per request.** The mode can be set in an
+  application-map entry (`'inline': 'strip'`), or by a policy with one `set-variable` line
+  (`rdwrInlineModeOverride`) placed before `<base />` in an API's or an operation's policy, as a
+  fixed value or as an expression. `off` there turns inline handling off for that API.
+- **Your backend receives the request unchanged**, Cloud WAF's headers included. The proof header is
+  not passed on to SecurePath.
+- **Every decision is in the trace**: inspected with the headers left out, not sent to SecurePath
+  and by which proof, not proven and why, or refused because the request carries only some of the
+  five headers. The existing inline bypass and the `403` for a reserved header now write a line too.
+- **`rdwr-inline-trusted-sources` and `rdwr-inline-headers-enabled` are unchanged** and are a
+  separate mechanism: a request a mode applies to never reads them, and a request no mode applies to
+  never reads the proofs. README Step 4 gives the mode that replaces each combination.
+
+### A per-API setting whose value is not text is not used
+
+The variables an API's own policy may set for the connector (`rdwrTrueHostHeaderOverride`,
+`rdwrHostFallbackOverride` and the new `rdwrInlineModeOverride`) are read as text only: a value of
+another type, for example an expression that returns `true`, is not used, the instance's setting
+applies, the request is served, and the trace names the variable.
+
+### Install check, tools and Bicep
+
+- **Install check:** `L18` reports an inline setting that cannot work as written: a value that is not
+  a mode, a `bypass` with no proof, a proof header that is not `Header-Name: value` or whose value is
+  short, a proof address that is not an address, a per-API setting placed after the connector has
+  run, and an older inline setting that is no longer read because a mode is set. `L07` names the
+  three new Named Values when they are missing. With `--operations`, a per-operation setting is
+  checked like a per-API one.
+- **`tools/securepath-apim-trace.sh`** removes the proof header's value from the trace file it saves,
+  wherever the trace repeats it.
+- **Bicep:** three parameters, `inlineMode`, `inlineProofHeader` and `inlineProofAddresses`
+  (`deploy/README.md`).
+
+### Documentation
+
+README Step 4, *Radware Cloud WAF in front of the gateway*, is rewritten around these settings, with
+a worked example for each case: the whole instance, with either proof, one API, one operation, one
+application, per request, changing the proof header's value, and turning it off. The policy lines
+published with the v1.5.1 package of 2026-11-08, which remove Cloud WAF's headers in your own policy,
+remain valid and are kept there for a backend that must not receive those headers.
+
+### Named Values and version
+
+Three new Named Values, 27 in total: `rdwr-inline-mode`, `rdwr-inline-proof-header` and
+`rdwr-inline-proof-addresses`, each `##DISABLED##` by default. `x-rdwr-plugin-info` becomes
+`700-v1.6.0` (Named Value `plugin-version-info`). The policy document is now
+`rdwr-azureapim-securepath-connector-v1.6.xml`.
+
+### Upgrading from v1.5.1 or v1.5.0
+
+Run these from the directory that holds this package's `fragments/` folder.
+
+1. Create the three Named Values. A fragment that refers to a Named Value that does not exist is
+   refused, so this comes first. The block creates only what is missing.
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+HAVE=$(az apim nv list -g "$RG" --service-name "$APIM" --query "[].name" -o tsv)
+RDWR_OK=1
+for n in rdwr-inline-mode rdwr-inline-proof-header rdwr-inline-proof-addresses; do
+  if echo "$HAVE" | grep -qx "$n"; then echo "exists, left as it is: $n"; continue; fi
+  az apim nv create -g "$RG" --service-name "$APIM" --named-value-id "$n" --display-name "$n" \
+     --value "##DISABLED##" -o none && echo "created $n" || { echo "FAILED: $n"; RDWR_OK=0; }
+done
+[ "$RDWR_OK" = 1 ] && echo "three Named Values in place"
+```
+
+2. Forms 1 and 2: register `securepath-inbound`, `securepath-outbound` and `securepath-onerror`
+   again. `securepath-app-map` is unchanged and stays as it is, which matters if the sync tool writes
+   it. Form 3: replace the document with `rdwr-azureapim-securepath-connector-v1.6.xml` (README Step 4,
+   Form 3).
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+SUB=$(az account show --query id -o tsv)
+BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ApiManagement/service/$APIM"
+RDWR_OK=1
+for F in inbound outbound onerror; do
+  jq -Rs "{properties:{format:\"rawxml\",description:\"Radware SecurePath $F\",value:.}}" \
+     fragments/securepath-$F.fragment.xml > rdwr-frag-$F.json &&
+  az rest --method PUT --uri "$BASE/policyFragments/securepath-$F?api-version=2024-05-01" \
+          --headers "Content-Type=application/json" --body @rdwr-frag-$F.json -o none > /dev/null &&
+  echo "registered securepath-$F" || { echo "FAILED: securepath-$F"; RDWR_OK=0; break; }
+done
+[ "$RDWR_OK" = 1 ] && echo "three fragments registered"
+```
+
+3. Set the identifier the connector reports:
+
+```bash
+RG="your-resource-group"
+APIM="your-apim-instance"
+
+az apim nv update -g "$RG" --service-name "$APIM" --named-value-id plugin-version-info \
+  --value 700-v1.6.0 -o none && echo "plugin-version-info updated"
+```
+
+4. Replace your copy of `tools/`.
+5. Run `python3 tools/securepath-apim-lint.py --live` (README 5e): it reports a fragment that did not
+   register as `L14`, and a missing Named Value as `L07`.
+
+### Upgrading from v1.4.0 or v1.3.x
+
+Follow "Upgrading from v1.4.0" under v1.5.0, or "Upgrading from v1.3.x" under v1.4.0, with this
+release's files. Before registering the fragments, create every Named Value that README 3c reports
+as missing (the three of this release among them); `plugin-version-info` is `700-v1.6.0`, and the
+policy document is `rdwr-azureapim-securepath-connector-v1.6.xml`.
+
+---
+
 ## v1.5.1 (2026-11-04)
 
 ### Package update, 2026-11-08
@@ -920,7 +1061,8 @@ Initial release. Basic inspection call and verdict enforcement.
 
 | Version    | Date       | Status      | Highlights                                                       |
 |------------|------------|-------------|------------------------------------------------------------------|
-| **v1.5.1** | 2026-11-04 | **Current** | Static-file bypass decided on the decoded path, Transaction ID from SecurePath's 403 page, a trace line for a block page without one |
+| **v1.6.0** | 2026-11-20 | **Current** | Settings for traffic that comes through Radware Cloud WAF (`rdwr-inline-mode`: strip or bypass, with a proof by address or by header; per application, API, operation or request), install check `L18` |
+| v1.5.1     | 2026-11-04 | Superseded  | Static-file bypass decided on the decoded path, Transaction ID from SecurePath's 403 page, a trace line for a block page without one |
 | v1.5.0     | 2026-10-04 | Superseded  | Policy passes API Management's current validation, requests API Management answers itself inspected, SecurePath's answer and the response-phase log do not hold a response, unusable configuration reported at once, Bot Manager CAPTCHA path served |
 | v1.4.0     | 2026-09-22 | Superseded  | Several applications on one instance, client-facing hostname, generated map and sync tool, on-error log, custom Bot Manager block responses, install check, trace tool |
 | v1.3.4     | 2026-08-16 | Superseded  | Three install forms, pre-flight checks (documentation and packaging; policy unchanged) |

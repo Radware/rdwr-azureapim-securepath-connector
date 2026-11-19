@@ -2,7 +2,7 @@
 """Render the whole-document install form (README Form 3) from the three
 policy fragments, so the fragments stay the single source.
 
-    python3 tools/build_documents.py            # writes rdwr-azureapim-securepath-connector-v1.5.xml
+    python3 tools/build_documents.py            # writes rdwr-azureapim-securepath-connector-v1.6.xml
     python3 tools/build_documents.py --check    # exit 1 if the document on disk is stale
 
 Text-based on purpose: policy documents are not well-formed XML.
@@ -12,8 +12,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "..")
-VERSION = "1.5"          # minor: names the document
-FULL_VERSION = "1.5.1"   # in its header
+VERSION = "1.6"          # minor: names the document
+FULL_VERSION = "1.6.0"   # in its header
 OUT = os.path.join(ROOT, f"rdwr-azureapim-securepath-connector-v{VERSION}.xml")
 FRAGMENTS = {
     "inbound": "securepath-inbound.fragment.xml",

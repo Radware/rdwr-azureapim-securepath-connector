@@ -57,6 +57,21 @@ param hostFallback string = 'gateway'
 @description('Bot Manager: SecurePath status codes, beyond the standard verdicts, that the connector relays to the client as a Bot Manager block response, for example "429" or "429,418"; "*" for any such status; ##DISABLED## off. Used only when botManagerEnabled is true; a 5xx is never relayed. See README 3e.')
 param customBotBlockStatuses string = '##DISABLED##'
 
+@description('Radware Cloud WAF (inline) in front of the gateway: what to do with a request that carries its five forwarding headers. "strip" = inspect it, leaving the headers out of what SecurePath receives; "bypass" = do not send it to SecurePath when it is proven to come from Cloud WAF; ##DISABLED## = such requests are refused. See README Step 4, "Radware Cloud WAF in front of the gateway".')
+@allowed([
+  '##DISABLED##'
+  'strip'
+  'bypass'
+])
+param inlineMode string = '##DISABLED##'
+
+@secure()
+@description('Proof for inlineMode: a header and value only Radware Cloud WAF traffic carries, as "Header-Name: value". Empty = not used.')
+param inlineProofHeader string = ''
+
+@description('Proof for inlineMode: the addresses Radware Cloud WAF connects to the gateway from, as IPs or CIDR ranges, comma-separated. ##DISABLED## = not used.')
+param inlineProofAddresses string = '##DISABLED##'
+
 @description('Create the API for the Bot Manager CAPTCHA path (/7f7c01e221604f25/), through which the connector serves a challenged visitor the CAPTCHA page from the inspection endpoint. Follows botManagerEnabled unless set. See README Step 4, "The Bot Manager CAPTCHA path".')
 param createCaptchaApi bool = botManagerEnabled
 
@@ -81,7 +96,7 @@ var namedValues = [
   { name: 'rdwr-true-client-ip-header', value: trueClientIpHeader, secret: false }
   { name: 'rdwr-api-base-path', value: apiBasePath, secret: false }
   { name: 'rdwr-bot-manager-enabled', value: botManagerEnabled ? 'true' : 'false', secret: false }
-  { name: 'plugin-version-info', value: '700-v1.5.1', secret: false }
+  { name: 'plugin-version-info', value: '700-v1.6.0', secret: false }
   { name: 'static-extensions-enabled', value: 'true', secret: false }
   { name: 'static-list-of-methods-not-to-inspect', value: 'GET,HEAD', secret: false }
   { name: 'static-list-of-bypassed-extensions', value: 'png,jpg,css,js,jpeg,gif,ico,ttf,svg,woff,woff2,svc,swf,otf,eot,webp,avif', secret: false }
@@ -89,6 +104,9 @@ var namedValues = [
   { name: 'chunked-request-allowed-content-types', value: 'application/json,application/x-www-form-urlencoded,text/plain,application/soap+xml,text/xml,application/xml,xml/text', secret: false }
   { name: 'rdwr-inline-trusted-sources', value: '##DISABLED##', secret: false }
   { name: 'rdwr-inline-headers-enabled', value: 'false', secret: false }
+  { name: 'rdwr-inline-mode', value: inlineMode, secret: false }
+  { name: 'rdwr-inline-proof-header', value: empty(inlineProofHeader) ? '##DISABLED##' : inlineProofHeader, secret: true }
+  { name: 'rdwr-inline-proof-addresses', value: inlineProofAddresses, secret: false }
   { name: 'rdwr-true-host-header', value: trueHostHeader, secret: false }
   { name: 'rdwr-host-fallback', value: hostFallback, secret: false }
   { name: 'rdwr-custom-bot-block-statuses', value: customBotBlockStatuses, secret: false }

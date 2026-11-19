@@ -18,6 +18,7 @@ XML (Named Value references and C# expressions sit inside attribute values).
 Exit codes: 0 clean, 1 findings, 2 could not read.
 """
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -44,8 +45,12 @@ REQUIRED_NAMED_VALUES = (
     "static-inspect-if-query-string-exists", "chunked-request-allowed-content-types",
     "rdwr-inline-trusted-sources", "rdwr-inline-headers-enabled",
     # v1.4.0
-    "rdwr-app-map", "rdwr-true-host-header", "rdwr-host-fallback", "rdwr-custom-bot-block-statuses")
+    "rdwr-app-map", "rdwr-true-host-header", "rdwr-host-fallback", "rdwr-custom-bot-block-statuses",
+    # v1.6.0: the inline mode (Radware Cloud WAF in front of the gateway)
+    "rdwr-inline-mode", "rdwr-inline-proof-header", "rdwr-inline-proof-addresses")
 NEW_IN_140 = {"rdwr-app-map", "rdwr-true-host-header", "rdwr-host-fallback", "rdwr-custom-bot-block-statuses"}
+NEW_IN_160 = {"rdwr-inline-mode", "rdwr-inline-proof-header", "rdwr-inline-proof-addresses"}
+INLINE_MODES = ("strip", "bypass")
 # the fragments shipped next to this tool (package layout: tools/ and fragments/ side by side)
 SHIPPED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fragments")
 SHIPPED_FRAGMENTS = ("securepath-inbound", "securepath-outbound", "securepath-onerror")
@@ -437,6 +442,142 @@ def check_host_settings(nvs: Dict[str, Optional[str]]) -> List[Finding]:
     return out
 
 
+_INLINE_OVERRIDE_RE = re.compile(r'<set-variable\s+name="rdwrInlineModeOverride"\s+value="([^"]*)"', re.I)
+_INLINE_WHERE = "README Step 4, Radware Cloud WAF in front of the gateway"
+
+
+def check_inline_settings(nvs: Dict[str, Optional[str]], app_map, docs) -> List[Finding]:
+    """L18: the inline mode settings (requests that already passed Radware Cloud WAF inline).
+    rdwr-inline-mode is strip or bypass; bypass needs a proof (rdwr-inline-proof-addresses and/or
+    rdwr-inline-proof-header) or it bypasses nothing; the proof header is 'Header-Name: value' and the
+    proof addresses are IPs or CIDR ranges; the older settings are not read where a mode applies;
+    the per-application ("inline" in a map entry) and per-API (rdwrInlineModeOverride) settings
+    take off, strip or bypass, and the per-API one must be set before the connector runs.
+    The secret value is never printed."""
+    out: List[Finding] = []
+    ip_raw = (nvs.get("rdwr-inline-proof-addresses") or "").strip()
+    ip_set = ip_raw.lower() not in DISABLE_TOKENS
+    sec_raw = (nvs.get("rdwr-inline-proof-header") or "").strip()
+    sec_set = sec_raw.lower() not in DISABLE_TOKENS
+    no_proof = ("is bypass but neither rdwr-inline-proof-addresses nor rdwr-inline-proof-header is set: "
+                "no request is bypassed")
+    no_proof_fix = ("set the addresses Radware Cloud WAF connects from (rdwr-inline-proof-addresses) and/or a header "
+                    f"and value only its traffic carries (rdwr-inline-proof-header); {_INLINE_WHERE}")
+
+    mode_raw = (nvs.get("rdwr-inline-mode") or "").strip()
+    mode = mode_raw.lower()
+    if mode in DISABLE_TOKENS:
+        mode = ""
+    elif mode not in INLINE_MODES:
+        out.append(Finding("L18", "named-values", None,
+                           f"rdwr-inline-mode '{mode_raw}' is not strip or bypass; the connector ignores it",
+                           f"use strip, bypass or ##DISABLED##; {_INLINE_WHERE}"))
+        mode = ""
+    if mode == "bypass" and not ip_set and not sec_set:
+        out.append(Finding("L18", "named-values", None, "rdwr-inline-mode " + no_proof, no_proof_fix))
+    if ip_set:
+        bad = []
+        for tok in [x.strip() for x in ip_raw.split(",") if x.strip()]:
+            try:
+                ipaddress.ip_network(tok, strict=False)
+            except ValueError:
+                bad.append(tok)
+        if bad:
+            out.append(Finding("L18", "named-values", None,
+                               "rdwr-inline-proof-addresses has entries that are not an IP address or a CIDR range: "
+                               + ", ".join(bad) + "; the connector never matches them",
+                               "list addresses or ranges, comma-separated, for example 203.0.113.0/24,198.51.100.17"))
+    # The older pair is a separate mechanism: a request a mode applies to never reads it. With
+    # rdwr-inline-mode set, a mode applies to every request of the instance.
+    if mode:
+        if (nvs.get("rdwr-inline-trusted-sources") or "").strip().lower() not in DISABLE_TOKENS:
+            out.append(Finding("L18", "named-values", None,
+                               "rdwr-inline-trusted-sources is not read where a mode applies, and rdwr-inline-mode applies to the "
+                               "whole instance: these addresses prove nothing and skip nothing",
+                               "put the addresses in rdwr-inline-proof-addresses and set rdwr-inline-trusted-sources back to "
+                               f"##DISABLED##; {_INLINE_WHERE}"))
+        if (nvs.get("rdwr-inline-headers-enabled") or "").strip().lower() == "true":
+            out.append(Finding("L18", "named-values", None,
+                               "rdwr-inline-headers-enabled is not read where a mode applies, and rdwr-inline-mode applies to the "
+                               "whole instance",
+                               f"set rdwr-inline-headers-enabled back to false; {_INLINE_WHERE}"))
+
+    modes_in_use = bool(mode)
+    for key, entry in (app_map.items() if isinstance(app_map, dict) else []):
+        v = entry.get("inline") if isinstance(entry, dict) else None
+        if not isinstance(v, str):
+            continue  # absent, or mistyped (L10)
+        lv = v.strip().lower()
+        if lv in INLINE_MODES:
+            modes_in_use = True
+        if lv not in INLINE_MODES and lv not in DISABLE_TOKENS:
+            out.append(Finding("L18", "named-values", None,
+                               f"rdwr-app-map entry '{key}' inline '{v}' is not off, strip or bypass; the connector ignores it",
+                               f"use off, strip or bypass, or remove the field; {_INLINE_WHERE}"))
+        elif lv == "bypass" and not ip_set and not sec_set:
+            out.append(Finding("L18", "named-values", None, f"rdwr-app-map entry '{key}' inline " + no_proof, no_proof_fix))
+
+    for scope, label, text in docs:
+        if not text:
+            continue
+        lines = text.splitlines()
+        for i, ln in enumerate(lines):
+            m = _INLINE_OVERRIDE_RE.search(ln)
+            if not m:
+                continue
+            v = m.group(1).strip()
+            lv = v.lower()
+            if lv.startswith("@"):
+                modes_in_use = True
+                continue  # an expression: decided per request, not checked here
+            if lv in INLINE_MODES:
+                modes_in_use = True
+            if lv not in INLINE_MODES and lv not in DISABLE_TOKENS:
+                out.append(Finding("L18", label, i + 1,
+                                   f"rdwrInlineModeOverride '{v}' is not off, strip or bypass; the connector ignores it",
+                                   f"use off, strip or bypass; {_INLINE_WHERE}"))
+            elif lv == "bypass" and not ip_set and not sec_set:
+                out.append(Finding("L18", label, i + 1, "rdwrInlineModeOverride " + no_proof, no_proof_fix))
+            # It must be set before the connector reads it. When this document carries the connector
+            # (Form 2: the securepath-inbound line; Form 3: the document's own lines), that is above
+            # those lines, and <base /> above it is where the README puts it. When a wider scope
+            # carries the connector, the connector runs at <base />, so the line goes above <base />.
+            def _is_connector(l2):
+                m2 = _INCLUDE_RE.search(l2)
+                return (m2 is not None and m2.group(1) == "securepath-inbound") or INLINE_MARKER in l2
+            if any(_is_connector(l2) for l2 in lines):
+                ran = any(_is_connector(l2) for l2 in lines[:i])
+            else:
+                ran = any(_BASE_RE.search(l2) for l2 in lines[:i])
+            if ran:
+                out.append(Finding("L18", label, i + 1,
+                                   "rdwrInlineModeOverride is set after the connector has run for this request; it has no effect there",
+                                   "move the set-variable line above <base /> (or above the connector's lines when this "
+                                   f"document carries the connector); {_INLINE_WHERE}"))
+
+    if sec_set:
+        name, sep, val = sec_raw.partition(":")
+        name, val = name.strip(), val.strip()
+        vals = [v.strip() for v in val.split(",")]
+        if not sep or not val or not all(vals) or len(vals) > 5 or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) \
+                or any(ord(c) < 0x20 or ord(c) == 0x7f for c in val):
+            out.append(Finding("L18", "named-values", None,
+                               "rdwr-inline-proof-header is not 'Header-Name: value' (one header name, a colon, then one value "
+                               "or up to five separated by commas); no request can match it, so no request is treated as coming "
+                               "from Radware Cloud WAF",
+                               f"set it to the header name, a colon and the value, for example X-Edge-Auth: <value>; {_INLINE_WHERE}"))
+        elif any(len(v) < 16 for v in vals):
+            out.append(Finding("L18", "named-values", None,
+                               "a value in rdwr-inline-proof-header is shorter than 16 characters; a short value can be guessed",
+                               "use a long random value (32 characters or more) that only Radware Cloud WAF's traffic carries"))
+        elif not modes_in_use:
+            out.append(Finding("L18", "named-values", None,
+                               "rdwr-inline-proof-header is set but has no effect until rdwr-inline-mode (or a per-application "
+                               "or per-API inline setting) is strip or bypass",
+                               f"set rdwr-inline-mode, or set this Named Value back to ##DISABLED##; {_INLINE_WHERE}"))
+    return out
+
+
 def check_bot_block_statuses(value: str, bot_manager: str, where: str) -> List[Finding]:
     """L13: rdwr-custom-bot-block-statuses (or a map entry's bot_block_statuses) must be a disable
     token, "*", or a comma-separated list of status codes; 200/301/302/403 have no effect there,
@@ -541,7 +682,8 @@ def lint_instance(reader: Reader, check_operations: bool = False) -> List[Findin
     nvs = reader.named_values()
     for name in REQUIRED_NAMED_VALUES:
         if name not in nvs:
-            new = " (new in v1.4.0)" if name in NEW_IN_140 else ""
+            new = " (new in v1.4.0)" if name in NEW_IN_140 else (
+                " (new in v1.6.0; create it with the value ##DISABLED##)" if name in NEW_IN_160 else "")
             findings.append(Finding(
                 "L07", "named-values", None, f"required Named Value {name} is missing{new}",
                 "create it (README Step 3); the policy upload is rejected without it"))
@@ -614,12 +756,14 @@ def lint_instance(reader: Reader, check_operations: bool = False) -> List[Findin
     # wider scopes, so a single operation can silently lose the connector — no inspection and no
     # reserved-header enforcement (measured on a live instance, 2026-09-07). Off by default: it
     # costs one call per operation, which is slow on an instance with hundreds of them.
+    op_docs: List[Tuple[str, str, Optional[str]]] = []      # operation policies, read only with --operations
     if check_operations and (global_has or any(sc == "product" for sc, _ in with_connector)):
         for api_id in reader.apis():
             for op_id in reader.operations(api_id):
                 text = reader.operation_policy(api_id, op_id)
                 if not text:
                     continue
+                op_docs.append(("operation", f"api {api_id} / operation {op_id}", text))
                 sections = split_sections(text)
                 for name in ("inbound", "outbound", "on-error"):
                     start, body = sections.get(name, (None, None))
@@ -660,7 +804,8 @@ def lint_instance(reader: Reader, check_operations: bool = False) -> List[Findin
                     for field, ok, want in (("port", lambda v: isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 65535, "a port number from 1 to 65535"),
                                             ("ssl", lambda v: isinstance(v, bool), "true or false"),
                                             ("bot_manager", lambda v: isinstance(v, bool), "true or false"),
-                                            ("bot_block_statuses", lambda v: isinstance(v, str), "a quoted list such as '429,418'")):
+                                            ("bot_block_statuses", lambda v: isinstance(v, str), "a quoted list such as '429,418'"),
+                                            ("inline", lambda v: isinstance(v, str), "'off', 'strip' or 'bypass'")):
                         if entry.get(field) is not None and not ok(entry[field]):
                             findings.append(Finding("L10", "named-values", None,
                                                     f"rdwr-app-map entry '{key}' {field} is {json.dumps(entry[field])}, not {want}",
@@ -682,6 +827,7 @@ def lint_instance(reader: Reader, check_operations: bool = False) -> List[Findin
                     f"TLS validation and traffic is served uninspected",
                     "create the backend entity for this endpoint (README Step 1, Path B)"))
     findings.extend(check_host_settings(nvs))
+    findings.extend(check_inline_settings(nvs, app_map, docs + op_docs))
     if "rdwr-custom-bot-block-statuses" in nvs:
         findings.extend(check_bot_block_statuses(nvs.get("rdwr-custom-bot-block-statuses", ""), nvs.get("rdwr-bot-manager-enabled", ""), "rdwr-custom-bot-block-statuses"))
     findings.extend(check_captcha_api(reader, docs, global_has, bool(with_connector),
@@ -928,7 +1074,51 @@ def redact_trace(trace: dict) -> int:
     # the variables that hold it, or the selected entry, are replaced whole.
     text_keys = ("value", "message")
     secret_names = ("rdwrapikey", "x-rdwr-api-key", "rdwrappmapraw", "rdwrappmapgenerated", "rdwrappmapjson",
-                    "rdwrappselection")
+                    "rdwrappselection", "rdwrinlinesecretheadercfg")
+
+    # rdwr-inline-secret-header is "Header-Name: value[, value]". The trace holds it in a variable
+    # and repeats the value in every copy of the request's headers, under a header name only the
+    # Named Value knows. Collect the values first, then remove them wherever they appear.
+    inline_secrets = set()
+
+    def collect(o):
+        if isinstance(o, dict):
+            if isinstance(o.get("name"), str) and o["name"].lower() == "rdwrinlinesecretheadercfg":
+                for k in text_keys:
+                    v = o.get(k)
+                    if isinstance(v, str) and ":" in v:
+                        inline_secrets.update(x.strip() for x in v.partition(":")[2].split(",") if len(x.strip()) >= 4)
+            for v in o.values():
+                collect(v)
+        elif isinstance(o, list):
+            for v in o:
+                collect(v)
+    collect(trace)
+
+    def wipe(o):
+        nonlocal n
+        if isinstance(o, dict):
+            for k, v in list(o.items()):
+                if isinstance(v, str):
+                    new = v
+                    for s in inline_secrets:
+                        new = new.replace(s, "<redacted>")
+                    if new != v:
+                        o[k] = new; n += 1
+                else:
+                    wipe(v)
+        elif isinstance(o, list):
+            for i, v in enumerate(o):
+                if isinstance(v, str):
+                    new = v
+                    for s in inline_secrets:
+                        new = new.replace(s, "<redacted>")
+                    if new != v:
+                        o[i] = new; n += 1
+                else:
+                    wipe(v)
+    if inline_secrets:
+        wipe(trace)
 
     def scrub(o, parent_name=None):
         nonlocal n
@@ -1039,7 +1229,7 @@ def format_trace_summary(s: dict) -> str:
     elif s["verdict_status"] == 200:
         verdict = "block (SecurePath 200 without an allow marker)"
     elif s["bypassed"]:
-        verdict = "not inspected: a bypass rule matched (static extension, excluded method or inline trusted source) — expected for such requests"
+        verdict = "not inspected: a bypass rule matched (static extension, excluded method or inline bypass) — expected for such requests"
     else:
         verdict = "-"
     lines = [
